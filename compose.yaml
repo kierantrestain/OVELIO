@@ -2,7 +2,7 @@ x-postgres: &postgres
   image: postgres:17.9-alpine
   restart: unless-stopped
   healthcheck:
-    test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+    test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
     interval: 5s
     timeout: 4s
     retries: 30
@@ -43,6 +43,11 @@ x-platform-env: &platform-env
   SMTP_RELAY_PASSWORD: "${SMTP_RELAY_PASSWORD:-}"
   SMTP_DKIM_SELECTOR: "${SMTP_DKIM_SELECTOR:-}"
   SMTP_VERIFIED_DOMAIN: "${SMTP_VERIFIED_DOMAIN:-}"
+  AUTH0_DOMAIN: "${AUTH0_DOMAIN:-}"
+  AUTH0_CLIENT_ID: "${AUTH0_CLIENT_ID:-}"
+  AUTH0_CLIENT_SECRET: "${AUTH0_CLIENT_SECRET:-}"
+  AUTH0_DEFAULT_ROLE: "${AUTH0_DEFAULT_ROLE:-analyst}"
+  AUTH0_AUTO_PROVISION: "${AUTH0_AUTO_PROVISION:-false}"
 
 x-platform-runtime: &platform-runtime
   <<: *platform
@@ -324,7 +329,7 @@ services:
     volumes: [umami-data:/var/lib/postgresql/data]
 
   umami:
-    image: ghcr.io/umami-software/umami:3.5.0
+    image: umamisoftware/umami:3.5.0
     init: true
     restart: unless-stopped
     environment:

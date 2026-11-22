@@ -23,13 +23,24 @@ OVELIO_PORT=3101 MAILPIT_PORT=8026 sh deploy/init-env.sh .env.client2
 docker compose --env-file .env.client2 -p ovelio-client2 up -d --wait --wait-timeout 420
 ```
 
+## Architecture
+
+| Layer | Responsibility |
+| --- | --- |
+| OVELIO console (Next.js, TypeScript) | Sign-in, roles, navigation, `Cmd/Ctrl+K` command palette, toasts, drawers and every screen. Built on Meta's [Astryx](https://github.com/meta/astryx) design system with OVELIO's own colour tokens. |
+| OVELIO API (`/api/console/*`) | One authenticated gateway with typed adapters in `src/server/{mautic,listmonk,umami}` plus multipart media uploads. Engine credentials stay server-side. |
+| Worker and SMTP policy | Retried, idempotent jobs for contact and segment sync, suppression and erasure; a consent and suppression check before every relayed email. |
+| Engines | Mautic 7.2.2 holds contacts, custom fields, segments, dynamic filters, tags, stages, companies, categories, lead scoring, notes, forms, assets, landing pages, dynamic web content, popups & bars, reports, webhooks and multi-action journeys. Listmonk 6.2.0 delivers newsletters, public archives, templates, media, bounces and transactional emails. Umami 3.5.0 records website traffic, realtime visitors, expanded metrics, events feed, sessions, heatmaps, saved segments & cohorts, goals, saved funnels, journeys, retention, attribution, revenue, Core Web Vitals, breakdowns, annotations, tracked links and pixels. Each keeps its own database on an isolated network. |
+
+Interface code lives in `src/components`: `ui.tsx` is the shared OVELIO kit over Astryx (panels, metrics, charts, heatmaps, alert dialogs, drawers, filter tokens, progress bars, feedback), `shell.tsx` is the application frame with breadcrumbs and command palette, and each section has one file. Contracts shared by the console and the API are in `src/contracts`.
+
 ## First workflows
 
-1. Import an Audience CSV with `email`, `first_name`, `last_name`, `company`, `tags` and `consent`. Only `email` is required. Use `opted_in` and record where and when permission was obtained for recipients who have given it.
-2. Create a segment, add contacts from their detail pages, and sync the segment. The corresponding list appears in Campaigns when the worker has finished.
-3. Create a newsletter draft, preview the email and send a test to a contact with recorded consent before starting or scheduling the campaign.
-4. Create a journey email and an automation for a trigger segment. Add steps and enable it. Adding a consenting contact to the segment enrolls them on the engine's next update.
-5. Add a website in Analytics and install its tracking snippet. Create a goal for a page or a custom event. Use separate goal and campaign reports when the connection between a visit and a recipient has not been established.
+1. Import an Audience CSV with `email`, `first_name`, `last_name`, `company`, `phone`, `position`, `city`, `country`, `website`, `tags` and `consent` (download the starter CSV template inside the Import dialog). Use `opted_in` and record where and when permission was obtained for recipients who have given it.
+2. Create dynamic or manual segments, custom contact and company fields, tags, lifecycle stages, B2B companies, lead scoring rules/triggers and suppressions, sync segments into newsletter mailing lists, and inspect unified contact engagement, bounces and direct email sends.
+3. Compose newsletters with the split HTML editor and live Desktop/Mobile preview, manage reusable campaign and transactional templates, upload images in the Media library, publish public web archives, preview and send tests to consenting contacts before starting or scheduling delivery, and inspect opens, clicks, bounces and clicked links.
+4. Create journey emails, custom lead capture forms (with submissions viewer and embed code), downloadable assets, landing pages, dynamic web content slots, website popups and bars, categories, webhooks and multi-action automations (email, tags, points, segment, stage) triggered by segments or forms.
+5. Add a website in Analytics and install its tracking snippet. Explore live realtime visitors, compact and expanded breakdowns across 22 dimensions, saved segments and cohorts, raw events feed, weekly heatmaps, anonymous sessions and properties, goals, saved funnels, user journeys, retention cohorts, first/last-click attribution, revenue, Core Web Vitals, annotations, tracked links and pixels with charts, and native marketing reports.
 
 ## Production
 
@@ -43,13 +54,15 @@ Set `OVELIO_HOST` to your DNS name and `APP_ORIGIN` to its HTTPS origin. Keep DN
 | `SMTP_RELAY_USERNAME`, `SMTP_RELAY_PASSWORD` | Provider SMTP credentials |
 | `SMTP_DKIM_SELECTOR` | Provider's DKIM selector for the Settings DNS check |
 | `SMTP_VERIFIED_DOMAIN` | From domain after the provider has confirmed verification |
+| `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` | Optional Auth0 OIDC login (set Allowed Callback URL to `<APP_ORIGIN>/api/auth/auth0/callback` and Allowed Logout URL to `<APP_ORIGIN>/login`) |
+| `AUTH0_AUTO_PROVISION`, `AUTH0_DEFAULT_ROLE` | Optional (`true` to auto-create new Auth0 users with role `analyst`, `marketer` or `admin`; first user in an empty workspace becomes `admin`) |
 
 ```sh
 docker compose -f compose.yaml -f compose.production.yaml build app
 docker compose -f compose.yaml -f compose.production.yaml up -d --wait --wait-timeout 420
 ```
 
-Caddy terminates HTTPS. The engines each use their own database on an isolated network. Their management APIs, databases and SMTP policy listener have no published ports. Only tracking, public forms and email links are forwarded to engines. The SMTP policy service checks consent and suppression before relaying email over TLS. Verify DNS, the provider's sender authorization, a seed-inbox delivery and authenticated feedback before a production send. [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
+Caddy terminates HTTPS. The engines each use their own database on an isolated network. Their management APIs, databases and SMTP policy listener have no published ports. Only tracking, public forms, downloadable assets, media uploads and email links are forwarded to engines. The SMTP policy service checks consent and suppression before relaying email over TLS. Verify DNS, the provider's sender authorization, a seed-inbox delivery and authenticated feedback before a production send. [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
 
 Send authenticated, normalized permanent bounce, complaint and unsubscribe notifications to `POST /api/delivery/suppress` with `Authorization: Bearer <SUPPRESSION_WEBHOOK_SECRET>` and JSON `{"email":"recipient@example.com","reason":"bounce"}`. Verify the provider's signature in your provider adapter before forwarding. The supported reasons are `bounce`, `complaint` and `unsubscribe`. SMTP relay acceptance alone does not establish inbox delivery.
 
@@ -90,4 +103,12 @@ npm run test:integration
 npm run test:e2e
 ```
 
-The integration and browser suites require the local Compose stack and use synthetic addresses. CI also checks restart persistence, a second installation, and a restore into a fresh project. See [Third-party notices](NOTICE.md) before redistributing OVELIO.
+The integration and browser suites require the local Compose stack and use synthetic addresses. Set `OVELIO_TEST_CHROMIUM` to use an existing Chromium binary instead of installing one. CI also checks restart persistence, a second installation, and a restore into a fresh project. See [Third-party notices](NOTICE.md) before redistributing OVELIO.
+
+## Known limitations
+
+- Delivery confirmation depends on the SMTP provider. Relay acceptance is recorded, but delivered, bounce and complaint counts appear only when the provider forwards authenticated feedback to `POST /api/delivery/suppress`.
+- Workflows use a step-based editor over Mautic campaigns supporting segment or form triggers, delays, open/click conditions, and email, tag, point, segment and stage actions. Free-form branching canvases and custom negative-path decision trees remain available only in the engine.
+- Website visitors stay anonymous. Email and website reports are shown side by side, and visits are attributed to campaigns only through UTM parameters and session attribution models.
+- Downloadable remote assets require a publicly reachable URL from the Mautic container so the engine can verify the file MIME type.
+- Each client runs as a separate Compose project with its own credentials and volumes. There is no shared multi-tenant control plane.

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useToast } from '@astryxdesign/core/Toast';
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: 'no-store' });
@@ -18,6 +19,12 @@ export function api<T>(path: string, method = 'GET', body?: unknown) {
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+export function upload<T>(path: string, file: File) {
+  const form = new FormData();
+  form.append('file', file);
+  return request<T>('/api/console' + path, { method: 'POST', body: form });
 }
 
 type DataState<T> = { path: string; revision: number; data?: T; error?: string };
@@ -50,6 +57,7 @@ export function useAction() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const toast = useToast();
 
   async function run(task: () => Promise<void>, success?: string) {
     if (busy) return;
@@ -58,9 +66,13 @@ export function useAction() {
     setNotice(undefined);
     try {
       await task();
-      if (success) setNotice(success);
+      if (success) {
+        setNotice(success);
+        toast({ body: success, type: 'info' });
+      }
     } catch (error) {
-      setError(message(error));
+      const text = message(error);
+      setError(text);
     } finally {
       setBusy(false);
     }
@@ -77,3 +89,35 @@ export const date = (value: string | number | null | undefined) => value == null
   dateStyle: 'medium',
   timeStyle: typeof value === 'string' && value.includes('T') ? 'short' : undefined,
 }).format(new Date(value));
+
+export function duration(seconds: number | null | undefined) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const whole = Math.round(seconds);
+  if (whole < 60) return `${whole}s`;
+  const mins = Math.floor(whole / 60);
+  const secs = whole % 60;
+  if (mins < 60) return secs ? `${mins}m ${secs}s` : `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
+}
+
+/** Controlled form state for Astryx inputs: `field('name')` spreads `value` and `onChange`. */
+export function useFields<T extends Record<string, string>>(initial: T) {
+  const [values, setValues] = useState(initial);
+  const field = (name: keyof T & string) => ({
+    value: values[name],
+    onChange: (value: string) => setValues(current => ({ ...current, [name]: value })),
+  });
+  return { values, setValues, field };
+}
+
+/** Offers generated content to the browser as a download. */
+export function saveFile(content: string, filename: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

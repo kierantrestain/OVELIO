@@ -1,8 +1,21 @@
 import { Settings } from '@/components/settings';
+import type { SettingsTab } from '@/components/settings';
 
 export const metadata = { title: 'Settings' };
 
-export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ view?: string }> }) {
-  const connections = (await searchParams).view === 'connections';
-  return <Settings key={connections ? 'connections' : 'company'} initialTab={connections ? 'Connections' : 'Company'} />;
+const validTabs: readonly SettingsTab[] = ['Company', 'Team', 'Connections', 'Data & privacy'];
+
+function resolveTab(tab?: string, view?: string): SettingsTab {
+  const candidate = (tab ?? view)?.trim().toLowerCase();
+  return validTabs.find(item => item.toLowerCase() === candidate) ?? 'Company';
+}
+
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string; tab?: string }>;
+}) {
+  const params = await searchParams;
+  const initialTab = resolveTab(params.tab, params.view);
+  return <Settings key={initialTab} initialTab={initialTab} />;
 }

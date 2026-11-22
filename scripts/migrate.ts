@@ -4,8 +4,22 @@ import { db, transaction } from '../src/server/db';
 import { requiredEnv } from '../src/server/config';
 import { hashPassword } from '../src/server/password';
 
+const TRANSIENT_CODES = new Set(['57P03', '57P01', '08001', '08006', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT']);
+
+async function connectWithRetry(attempts = 15, delayMs = 1000) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await db.connect();
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+      if (attempt >= attempts || !TRANSIENT_CODES.has(code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 const folder = new URL('../migrations/', import.meta.url);
-const lock = await db.connect();
+const lock = await connectWithRetry();
 try {
   await lock.query('SELECT pg_advisory_lock(64337000)');
   await lock.query(`CREATE TABLE IF NOT EXISTS schema_migrations

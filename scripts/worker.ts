@@ -12,6 +12,7 @@ let running = true;
 let cursor = 0;
 let tick = 0;
 let priorDelivery = false;
+let samplesChecked = false;
 const relay = createRelay();
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
@@ -41,6 +42,10 @@ async function housekeeping() {
     if (config.changed) await wait(2500);
     if ((await listmonk.health()).status === 'ready' && !config.needsRestart) {
       delivery = await relay.verify();
+      if (!samplesChecked) {
+        await listmonk.removeInstallSample();
+        samplesChecked = true;
+      }
     }
   } catch (error) {
     logError('delivery-setup', error);

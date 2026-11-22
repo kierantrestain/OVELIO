@@ -1,22 +1,40 @@
 import { readFileSync } from 'node:fs';
 import type {
-  Campaign, CampaignInput, DateRange, Health, MailingList, Page, Point, Subscriber, SubscriberInput, Template,
+  BounceRecord, Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, DateRange, Health, MailingList,
+  MailingListInput, MaintenanceResult, MediaItem, Page, Point, RunningCampaignStat, Subscriber, SubscriberActivity,
+  SubscriberBounce, SubscriberInput, Template, TemplateInput, TransactionalEmailInput,
 } from '../../contracts';
 import { basic, upstream, upstreamResponse, UpstreamError } from '../upstream';
 
 const service = 'delivery';
 const footer = '<!-- ovelio:unsubscribe --><p style="font-size:12px"><a href="{{ UnsubscribeURL }}">Unsubscribe</a></p><!-- /ovelio:unsubscribe -->';
+const plainFooter = '\n\nUnsubscribe: {{ UnsubscribeURL }}';
 const pixel = '<!-- ovelio:open -->{{ TrackView }}<!-- /ovelio:open -->';
 const contentSlot = '{{ template "content" . }}';
 const hasUnsubscribe = /href\s*=\s*["']\s*{{\s*UnsubscribeURL\b/i;
+const hasPlainUnsubscribe = /{{\s*UnsubscribeURL\b/;
 const hasOpenTracking = /{{\s*TrackView\b/;
 const links = /(<a\b[^>]*?\shref\s*=\s*)(["'])(https?:\/\/[^"'<>\s{}]+)\2/gi;
+const contentTypes = new Set<string>(['html', 'richtext', 'markdown', 'plain']);
+const analyticsExportTypes = new Set(['views', 'clicks']);
+const analyticsCleanupTypes = new Set(['all', 'views', 'clicks']);
+const subscriberCleanupTypes = new Set(['orphan', 'blocklisted']);
 const emailKey = (email: string) => email.trim().toLowerCase();
 
 type Options = { url?: string; username?: string; password?: string; passwordFile?: string; fetch?: typeof fetch };
 type Pagination = { page?: number; limit?: number };
+type CampaignContentType = NonNullable<CampaignInput['contentType']>;
 type NativePage<T> = { results?: T[] | null; total?: number; page?: number; per_page?: number };
-type NativeList = { id: number; name: string; subscriber_count?: number; tags?: string[] | null; subscription_status?: string };
+type NativeList = {
+  id: number;
+  name: string;
+  description?: string | null;
+  type?: string;
+  optin?: string;
+  subscriber_count?: number;
+  tags?: string[] | null;
+  subscription_status?: string;
+};
 type NativeSubscriber = {
   id: number;
   email: string;
@@ -30,21 +48,82 @@ type NativeCampaign = {
   name: string;
   subject: string;
   body: string;
+  altbody?: string | null;
   status: string;
   type?: string;
   from_email?: string;
   template_id?: number | null;
   content_type?: string;
+  tags?: string[] | null;
+  archive?: boolean;
+  archive_slug?: string | null;
   messenger?: string;
   send_at?: string | null;
   created_at?: string | null;
+  to_send?: number;
   sent?: number;
   views?: number;
   clicks?: number;
   bounces?: number;
   lists?: { id: number; name: string }[] | null;
 };
-type NativeTemplate = { id: number; name: string; type: string; body?: string; is_default?: boolean };
+type NativeRunningStat = {
+  id: number;
+  status: string;
+  to_send?: number;
+  sent?: number;
+  rate?: number;
+  net_rate?: number;
+  started_at?: string | null;
+};
+type NativeTemplate = {
+  id: number;
+  name: string;
+  type: string;
+  subject?: string;
+  body?: string;
+  is_default?: boolean;
+};
+type NativeMedia = {
+  id: number;
+  uuid: string;
+  filename: string;
+  content_type?: string;
+  url: string;
+  thumb_url?: string | null;
+  created_at?: string | null;
+};
+type NativeBounce = {
+  id: number;
+  email: string;
+  subscriber_id?: number;
+  type?: string;
+  source?: string;
+  campaign?: { id?: number; name?: string } | null;
+  created_at?: string | null;
+};
+type NativeSubscriberView = {
+  campaign_id?: number | string | null;
+  campaign_name?: string | null;
+  created_at?: string | null;
+};
+type NativeSubscriberClick = {
+  campaign_id?: number | string | null;
+  campaign_name?: string | null;
+  url?: string | null;
+  created_at?: string | null;
+};
+type NativeSubscriberActivity = {
+  campaign_views?: NativeSubscriberView[] | null;
+  link_clicks?: NativeSubscriberClick[] | null;
+};
+type NativeSubscriberBounce = {
+  id?: number | string | null;
+  type?: string | null;
+  source?: string | null;
+  campaign?: { id?: number | string | null; name?: string | null } | null;
+  created_at?: string | null;
+};
 type NativeSettings = Record<string, unknown> & {
   smtp?: Array<Record<string, unknown>>;
   'privacy.disable_tracking'?: boolean;
@@ -62,7 +141,25 @@ type DeliveryOptions = {
 };
 
 function listFromNative(list: NativeList): MailingList {
-  return { id: list.id, name: list.name, tags: list.tags ?? [], subscriberCount: list.subscriber_count ?? null };
+  return {
+    id: list.id,
+    name: list.name,
+    description: list.description ?? '',
+    type: list.type,
+    optin: list.optin,
+    tags: list.tags ?? [],
+    subscriberCount: list.subscriber_count ?? null,
+  };
+}
+
+function listPayload(input: MailingListInput) {
+  return {
+    name: input.name,
+    description: input.description ?? '',
+    type: input.type ?? 'private',
+    optin: input.optin ?? 'double',
+    tags: input.tags ?? [],
+  };
 }
 
 function subscriberFromNative(subscriber: NativeSubscriber): Subscriber {
@@ -78,6 +175,7 @@ function removedAdditions(body: string) {
   return body
     .replace(footer, '')
     .replace(pixel, '')
+    .replace(plainFooter, '')
     .replace(links, (_match, before: string, quote: string, url: string) =>
       before + quote + url.replace(/@TrackLink$/, '') + quote);
 }
@@ -97,6 +195,111 @@ function emailBody(body: string, outerTemplate = '', trackLinks = true) {
   const unsubscribe = hasUnsubscribe.test(tracked + outerTemplate) ? '' : footer;
   const open = hasOpenTracking.test(tracked + outerTemplate) ? '' : pixel;
   return beforeBodyClose(tracked, unsubscribe + open);
+}
+
+function normalizeContentType(value?: string | null): CampaignContentType | undefined {
+  return value && contentTypes.has(value) ? value as CampaignContentType : undefined;
+}
+
+function templatePayload(input: TemplateInput) {
+  const type = input.type ?? 'campaign';
+  if (type === 'tx') {
+    return {
+      name: input.name,
+      type: 'tx' as const,
+      subject: input.subject ?? '',
+      body: input.body,
+    };
+  }
+  const body = /{{\s*template\s+"content"\s+\.\s*}}/.test(input.body)
+    ? input.body
+    : beforeBodyClose(input.body, contentSlot);
+  return {
+    name: input.name,
+    type: 'campaign' as const,
+    ...(input.subject !== undefined ? { subject: input.subject } : {}),
+    body: emailBody(body),
+  };
+}
+
+function templateFromNative(template: NativeTemplate, fallbackBody = ''): Template {
+  return {
+    id: template.id,
+    name: template.name,
+    body: removedAdditions(template.body ?? fallbackBody),
+    type: template.type,
+    subject: template.subject || undefined,
+    isDefault: Boolean(template.is_default),
+  };
+}
+
+function mediaFromNative(item: NativeMedia): MediaItem {
+  return {
+    id: item.id,
+    uuid: item.uuid,
+    filename: item.filename,
+    contentType: item.content_type ?? 'application/octet-stream',
+    url: item.url,
+    thumbUrl: item.thumb_url || null,
+    createdAt: item.created_at ?? null,
+  };
+}
+
+function str(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function num(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function bounceFromNative(bounce: NativeBounce): BounceRecord {
+  return {
+    id: bounce.id,
+    email: bounce.email,
+    subscriberId: bounce.subscriber_id ?? 0,
+    type: bounce.type ?? 'hard',
+    source: bounce.source ?? '',
+    campaignName: bounce.campaign?.name || null,
+    createdAt: bounce.created_at ?? null,
+  };
+}
+
+function subscriberActivityFromNative(raw: NativeSubscriberActivity | null | undefined): SubscriberActivity {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const views = Array.isArray(data.campaign_views)
+    ? data.campaign_views
+      .filter((item): item is NativeSubscriberView => item !== null && typeof item === 'object')
+      .map((item) => ({
+        campaignId: num(item.campaign_id),
+        campaignName: str(item.campaign_name),
+        at: str(item.created_at),
+      }))
+    : [];
+  const clicks = Array.isArray(data.link_clicks)
+    ? data.link_clicks
+      .filter((item): item is NativeSubscriberClick => item !== null && typeof item === 'object')
+      .map((item) => ({
+        campaignId: num(item.campaign_id),
+        campaignName: str(item.campaign_name),
+        url: str(item.url),
+        at: str(item.created_at),
+      }))
+    : [];
+  return { views, clicks };
+}
+
+function subscriberBounceFromNative(bounce: NativeSubscriberBounce): SubscriberBounce {
+  const parsedCampaignId = num(bounce.campaign?.id);
+  return {
+    id: num(bounce.id),
+    type: str(bounce.type) || 'hard',
+    source: str(bounce.source),
+    campaignId: parsedCampaignId > 0 ? parsedCampaignId : null,
+    campaignName: str(bounce.campaign?.name) || null,
+    createdAt: str(bounce.created_at) || null,
+  };
 }
 
 function withPagination(options: Pagination) {
@@ -129,9 +332,15 @@ function campaignFromNative(campaign: NativeCampaign, settings: NativeSettings =
     name: campaign.name,
     subject: campaign.subject,
     body: removedAdditions(campaign.body ?? ''),
+    altBody: campaign.altbody || undefined,
+    contentType: normalizeContentType(campaign.content_type),
+    tags: campaign.tags ?? [],
+    archive: Boolean(campaign.archive),
+    archiveSlug: str(campaign.archive_slug) || undefined,
     status: campaign.status,
     sendAt: campaign.send_at ?? null,
     createdAt: campaign.created_at ?? null,
+    toSend: campaign.to_send ?? null,
     listIds: (campaign.lists ?? []).filter((list) => list.id > 0).map((list) => list.id),
     fromEmail: campaign.from_email || undefined,
     templateId: campaign.template_id || undefined,
@@ -217,21 +426,35 @@ export function createListmonk(options: Options) {
       ? existing.find((item) => item.id === input.templateId && item.type === 'campaign')
       : existing.find((item) => item.is_default && item.type === 'campaign');
     if (input.templateId && !template) throw new UpstreamError(service, 400, 'Choose an available newsletter template.');
+    const contentType = input.contentType ?? 'html';
+    const body = contentType === 'html' || contentType === 'richtext'
+      ? emailBody(input.body, template?.body)
+      : contentType === 'plain'
+        ? (hasPlainUnsubscribe.test(input.body) ? input.body : input.body + plainFooter)
+        : input.body;
     return {
       name: input.name,
       subject: input.subject,
-      body: emailBody(input.body, template?.body),
+      body,
+      ...(input.altBody !== undefined ? { altbody: input.altBody } : {}),
       lists: input.listIds.map(safeId),
       from_email: input.fromEmail ?? '',
       template_id: template?.id ?? null,
-      content_type: 'html',
+      content_type: contentType,
+      tags: input.tags ?? [],
+      archive: Boolean(input.archive),
       type: 'regular',
       messenger: 'email',
     };
   }
 
-  async function setCampaignStatus(id: number, status: 'draft' | 'running' | 'scheduled' | 'paused') {
+  async function setCampaignStatus(id: number, status: 'draft' | 'running' | 'scheduled' | 'paused' | 'cancelled') {
     return request<NativeCampaign>(`/api/campaigns/${safeId(id)}/status`, 'PUT', { status });
+  }
+
+  async function getCampaign(id: number): Promise<Campaign> {
+    const [campaign, metrics] = await Promise.all([nativeCampaign(id), metricSettings()]);
+    return campaignFromNative(campaign, metrics);
   }
 
   return {
@@ -259,17 +482,16 @@ export function createListmonk(options: Options) {
       }
     },
 
-    async createList(input: { name: string; tags?: string[] }): Promise<MailingList> {
-      return listFromNative(await request<NativeList>('/api/lists', 'POST', {
-        name: input.name, tags: input.tags ?? [], type: 'private', optin: 'double',
-      }));
+    async createList(input: MailingListInput): Promise<MailingList> {
+      return listFromNative(await request<NativeList>('/api/lists', 'POST', listPayload(input)));
     },
 
-    async subscribers(options: Pagination = {}): Promise<Page<Subscriber>> {
-      const query = withPagination(options);
-      query.set('order', 'ASC');
-      const page = await request<NativePage<NativeSubscriber>>(`/api/subscribers?${query}`);
-      return mappedPage(page, options, subscriberFromNative);
+    async updateList(id: number, input: MailingListInput): Promise<MailingList> {
+      return listFromNative(await request<NativeList>(`/api/lists/${safeId(id)}`, 'PUT', listPayload(input)));
+    },
+
+    async deleteList(id: number): Promise<void> {
+      await request<boolean>(`/api/lists/${safeId(id)}`, 'DELETE');
     },
 
     async subscriber(id: number): Promise<Subscriber | null> {
@@ -351,6 +573,34 @@ export function createListmonk(options: Options) {
       await request<boolean>(`/api/subscribers/${safeId(id)}`, 'DELETE');
     },
 
+    async resendOptin(subscriberId: number): Promise<void> {
+      await request<boolean>(`/api/subscribers/${safeId(subscriberId)}/optin`, 'POST');
+    },
+
+    async subscriberActivity(subscriberId: number): Promise<SubscriberActivity> {
+      const data = await request<NativeSubscriberActivity | null>(`/api/subscribers/${safeId(subscriberId)}/activity`);
+      return subscriberActivityFromNative(data);
+    },
+
+    async subscriberBounces(subscriberId: number): Promise<SubscriberBounce[]> {
+      const data = await request<NativeSubscriberBounce[] | NativePage<NativeSubscriberBounce> | null>(
+        `/api/subscribers/${safeId(subscriberId)}/bounces`,
+      );
+      const rows = Array.isArray(data) ? data : (Array.isArray(data?.results) ? data.results : []);
+      return rows
+        .filter((item): item is NativeSubscriberBounce => item !== null && typeof item === 'object')
+        .map(subscriberBounceFromNative);
+    },
+
+    async deleteSubscriberBounces(subscriberId: number): Promise<void> {
+      try {
+        await request<boolean>(`/api/subscribers/${safeId(subscriberId)}/bounces`, 'DELETE');
+      } catch (error) {
+        if (isStatus(error, 404)) return;
+        throw error;
+      }
+    },
+
     async ensureTestSubscriber(email: string): Promise<Subscriber> {
       const address = emailKey(email);
       const existing = await findNativeSubscriber(address);
@@ -367,18 +617,27 @@ export function createListmonk(options: Options) {
       }
     },
 
-    async campaigns(options: Pagination & { status?: string[] } = {}): Promise<Page<Campaign>> {
+    async campaigns(options: Pagination & { status?: string[]; query?: string } = {}): Promise<Page<Campaign>> {
       const query = withPagination(options);
       for (const status of options.status ?? []) query.append('status', status);
+      if (options.query?.trim()) query.set('query', options.query.trim());
       const [data, metrics] = await Promise.all([
         request<NativePage<NativeCampaign>>(`/api/campaigns?${query}`), metricSettings(),
       ]);
       return mappedPage(data, options, (campaign) => campaignFromNative(campaign, metrics));
     },
 
+    /** Removes the untouched sample draft that a fresh newsletter-engine install seeds. Idempotent. */
+    async removeInstallSample(): Promise<boolean> {
+      const data = await request<NativePage<NativeCampaign>>('/api/campaigns?status=draft&per_page=50');
+      const sample = data.results?.find(item => item.name === 'Test campaign' && /^Welcome to listmonk$/i.test(item.subject));
+      if (!sample) return false;
+      await request(`/api/campaigns/${safeId(sample.id)}`, 'DELETE');
+      return true;
+    },
+
     async campaign(id: number): Promise<Campaign> {
-      const [campaign, metrics] = await Promise.all([nativeCampaign(id), metricSettings()]);
-      return campaignFromNative(campaign, metrics);
+      return getCampaign(id);
     },
 
     async createCampaign(input: CampaignInput): Promise<Campaign> {
@@ -389,6 +648,19 @@ export function createListmonk(options: Options) {
     async updateCampaign(id: number, input: CampaignInput): Promise<Campaign> {
       const payload = await campaignPayload(input);
       return campaignFromNative(await request<NativeCampaign>(`/api/campaigns/${safeId(id)}`, 'PUT', payload));
+    },
+
+    async updateCampaignArchive(id: number, input: CampaignArchiveInput): Promise<Campaign> {
+      const campaignId = safeId(id);
+      await request<unknown>(`/api/campaigns/${campaignId}/archive`, 'PUT', {
+        archive: input.archive,
+        ...(input.archiveSlug !== undefined ? { archive_slug: input.archiveSlug } : {}),
+      });
+      return getCampaign(campaignId);
+    },
+
+    async deleteCampaign(id: number): Promise<void> {
+      await request<boolean>(`/api/campaigns/${safeId(id)}`, 'DELETE');
     },
 
     async scheduleCampaign(id: number, sendAt: string): Promise<Campaign> {
@@ -420,6 +692,42 @@ export function createListmonk(options: Options) {
       return campaignFromNative(await setCampaignStatus(id, 'draft'));
     },
 
+    async cancelCampaign(id: number): Promise<Campaign> {
+      return campaignFromNative(await setCampaignStatus(id, 'cancelled'));
+    },
+
+    async cloneCampaign(id: number, name?: string): Promise<Campaign> {
+      const current = await nativeCampaign(id);
+      const cloneName = name?.trim() || `${current.name} (Copy)`;
+      return campaignFromNative(await request<NativeCampaign>('/api/campaigns', 'POST', {
+        name: cloneName,
+        subject: current.subject,
+        body: current.body,
+        ...(current.altbody ? { altbody: current.altbody } : {}),
+        lists: (current.lists ?? []).filter((list) => list.id > 0).map((list) => list.id),
+        from_email: current.from_email ?? '',
+        template_id: current.template_id ?? null,
+        content_type: current.content_type ?? 'html',
+        tags: current.tags ?? [],
+        archive: Boolean(current.archive),
+        type: current.type ?? 'regular',
+        messenger: current.messenger ?? 'email',
+      }));
+    },
+
+    async runningCampaignStats(): Promise<RunningCampaignStat[]> {
+      const rows = await request<NativeRunningStat[] | null>('/api/campaigns/running/stats');
+      return (rows ?? []).map((row) => ({
+        id: row.id,
+        status: row.status,
+        toSend: row.to_send ?? 0,
+        sent: row.sent ?? 0,
+        rate: row.rate ?? 0,
+        netRate: row.net_rate ?? 0,
+        startedAt: row.started_at ?? null,
+      }));
+    },
+
     async testCampaign(id: number, email: string) {
       const [campaign, subscriber] = await Promise.all([nativeCampaign(id), findNativeSubscriber(email)]);
       if (!subscriber) throw new UpstreamError(service, 400, 'Choose a test recipient in your audience.');
@@ -448,20 +756,113 @@ export function createListmonk(options: Options) {
       return response.text();
     },
 
-    async templates(): Promise<Template[]> {
+    async templates(options?: boolean | { type?: 'campaign' | 'tx' | 'all' }): Promise<Template[]> {
+      const mode = typeof options === 'boolean' ? (options ? 'all' : 'campaign') : (options?.type ?? 'campaign');
       return (await nativeTemplates() ?? [])
-        .filter((template) => template.type === 'campaign')
-        .map((template) => ({ id: template.id, name: template.name, body: removedAdditions(template.body ?? '') }));
+        .filter((template) => mode === 'all' || template.type === mode)
+        .map((template) => templateFromNative(template));
     },
 
-    async createTemplate(input: { name: string; body: string }): Promise<Template> {
-      const body = /{{\s*template\s+"content"\s+\.\s*}}/.test(input.body)
-        ? input.body
-        : beforeBodyClose(input.body, contentSlot);
-      const out = await request<NativeTemplate>('/api/templates', 'POST', {
-        name: input.name, type: 'campaign', body: emailBody(body),
+    async allTemplates(): Promise<Template[]> {
+      return (await nativeTemplates() ?? []).map((template) => templateFromNative(template));
+    },
+
+    async createTemplate(input: TemplateInput): Promise<Template> {
+      const payload = templatePayload(input);
+      const out = await request<NativeTemplate>('/api/templates', 'POST', payload);
+      return templateFromNative(out, payload.body);
+    },
+
+    async updateTemplate(id: number, input: TemplateInput): Promise<Template> {
+      const payload = templatePayload(input);
+      const out = await request<NativeTemplate>(`/api/templates/${safeId(id)}`, 'PUT', payload);
+      return templateFromNative(out, payload.body);
+    },
+
+    async deleteTemplate(id: number): Promise<void> {
+      await request<boolean>(`/api/templates/${safeId(id)}`, 'DELETE');
+    },
+
+    async setDefaultTemplate(id: number): Promise<void> {
+      await request<unknown>(`/api/templates/${safeId(id)}/default`, 'PUT');
+    },
+
+    async previewTemplate(id: number): Promise<string> {
+      const response = await upstreamResponse(service, options.url ?? '', `/api/templates/${safeId(id)}/preview`, {
+        headers: { ...auth(), Accept: 'text/html, text/plain' },
+        fetch: transport,
       });
-      return { id: out.id, name: out.name, body: removedAdditions(out.body ?? body) };
+      return response.text();
+    },
+
+    async previewTemplateBody(body: string, type: 'campaign' | 'tx' = 'campaign'): Promise<string> {
+      const response = await upstreamResponse(service, options.url ?? '', '/api/templates/preview', {
+        method: 'POST',
+        headers: { ...auth(), Accept: 'text/html, text/plain' },
+        body: JSON.stringify({ body, template_type: type }),
+        fetch: transport,
+      });
+      return response.text();
+    },
+
+    async media(): Promise<MediaItem[]> {
+      const data = await request<NativeMedia[] | NativePage<NativeMedia> | null>('/api/media');
+      if (!data) return [];
+      const items = Array.isArray(data) ? data : (data.results ?? []);
+      return items.map(mediaFromNative);
+    },
+
+    async uploadMedia(filename: string, contentType: string, bytes: Uint8Array): Promise<MediaItem> {
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+      const response = await upstreamResponse(service, options.url ?? '', '/api/media', {
+        method: 'POST',
+        headers: auth(),
+        body: form,
+        fetch: transport,
+      });
+      let result: { data?: NativeMedia };
+      try {
+        result = await response.json() as { data?: NativeMedia };
+      } catch {
+        throw new UpstreamError(service, 502);
+      }
+      if (!result || !Object.hasOwn(result, 'data') || !result.data) throw new UpstreamError(service, 502);
+      return mediaFromNative(result.data);
+    },
+
+    async deleteMedia(id: number): Promise<void> {
+      await request<boolean>(`/api/media/${safeId(id)}`, 'DELETE');
+    },
+
+    async bounces(options: Pagination & { campaignId?: number } = {}): Promise<Page<BounceRecord>> {
+      const query = withPagination(options);
+      if (options.campaignId !== undefined) query.set('campaign_id', String(safeId(options.campaignId)));
+      const data = await request<NativePage<NativeBounce>>(`/api/bounces?${query}`);
+      return mappedPage(data, options, bounceFromNative);
+    },
+
+    async deleteBounce(id: number): Promise<void> {
+      await request<boolean>(`/api/bounces/${safeId(id)}`, 'DELETE');
+    },
+
+    async blocklistBounced(ids: number[]): Promise<void> {
+      if (!ids.length) return;
+      await request<boolean>('/api/bounces/blocklist', 'PUT', { ids: ids.map(safeId) });
+    },
+
+    async sendTransactional(input: TransactionalEmailInput & { fromEmail: string }): Promise<void> {
+      const email = emailKey(input.email);
+      if (!email) throw new UpstreamError(service, 400, 'Enter a valid recipient email address.');
+      await request<boolean>('/api/tx', 'POST', {
+        subscriber_email: email,
+        template_id: safeId(input.templateId),
+        ...(input.subject !== undefined ? { subject: input.subject } : {}),
+        from_email: input.fromEmail,
+        data: input.data ?? {},
+        content_type: 'html',
+        messenger: 'email',
+      });
     },
 
     async campaignTrend(ids: number[], range: DateRange, metric: 'views' | 'clicks' | 'bounces' = 'views'): Promise<Point[] | null> {
@@ -478,6 +879,42 @@ export function createListmonk(options: Options) {
         for (const { timestamp, count } of rows) counts.set(timestamp, (counts.get(timestamp) ?? 0) + count);
       }
       return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([label, value]) => ({ label, value }));
+    },
+
+    async campaignLinks(ids: number[], range: DateRange): Promise<CampaignLinkStat[]> {
+      if (!ids.length) return [];
+      const flags = await metricSettings();
+      if (flags['privacy.disable_tracking'] !== false) return [];
+      const counts = new Map<string, number>();
+      const from = new Date(range.startAt).toISOString();
+      const to = new Date(range.endAt).toISOString();
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const query = new URLSearchParams({ from, to });
+        for (const id of ids.slice(offset, offset + 100)) query.append('id', String(safeId(id)));
+        const rows = await request<Array<{ url: string; count: number }> | null>(`/api/campaigns/analytics/links?${query}`);
+        for (const { url, count } of rows ?? []) counts.set(url, (counts.get(url) ?? 0) + count);
+      }
+      return [...counts]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([url, count]) => ({ url, count }));
+    },
+
+    async exportCampaignAnalytics(
+      type: 'views' | 'clicks',
+      _ids: number[],
+      range: DateRange,
+    ): Promise<string> {
+      if (!analyticsExportTypes.has(type)) {
+        throw new UpstreamError(service, 400, 'Choose a valid analytics export type.');
+      }
+      const query = new URLSearchParams({
+        since: new Date(range.startAt).toISOString(),
+      });
+      const response = await upstreamResponse(service, options.url ?? '', `/api/maintenance/analytics/${type}/export?${query}`, {
+        headers: { ...auth(), Accept: 'text/csv, text/plain' },
+        fetch: transport,
+      });
+      return response.text();
     },
 
     async configureDelivery(input: DeliveryOptions): Promise<{ changed: boolean; needsRestart: boolean }> {
@@ -545,6 +982,51 @@ export function createListmonk(options: Options) {
         'bounce.actions': bounceActions,
       });
       return { changed: true, needsRestart: result !== true && result.needs_restart === true };
+    },
+
+    async testSmtp(toEmail: string, smtpPassword?: string): Promise<void> {
+      const target = emailKey(toEmail);
+      if (!target) throw new UpstreamError(service, 400, 'Enter a recipient email address for the SMTP test.');
+      const existing = await settings();
+      const entry = existing.smtp?.find((item) => item.name === 'email-ovelio')
+        ?? existing.smtp?.find((item) => item.enabled === true);
+      if (!entry) throw new UpstreamError(service, 400, 'Configure an SMTP server before testing delivery.');
+      const sanitized = clearMaskedSecrets(entry) as Record<string, unknown>;
+      await request<unknown>('/api/settings/smtp/test', 'POST', {
+        ...sanitized,
+        ...(smtpPassword ? { password: smtpPassword } : {}),
+        email: target,
+      });
+    },
+
+    async cleanupSubscribers(type: 'orphan' | 'blocklisted'): Promise<MaintenanceResult> {
+      if (!subscriberCleanupTypes.has(type)) {
+        throw new UpstreamError(service, 400, 'Choose a valid subscriber cleanup type.');
+      }
+      const data = await request<{ count?: number } | null>(`/api/maintenance/subscribers/${type}`, 'DELETE');
+      return { count: data?.count ?? 0 };
+    },
+
+    async cleanupUnconfirmed(beforeDate?: string): Promise<MaintenanceResult> {
+      const when = beforeDate ? new Date(beforeDate) : new Date();
+      if (!Number.isFinite(when.valueOf())) {
+        throw new UpstreamError(service, 400, 'Choose a valid cutoff date.');
+      }
+      const query = new URLSearchParams({ before_date: when.toISOString() });
+      const data = await request<{ count?: number } | null>(`/api/maintenance/subscriptions/unconfirmed?${query}`, 'DELETE');
+      return { count: data?.count ?? 0 };
+    },
+
+    async cleanupAnalytics(type: 'all' | 'views' | 'clicks', beforeDate: string): Promise<void> {
+      if (!analyticsCleanupTypes.has(type)) {
+        throw new UpstreamError(service, 400, 'Choose a valid analytics cleanup type.');
+      }
+      const when = new Date(beforeDate);
+      if (!Number.isFinite(when.valueOf())) {
+        throw new UpstreamError(service, 400, 'Choose a valid cutoff date.');
+      }
+      const query = new URLSearchParams({ before_date: when.toISOString() });
+      await request<boolean>(`/api/maintenance/analytics/${type}?${query}`, 'DELETE');
     },
   };
 }

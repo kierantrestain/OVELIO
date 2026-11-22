@@ -2,7 +2,7 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
-  experimental: { cpus: 2 },
+  experimental: { cpus: 2, optimizePackageImports: ['@astryxdesign/core'] },
   serverExternalPackages: ['pg'],
   async headers() {
     return [{
