@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { ANALYTICS_LIMITS, UNFILTERABLE_DIMENSIONS, normalizeSegmentOperator } from '@/contracts/analytics';
 import type {
   Annotation,
   AnnotationInput,
@@ -95,7 +96,7 @@ const eventSeriesRow = z.union([
   z.object({ x: z.string(), y: intCount }),
 ]);
 const utmSchema = z.object({ utm: z.string(), views: count }).array();
-const stepSchema = z.object({ type: z.enum(['event', 'path']), value: z.string().trim().min(1).max(500) });
+const stepSchema = z.object({ type: z.enum(['event', 'path']), value: z.string().trim().min(1).max(ANALYTICS_LIMITS.stepValueLength) });
 const funnelSchema = stepSchema.extend({ visitors: count }).array();
 const goalSchema = z.object({ id: uid, name: z.string(), parameters: stepSchema });
 const goalStatsSchema = z.object({ num: count, total: count });
@@ -423,7 +424,7 @@ const websiteSegmentSchema = z
     id: segment.id,
     name: segment.name,
     type: segment.type,
-    filters: segment.parameters?.filters ?? [],
+    filters: (segment.parameters?.filters ?? []).map(rule => ({ ...rule, operator: normalizeSegmentOperator(rule.operator) })),
     ...(segment.parameters?.match ? { match: segment.parameters.match } : {}),
     ...(segment.parameters?.dateRange ? { dateRange: segment.parameters.dateRange } : {}),
     ...(segment.parameters?.action ? { action: segment.parameters.action } : {}),
@@ -698,7 +699,7 @@ const filterKeys = [
   'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
 ] as const;
 
-const filterValueSchema = z.string().trim().min(1).max(500);
+const filterValueSchema = z.string().trim().min(1).max(ANALYTICS_LIMITS.filterValueLength);
 
 const websiteInput = z.object({
   name: z.string().trim().min(1).max(100),
@@ -714,8 +715,8 @@ const goalInput = stepSchema.extend({ name: z.string().trim().min(1).max(200) })
 const funnelInput = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().trim().max(500).optional(),
-  steps: stepSchema.array().min(2).max(8),
-  windowMinutes: z.number().int().min(1).max(10_080),
+  steps: stepSchema.array().min(2).max(ANALYTICS_LIMITS.funnelSteps),
+  windowMinutes: z.number().int().min(1).max(ANALYTICS_LIMITS.funnelWindowMinutes),
 });
 
 const sessionOptionsSchema = z.object({
@@ -733,7 +734,8 @@ const journeyOptionsSchema = z.object({
 const attributionOptionsSchema = z.object({
   model: z.enum(['first-click', 'last-click']),
   type: z.enum(['path', 'event']),
-  step: z.string().trim().min(1).max(500),
+  step: z.string().trim().min(1).max(ANALYTICS_LIMITS.stepValueLength),
+  currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/, 'Use a 3-letter ISO currency code.').optional(),
 });
 
 const breakdownFieldSchema = z.enum([
@@ -741,7 +743,7 @@ const breakdownFieldSchema = z.enum([
   'country', 'region', 'city', 'tag', 'hostname', 'distinctId',
   'language', 'event', 'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
 ]);
-const breakdownFieldsSchema = z.array(breakdownFieldSchema).min(1).max(10);
+const breakdownFieldsSchema = z.array(breakdownFieldSchema).min(1).max(ANALYTICS_LIMITS.breakdownFields);
 
 const annotationInputSchema = z.object({
   date: z.string().trim().min(1).refine(value => !Number.isNaN(Date.parse(value)), 'Use a valid ISO date.'),
@@ -863,6 +865,16 @@ function rangeUnit(range: DateRange): 'hour' | 'day' {
 function queryFilters(filters?: ReportFilters): Record<string, string> {
   if (!filters) return {};
   const result: Record<string, string> = {};
+  // Umami 3.5.0 ignores filters on columns outside its FILTER_COLUMNS, so refuse them instead of
+  // returning an unfiltered report that looks filtered.
+  const known = new Set<string>([...filterKeys, ...UNFILTERABLE_DIMENSIONS, 'entry', 'exit']);
+  for (const [key, raw] of Object.entries(filters)) {
+    if (raw === undefined || !raw.trim()) continue;
+    if (!known.has(key)) throw new RangeError(`Unknown filter "${key}".`);
+    if ((UNFILTERABLE_DIMENSIONS as readonly string[]).includes(key)) {
+      throw new RangeError(`The analytics engine cannot filter by ${key}. Remove that filter.`);
+    }
+  }
   for (const key of filterKeys) {
     const raw = filters[key];
     if (raw === undefined) continue;
@@ -1343,11 +1355,21 @@ export function createUmami(config: UmamiConfig) {
     async attribution(
       id: string,
       range: DateRange,
-      options: { model: 'first-click' | 'last-click'; type: 'path' | 'event'; step: string },
+      options: {
+        model: 'first-click' | 'last-click';
+        type: 'path' | 'event';
+        step: string;
+        currency?: string;
+        filters?: ReportFilters;
+      },
     ): Promise<AttributionResult> {
-      const parsedOptions = attributionOptionsSchema.parse(options);
+      const parsedOptions = attributionOptionsSchema.parse({
+        model: options.model, type: options.type, step: options.step, currency: options.currency,
+      });
       const result = await authorized(`${websitePath(id)}/attribution`, {}, {
         ...queryRange(range),
+        ...queryFilters(options.filters),
+        ...(parsedOptions.currency ? { currency: parsedOptions.currency } : {}),
         model: parsedOptions.model,
         type: parsedOptions.type,
         step: parsedOptions.step,
@@ -1403,6 +1425,9 @@ export function createUmami(config: UmamiConfig) {
 
     async createSegment(websiteId: string, input: WebsiteSegmentInput): Promise<WebsiteSegment> {
       const parsed = websiteSegmentInputSchema.parse(input);
+      const blocked = parsed.filters?.find(rule => (UNFILTERABLE_DIMENSIONS as readonly string[]).includes(rule.name));
+      if (blocked) throw new RangeError(`The analytics engine cannot filter segments by ${blocked.name}.`);
+      parsed.filters = parsed.filters?.map(rule => ({ ...rule, operator: normalizeSegmentOperator(rule.operator) }));
       const result = await authorized(`${websitePath(websiteId)}/segments`, {
         method: 'POST',
         body: JSON.stringify({

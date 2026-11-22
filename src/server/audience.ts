@@ -502,9 +502,25 @@ export const contactFields = z.object({
   country: optionalText,
   website: z.string().trim().max(300).optional(),
   tags: z.array(z.string().trim().min(1).max(70)).max(30).optional(),
+  // Checked against the field definitions when the contact is saved.
+  customFields: z.record(
+    z.string().regex(/^[a-z][a-z0-9_]{0,59}$/),
+    z.union([z.string().max(5000), z.array(z.string().max(255)).max(100)]),
+  ).refine(values => Object.keys(values).length <= 100).optional(),
   consent: z.enum(['opted_in', 'unknown']).optional(),
   evidence: z.string().trim().max(500).optional(),
 });
+
+const reservedColumns = new Set([
+  'email', 'firstname', 'lastname', 'company', 'phone', 'position', 'city', 'country', 'website', 'tags', 'consent', 'evidence',
+]);
+const columnKey = (name: string) => name.trim().toLowerCase().replaceAll(/[-_\s]/g, '');
+
+// Published custom contact fields that the CSV import and export can carry, in a stable order.
+async function csvCustomFields() {
+  const fields = await mautic.fields('contact');
+  return fields.filter(field => field.published && !reservedColumns.has(columnKey(field.alias)));
+}
 
 export async function importContacts(csv: string, evidence?: string) {
   const result = Papa.parse<Record<string, string>>(csv, {
@@ -513,6 +529,8 @@ export async function importContacts(csv: string, evidence?: string) {
   if (!result.meta.fields?.includes('email')) throw new AppError(400, 'Include an email column in the CSV.');
   if (!result.data.length || result.data.length > 500) throw new AppError(400, 'Import between 1 and 500 contacts at a time.');
   if (result.errors.some(error => error.type !== 'FieldMismatch')) throw new AppError(400, 'Check the CSV quoting and column formatting.');
+  const headers = new Set(result.meta.fields);
+  const custom = (await csvCustomFields()).filter(field => headers.has(columnKey(field.alias)));
   const failed: { row: number; message: string }[] = [];
   const malformed = new Set(result.errors.map(error => error.row));
   let imported = 0;
@@ -531,6 +549,10 @@ export async function importContacts(csv: string, evidence?: string) {
         country: row.country || undefined,
         website: row.website || undefined,
         tags: row.tags?.split('|').map(tag => tag.trim()).filter(Boolean),
+        customFields: Object.fromEntries(custom.flatMap(field => {
+          const value = row[columnKey(field.alias)]?.trim();
+          return value ? [[field.alias, value]] : [];
+        })),
         consent: optedIn ? 'opted_in' : undefined,
         evidence: row.evidence || evidence,
       });
@@ -548,6 +570,7 @@ export async function importContacts(csv: string, evidence?: string) {
 }
 
 export async function exportContacts() {
+  const custom = await csvCustomFields();
   const rows: string[][] = [];
   for (let page = 1; ; page++) {
     const result = await mautic.contacts({ page, limit: contactsPerPage });
@@ -564,12 +587,13 @@ export async function exportContacts() {
         item.email, item.firstName, item.lastName, item.company,
         item.phone ?? '', item.position ?? '', item.city ?? '', item.country ?? '',
         item.tags.join('|'), consent,
+        ...custom.map(field => item.customFields?.[field.alias] ?? ''),
       ]);
     }
     if (page * result.limit >= result.total || !result.items.length) break;
   }
   return Papa.unparse({
-    fields: ['email', 'first_name', 'last_name', 'company', 'phone', 'position', 'city', 'country', 'tags', 'consent'],
+    fields: ['email', 'first_name', 'last_name', 'company', 'phone', 'position', 'city', 'country', 'tags', 'consent', ...custom.map(field => field.alias)],
     data: rows,
   }, { escapeFormulae: true });
 }

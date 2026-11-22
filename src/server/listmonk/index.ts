@@ -129,7 +129,23 @@ type NativeSettings = Record<string, unknown> & {
   'privacy.disable_tracking'?: boolean;
   'bounce.enabled'?: boolean;
 };
+export type BounceProvider = 'ses' | 'sendgrid' | 'postmark' | 'azure' | 'forwardemail' | 'lettermint';
+export type BounceOptions = {
+  providers: BounceProvider[];
+  sendgridKey?: string;
+  postmarkUsername?: string;
+  postmarkPassword?: string;
+  azureSecret?: string;
+  azureSecretHeader?: string;
+  forwardemailKey?: string;
+  lettermintKey?: string;
+  pop?: {
+    host: string; port: number; username: string; password?: string; returnPath?: string;
+    scanInterval: string; tls: boolean; tlsSkipVerify: boolean;
+  };
+};
 type DeliveryOptions = {
+  bounce?: BounceOptions;
   smtpHost: string;
   smtpPort: number;
   smtpUser?: string;
@@ -346,13 +362,131 @@ function campaignFromNative(campaign: NativeCampaign, settings: NativeSettings =
     templateId: campaign.template_id || undefined,
     metrics: {
       sent: campaign.sent ?? null,
+      // Listmonk records no delivery receipts, and OVELIO does not yet count unsubscribes per campaign.
       delivered: null,
       opens: trackedCount(campaign.views, tracking),
       clicks: trackedCount(campaign.clicks, tracking),
       bounces: trackedCount(campaign.bounces, settings['bounce.enabled'] === true),
       unsubscribes: null,
+      unavailable: {
+        delivered: 'Needs delivery feedback from your email provider. Listmonk only records sent and bounced.',
+        unsubscribes: 'Per-campaign unsubscribes are not recorded yet.',
+      },
     },
   };
+}
+
+const bounceProviders: BounceProvider[] = ['ses', 'sendgrid', 'postmark', 'azure', 'forwardemail', 'lettermint'];
+
+/** Reads BOUNCE_* environment variables. Unset variables leave the matching Listmonk setting alone. */
+export function bounceOptionsFromEnv(env: Record<string, string | undefined> = process.env): BounceOptions {
+  const text = (name: string) => env[name]?.trim() || undefined;
+  const flag = (name: string, fallback: boolean) => {
+    const value = text(name)?.toLowerCase();
+    return value === undefined ? fallback : ['1', 'true', 'yes', 'on'].includes(value);
+  };
+  const providers = (text('BOUNCE_PROVIDERS') ?? '').toLowerCase().split(/[\s,]+/).filter(Boolean)
+    .filter((name): name is BounceProvider => bounceProviders.includes(name as BounceProvider));
+  const host = text('BOUNCE_POP_HOST');
+  const username = text('BOUNCE_POP_USERNAME');
+  return {
+    providers: [...new Set(providers)],
+    sendgridKey: text('BOUNCE_SENDGRID_KEY'),
+    postmarkUsername: text('BOUNCE_POSTMARK_USERNAME'),
+    postmarkPassword: text('BOUNCE_POSTMARK_PASSWORD'),
+    azureSecret: text('BOUNCE_AZURE_SHARED_SECRET'),
+    azureSecretHeader: text('BOUNCE_AZURE_SHARED_SECRET_HEADER'),
+    forwardemailKey: text('BOUNCE_FORWARDEMAIL_KEY'),
+    lettermintKey: text('BOUNCE_LETTERMINT_KEY'),
+    pop: host && username ? {
+      host, username,
+      port: Number(text('BOUNCE_POP_PORT')) || 995,
+      password: text('BOUNCE_POP_PASSWORD'),
+      returnPath: text('BOUNCE_POP_RETURN_PATH'),
+      scanInterval: text('BOUNCE_POP_SCAN_INTERVAL') ?? '15m',
+      tls: flag('BOUNCE_POP_TLS', true),
+      tlsSkipVerify: flag('BOUNCE_POP_TLS_SKIP_VERIFY', false),
+    } : undefined,
+  };
+}
+
+// Listmonk masks saved secrets with bullets, so a secret matches when the mask has the same length.
+function secretMatches(saved: unknown, wanted: string | undefined) {
+  return wanted === undefined || (typeof saved === 'string' && /^•+$/.test(saved) && [...saved].length === [...wanted].length);
+}
+
+/** Returns only the bounce settings that differ from what Listmonk has saved, so operator choices are never reset. */
+export function bounceSettingsPatch(existing: Record<string, unknown>, bounce: BounceOptions | undefined): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (!bounce) return patch;
+  const nested = (key: string) => (existing[key] && typeof existing[key] === 'object' ? existing[key] : {}) as Record<string, unknown>;
+  const on = (name: BounceProvider) => bounce.providers.includes(name);
+  if (on('ses') && existing['bounce.ses_enabled'] !== true) patch['bounce.ses_enabled'] = true;
+  if (on('sendgrid') && (existing['bounce.sendgrid_enabled'] !== true || !secretMatches(existing['bounce.sendgrid_key'], bounce.sendgridKey))) {
+    patch['bounce.sendgrid_enabled'] = true;
+    if (bounce.sendgridKey) patch['bounce.sendgrid_key'] = bounce.sendgridKey;
+  }
+  const postmark = nested('bounce.postmark');
+  if (on('postmark') && (postmark.enabled !== true || (bounce.postmarkUsername !== undefined && postmark.username !== bounce.postmarkUsername)
+      || !secretMatches(postmark.password, bounce.postmarkPassword))) {
+    patch['bounce.postmark'] = {
+      ...(clearMaskedSecrets(postmark) as object), enabled: true,
+      ...(bounce.postmarkUsername !== undefined ? { username: bounce.postmarkUsername } : {}),
+      ...(bounce.postmarkPassword !== undefined ? { password: bounce.postmarkPassword } : {}),
+    };
+  }
+  const azure = nested('bounce.azure');
+  if (on('azure') && (azure.enabled !== true || (bounce.azureSecretHeader !== undefined && azure.shared_secret_header !== bounce.azureSecretHeader)
+      || !secretMatches(azure.shared_secret, bounce.azureSecret))) {
+    patch['bounce.azure'] = {
+      ...(clearMaskedSecrets(azure) as object), enabled: true,
+      ...(bounce.azureSecret !== undefined ? { shared_secret: bounce.azureSecret } : {}),
+      ...(bounce.azureSecretHeader !== undefined ? { shared_secret_header: bounce.azureSecretHeader } : {}),
+    };
+  }
+  for (const [name, wanted] of [['forwardemail', bounce.forwardemailKey], ['lettermint', bounce.lettermintKey]] as const) {
+    const saved = nested(`bounce.${name}`);
+    if (on(name) && (saved.enabled !== true || !secretMatches(saved.key, wanted))) {
+      patch[`bounce.${name}`] = { ...(clearMaskedSecrets(saved) as object), enabled: true, ...(wanted !== undefined ? { key: wanted } : {}) };
+    }
+  }
+  if (bounce.pop) {
+    const boxes = Array.isArray(existing['bounce.mailboxes']) ? existing['bounce.mailboxes'] as Record<string, unknown>[] : [];
+    const first = boxes[0] ?? {};
+    const pop = bounce.pop;
+    const same = first.enabled === true && first.type === 'pop' && first.host === pop.host && first.port === pop.port
+      && first.username === pop.username && first.scan_interval === pop.scanInterval && first.tls_enabled === pop.tls
+      && first.tls_skip_verify === pop.tlsSkipVerify && (pop.returnPath === undefined || first.return_path === pop.returnPath)
+      && secretMatches(first.password, pop.password);
+    if (!same) {
+      patch['bounce.mailboxes'] = [{
+        ...(clearMaskedSecrets(first) as object),
+        enabled: true, type: 'pop', auth_protocol: 'userpass',
+        host: pop.host, port: pop.port, username: pop.username,
+        ...(pop.password !== undefined ? { password: pop.password } : {}),
+        ...(pop.returnPath !== undefined ? { return_path: pop.returnPath } : {}),
+        scan_interval: pop.scanInterval, tls_enabled: pop.tls, tls_skip_verify: pop.tlsSkipVerify,
+      }, ...boxes.slice(1).map(box => clearMaskedSecrets(box))];
+    }
+  }
+  return patch;
+}
+
+// The engine exports every campaign. Keep the header and rows whose first column (campaign_id) is wanted.
+function filterCsvByCampaign(csv: string, ids: number[]) {
+  const wanted = new Set(ids.map(String));
+  const records: string[] = [];
+  let start = 0;
+  let quoted = false;
+  for (let i = 0; i < csv.length; i++) {
+    if (csv[i] === '"') quoted = !quoted;
+    else if (csv[i] === '\n' && !quoted) {
+      records.push(csv.slice(start, i + 1));
+      start = i + 1;
+    }
+  }
+  if (start < csv.length) records.push(csv.slice(start));
+  return records.filter((record, index) => index === 0 || wanted.has(record.split(',', 1)[0].replaceAll('"', '').trim())).join('');
 }
 
 function isStatus(error: unknown, ...statuses: number[]) {
@@ -846,9 +980,36 @@ export function createListmonk(options: Options) {
       await request<boolean>(`/api/bounces/${safeId(id)}`, 'DELETE');
     },
 
-    async blocklistBounced(ids: number[]): Promise<void> {
-      if (!ids.length) return;
-      await request<boolean>('/api/bounces/blocklist', 'PUT', { ids: ids.map(safeId) });
+    /**
+     * Blocklists only the subscribers behind the given bounce ids. Listmonk's bulk endpoint ignores ids and
+     * blocklists every bounced subscriber, so each bounce is resolved to its subscriber first.
+     */
+    async blocklistBounceSubscribers(ids: number[]): Promise<number> {
+      const subscriberIds = new Set<number>();
+      for (const id of new Set(ids)) {
+        try {
+          const bounce = await request<NativeBounce>(`/api/bounces/${safeId(id)}`);
+          if (bounce.subscriber_id) subscriberIds.add(bounce.subscriber_id);
+        } catch (error) {
+          if (!isStatus(error, 400, 404)) throw error;
+        }
+      }
+      for (const id of subscriberIds) await request<boolean>(`/api/subscribers/${safeId(id)}/blocklist`, 'PUT');
+      return subscriberIds.size;
+    },
+
+    /** Reads every bounce for a campaign, page by page. */
+    async allBounces(campaignId?: number): Promise<BounceRecord[]> {
+      const items: BounceRecord[] = [];
+      for (let page = 1; page <= 1000; page++) {
+        const query = withPagination({ page, limit: 100 });
+        if (campaignId !== undefined) query.set('campaign_id', String(safeId(campaignId)));
+        const data = await request<NativePage<NativeBounce>>(`/api/bounces?${query}`);
+        const batch = mappedPage(data, { page, limit: 100 }, bounceFromNative);
+        items.push(...batch.items);
+        if (!batch.items.length || items.length >= batch.total) break;
+      }
+      return items;
     },
 
     async sendTransactional(input: TransactionalEmailInput & { fromEmail: string }): Promise<void> {
@@ -901,7 +1062,7 @@ export function createListmonk(options: Options) {
 
     async exportCampaignAnalytics(
       type: 'views' | 'clicks',
-      _ids: number[],
+      ids: number[],
       range: DateRange,
     ): Promise<string> {
       if (!analyticsExportTypes.has(type)) {
@@ -914,7 +1075,8 @@ export function createListmonk(options: Options) {
         headers: { ...auth(), Accept: 'text/csv, text/plain' },
         fetch: transport,
       });
-      return response.text();
+      const text = await response.text();
+      return ids.length ? filterCsvByCampaign(text, ids) : text;
     },
 
     async configureDelivery(input: DeliveryOptions): Promise<{ changed: boolean; needsRestart: boolean }> {
@@ -954,7 +1116,8 @@ export function createListmonk(options: Options) {
         const saved = configuredBounceActions?.[name as keyof typeof bounceActions];
         return saved?.count === count && saved.action === action;
       });
-      const applied = existing.smtp?.length === 1 && current?.enabled === true &&
+      const bouncePatch = bounceSettingsPatch(existing, input.bounce ?? bounceOptionsFromEnv());
+      const applied = !Object.keys(bouncePatch).length && existing.smtp?.length === 1 && current?.enabled === true &&
         current.host === smtp.host && current.port === smtp.port && current.username === smtp.username &&
         current.tls_type === smtp.tls_type && current.auth_protocol === smtp.auth_protocol &&
         existing['app.root_url'] === publicUrl && existing['app.from_email'] === input.fromEmail &&
@@ -980,6 +1143,7 @@ export function createListmonk(options: Options) {
         'bounce.enabled': true,
         'bounce.webhooks_enabled': true,
         'bounce.actions': bounceActions,
+        ...bouncePatch,
       });
       return { changed: true, needsRestart: result !== true && result.needs_restart === true };
     },

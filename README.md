@@ -36,8 +36,8 @@ Interface code lives in `src/components`: `ui.tsx` is the shared OVELIO kit over
 
 ## First workflows
 
-1. Import an Audience CSV with `email`, `first_name`, `last_name`, `company`, `phone`, `position`, `city`, `country`, `website`, `tags` and `consent` (download the starter CSV template inside the Import dialog). Use `opted_in` and record where and when permission was obtained for recipients who have given it.
-2. Create dynamic or manual segments, custom contact and company fields, tags, lifecycle stages, B2B companies, lead scoring rules/triggers and suppressions, sync segments into newsletter mailing lists, and inspect unified contact engagement, bounces and direct email sends.
+1. Import an Audience CSV with `email`, `first_name`, `last_name`, `company`, `phone`, `position`, `city`, `country`, `website`, `tags` and `consent`, plus one column per custom contact field named by its alias (download the starter CSV template inside the Import dialog). Use `opted_in` and record where and when permission was obtained for recipients who have given it.
+2. Create dynamic or manual segments, custom contact and company fields (with values editable on each contact and included in exports), tags, lifecycle stages, B2B companies, lead scoring rules and triggers with their actions, and suppressions, sync segments into newsletter mailing lists, and inspect unified contact engagement, bounces and direct email sends.
 3. Compose newsletters with the split HTML editor and live Desktop/Mobile preview, manage reusable campaign and transactional templates, upload images in the Media library, publish public web archives, preview and send tests to consenting contacts before starting or scheduling delivery, and inspect opens, clicks, bounces and clicked links.
 4. Create journey emails, custom lead capture forms (with submissions viewer and embed code), downloadable assets, landing pages, dynamic web content slots, website popups and bars, categories, webhooks and multi-action automations (email, tags, points, segment, stage) triggered by segments or forms.
 5. Add a website in Analytics and install its tracking snippet. Explore live realtime visitors, compact and expanded breakdowns across 22 dimensions, saved segments and cohorts, raw events feed, weekly heatmaps, anonymous sessions and properties, goals, saved funnels, user journeys, retention cohorts, first/last-click attribution, revenue, Core Web Vitals, annotations, tracked links and pixels with charts, and native marketing reports.
@@ -55,6 +55,7 @@ Set `OVELIO_HOST` to your DNS name and `APP_ORIGIN` to its HTTPS origin. Keep DN
 | `SMTP_DKIM_SELECTOR` | Provider's DKIM selector for the Settings DNS check |
 | `SMTP_VERIFIED_DOMAIN` | From domain after the provider has confirmed verification |
 | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` | Optional Auth0 OIDC login (set Allowed Callback URL to `<APP_ORIGIN>/api/auth/auth0/callback` and Allowed Logout URL to `<APP_ORIGIN>/login`) |
+| `BOUNCE_PROVIDERS` and the other `BOUNCE_*` settings in `.env.example` | Optional bounce sources: provider webhooks (`ses`, `sendgrid`, `postmark`, `azure`, `forwardemail`, `lettermint`) posting to `<APP_ORIGIN>/webhooks/service/<provider>`, and POP mailbox scanning. The worker applies them to the newsletter engine and leaves blank settings as they are |
 | `AUTH0_AUTO_PROVISION`, `AUTH0_DEFAULT_ROLE` | Optional (`true` to auto-create new Auth0 users with role `analyst`, `marketer` or `admin`; first user in an empty workspace becomes `admin`) |
 
 ```sh
@@ -111,4 +112,7 @@ The integration and browser suites require the local Compose stack and use synth
 - Workflows use a step-based editor over Mautic campaigns supporting segment or form triggers, delays, open/click conditions, and email, tag, point, segment and stage actions. Free-form branching canvases and custom negative-path decision trees remain available only in the engine.
 - Website visitors stay anonymous. Email and website reports are shown side by side, and visits are attributed to campaigns only through UTM parameters and session attribution models.
 - Downloadable remote assets require a publicly reachable URL from the Mautic container so the engine can verify the file MIME type.
+- Public analytics share pages need their own subdomain and aren't linked from the console yet. Tracked links (`/q/`) and pixels (`/p/`) work on the main address.
+- Website reports can't be filtered by channel or screen size, because the analytics engine has no filter for them. Both still appear as breakdowns.
+- Point triggers can't add contacts to workflows. Mautic 7.2.2 registers that trigger action without a working handler, so OVELIO doesn't offer it.
 - Each client runs as a separate Compose project with its own credentials and volumes. There is no shared multi-tenant control plane.

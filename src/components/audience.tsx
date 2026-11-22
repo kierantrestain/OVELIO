@@ -24,8 +24,8 @@ import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
   BounceRecord, Company, Contact, ContactDetail, ContactNote, CustomField, CustomFieldObject,
-  JourneyEmail, MailingList, Page, PointAction, PointTrigger, Segment, SegmentFilter, Stage,
-  SuppressionRecord, Tag, Workflow,
+  JourneyEmail, MailingList, Page, PointAction, PointTrigger, PointTriggerEventInput, PointTriggerEventType,
+  Segment, SegmentFilter, Stage, SuppressionRecord, Tag, Workflow,
 } from '@/contracts';
 import { api, date, number, saveFile, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
@@ -85,6 +85,7 @@ type CustomFieldGroup = typeof customFieldGroups[number]['value'];
 const fieldTypeLabels: Record<string, string> = Object.fromEntries(customFieldTypes.map(item => [item.value, item.label]));
 const fieldGroupLabels: Record<string, string> = Object.fromEntries(customFieldGroups.map(item => [item.value, item.label]));
 const validFieldGroups = new Set<string>(customFieldGroups.map(item => item.value));
+const coreFieldAliases = new Set(['email', 'firstname', 'lastname', 'company', 'phone', 'position', 'city', 'country', 'website']);
 const isChoiceFieldType = (type: string) => type === 'select' || type === 'multiselect';
 
 const csvTemplate = [
@@ -195,6 +196,53 @@ function Tags({ tags, onSelect }: { tags: string[]; onSelect?: (tag: string) => 
 
 /* ── Contact Forms & CSV Import ────────────────────────────────────────────── */
 
+const toDateTimeInput = (value: string) => value.replace(' ', 'T').slice(0, 16);
+
+// One input per published contact field, chosen by the field's type.
+function CustomFieldInputs({ fields, values, onChange }: {
+  fields: CustomField[];
+  values: Record<string, string>;
+  onChange: (alias: string, value: string) => void;
+}) {
+  return <div className="ov-form-grid">{fields.map(item => {
+    const value = values[item.alias] ?? '';
+    const label = item.label || item.alias;
+    const set = (next: string | null | undefined) => onChange(item.alias, next ?? '');
+    const optional = !item.isRequired;
+    if (item.type === 'textarea') return <TextArea key={item.id} label={label} rows={3} isOptional={optional} value={value} onChange={set} />;
+    if (item.type === 'boolean') {
+      return <Selector key={item.id} label={label} placeholder="Not set" hasClear value={value === '' ? null : value}
+        options={[{ value: '1', label: 'Yes' }, { value: '0', label: 'No' }]} onChange={set} />;
+    }
+    if (item.type === 'select') {
+      return <Selector key={item.id} label={label} placeholder="Not set" hasClear value={value || null}
+        options={item.options.map(option => ({ value: option, label: option }))} onChange={set} />;
+    }
+    if (item.type === 'multiselect') {
+      const chosen = value.split('|').filter(Boolean);
+      return <fieldset key={item.id} className="ov-stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
+        <Text weight="semibold">{label}</Text>
+        {item.options.map(option => <CheckboxInput key={option} label={option} value={chosen.includes(option)}
+          onChange={on => set((on ? [...chosen, option] : chosen.filter(entry => entry !== option)).join('|'))} />)}
+      </fieldset>;
+    }
+    const hint = item.type === 'date' ? 'Format: YYYY-MM-DD'
+      : item.type === 'datetime' ? 'Format: YYYY-MM-DD HH:MM'
+        : item.type === 'number' ? 'Enter a number'
+          : item.type === 'locale' ? 'For example en_GB' : item.type === 'timezone' ? 'For example Europe/London' : undefined;
+    const type = ({ email: 'email', url: 'url', tel: 'tel' } as Record<string, 'email' | 'url' | 'tel'>)[item.type];
+    return <TextInput key={item.id} label={label} description={hint} type={type ?? 'text'} isOptional={optional}
+      value={item.type === 'datetime' ? toDateTimeInput(value).replace('T', ' ') : value} onChange={set} />;
+  })}</div>;
+}
+
+function showCustomValue(item: CustomField, value: string | undefined) {
+  if (!value) return '—';
+  if (item.type === 'boolean') return value === '1' ? 'Yes' : 'No';
+  if (item.type === 'multiselect') return value.split('|').filter(Boolean).join(', ');
+  return value;
+}
+
 function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: (contact: Contact) => void; onClose: () => void }) {
   const [optedIn, setOptedIn] = useState(false);
   const action = useAction();
@@ -211,6 +259,10 @@ function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: 
     tags: contact?.tags.join(', ') ?? '',
     evidence: '',
   });
+  const definitions = useResource<CustomField[]>(`${fieldPath}/contact`);
+  const customFields = (definitions.data ?? []).filter(item => item.published && !coreFieldAliases.has(item.alias));
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const customValue = (alias: string) => custom[alias] ?? contact?.customFields?.[alias] ?? '';
   return <Modal title={contact ? 'Edit contact' : 'Add contact'} onClose={onClose} size="large">
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
@@ -227,6 +279,8 @@ function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: 
           country: values.country.trim(),
           website: values.website.trim(),
           tags: values.tags.split(',').map(tag => tag.trim()).filter(Boolean),
+          // Only changed values are sent, so an untouched field is never rewritten or cleared.
+          ...(Object.keys(custom).length ? { customFields: custom } : {}),
           ...(!contact && optedIn ? { consent: 'opted_in', evidence: values.evidence.trim() } : {}),
         };
         onDone(await api<Contact>(contact ? `${contactsPath}/${contact.id}` : contactsPath, contact ? 'PATCH' : 'POST', input));
@@ -244,6 +298,9 @@ function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: 
         <TextInput label="Country" isOptional {...field('country')} />
       </div>
       <TextInput label="Tags" description="Separate tags with commas." isOptional {...field('tags')} />
+      {customFields.length ? <CustomFieldInputs fields={customFields} onChange={(alias, value) => setCustom(current => ({ ...current, [alias]: value }))}
+        values={Object.fromEntries(customFields.map(item => [item.alias, customValue(item.alias)]))} /> : null}
+      <AsyncState loading={definitions.loading} error={definitions.error} retry={definitions.refresh} />
       {!contact ? <>
         <CheckboxInput label="This contact consented to marketing email" value={optedIn} onChange={setOptedIn} />
         {optedIn ? <TextInput label="Consent evidence" placeholder="Source, date and wording of consent" isRequired {...field('evidence')} /> : null}
@@ -273,7 +330,7 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
       });
     }}>
       <div className="ov-actions ov-actions--between">
-        <Text type="supporting" color="secondary">Include an email column and up to 500 rows. Optional columns: first_name, last_name, company, phone, position, city, country, website, tags (separated by |), consent and evidence.</Text>
+        <Text type="supporting" color="secondary">Include an email column and up to 500 rows. Optional columns: first_name, last_name, company, phone, position, city, country, website, tags (separated by |), consent and evidence. A column named after a custom field alias fills that field.</Text>
         <Button size="sm" label="Download CSV template" icon={<Download size={14} />}
           onClick={() => saveFile(csvTemplate, 'ovelio-contacts-template.csv', 'text/csv')} />
       </div>
@@ -621,23 +678,128 @@ function PointActionForm({
   </Modal>;
 }
 
+type TriggerSource = 'segments' | 'tags' | 'stages' | 'emails' | 'campaigns';
+type TriggerField = {
+  key: string;
+  label: string;
+  kind: 'pick' | 'pickOne' | 'ids' | 'text' | 'flag';
+  source?: TriggerSource;
+  description?: string;
+};
+type EventDraft = { key: number; id?: number; type: PointTriggerEventType; values: Record<string, string | string[] | boolean> };
+
+const triggerEventKinds: Record<PointTriggerEventType, { label: string; fields: TriggerField[] }> = {
+  'lead.changelists': { label: 'Change segments', fields: [
+    { key: 'addToLists', label: 'Add contact to segments', kind: 'pick', source: 'segments' },
+    { key: 'removeFromLists', label: 'Remove contact from segments', kind: 'pick', source: 'segments' },
+  ] },
+  'lead.changetags': { label: 'Change tags', fields: [
+    { key: 'add_tags', label: 'Add tags', kind: 'pick', source: 'tags' },
+    { key: 'remove_tags', label: 'Remove tags', kind: 'pick', source: 'tags' },
+  ] },
+  'lead.changestage': { label: 'Change lifecycle stage', fields: [
+    { key: 'addstage', label: 'Move contact to stage', kind: 'pickOne', source: 'stages' },
+  ] },
+  'email.send': { label: 'Send email to the contact', fields: [
+    { key: 'email', label: 'Email to send', kind: 'pickOne', source: 'emails' },
+  ] },
+  'email.send_to_user': { label: 'Send email to a user', fields: [
+    { key: 'useremail', label: 'Email to send', kind: 'pickOne', source: 'emails' },
+    { key: 'user_id', label: 'User ids', kind: 'ids', description: 'Numeric ids of the users to notify, separated by commas.' },
+    { key: 'to_owner', label: 'Also send to the contact owner', kind: 'flag' },
+    { key: 'to', label: 'Other recipients', kind: 'text', description: 'Email addresses separated by commas.' },
+    { key: 'cc', label: 'Cc', kind: 'text' },
+    { key: 'bcc', label: 'Bcc', kind: 'text' },
+  ] },
+  'campaign.changecampaign': { label: 'Change campaigns', fields: [
+    { key: 'addTo', label: 'Add contact to campaigns', kind: 'pick', source: 'campaigns' },
+    { key: 'removeFrom', label: 'Remove contact from campaigns', kind: 'pick', source: 'campaigns' },
+  ] },
+  'plugin.leadpush': { label: 'Push contact to an integration', fields: [
+    { key: 'integration', label: 'Integration name', kind: 'text', description: 'The integration key, for example Hubspot.' },
+  ] },
+};
+// Mautic 7.2.2 registers campaign.changecampaign with a callback that does not exist
+// (CampaignBundle/EventListener/PointSubscriber.php:27), so the engine never runs it. Existing events still load.
+const triggerEventTypeOptions = (Object.keys(triggerEventKinds) as PointTriggerEventType[])
+  .filter(type => type !== 'campaign.changecampaign')
+  .map(type => ({ value: type, label: triggerEventKinds[type].label }));
+
+function draftFromEvent(key: number, event: { id?: number; type: string; properties?: Record<string, unknown> }): EventDraft | null {
+  if (!(event.type in triggerEventKinds)) return null;
+  const type = event.type as PointTriggerEventType;
+  const properties = event.properties ?? {};
+  const values: EventDraft['values'] = {};
+  for (const item of triggerEventKinds[type].fields) {
+    const raw = item.key === 'useremail' ? (properties.useremail as { email?: unknown } | undefined)?.email : properties[item.key];
+    if (item.kind === 'flag') values[item.key] = raw === true || raw === 1 || raw === '1';
+    else if (item.kind === 'pick') values[item.key] = Array.isArray(raw) ? raw.map(String) : [];
+    else if (item.kind === 'ids') values[item.key] = Array.isArray(raw) ? raw.join(', ') : '';
+    else values[item.key] = raw === undefined || raw === null ? '' : String(raw);
+  }
+  return { key, id: event.id, type, values };
+}
+
+function eventFromDraft(draft: EventDraft): PointTriggerEventInput {
+  const properties: Record<string, unknown> = {};
+  for (const item of triggerEventKinds[draft.type].fields) {
+    const value = draft.values[item.key];
+    if (item.kind === 'flag') properties[item.key] = value === true;
+    else if (item.kind === 'pick') {
+      const chosen = Array.isArray(value) ? value : [];
+      properties[item.key] = item.source === 'tags' ? chosen : chosen.map(Number);
+    } else if (item.kind === 'ids') {
+      properties[item.key] = String(value ?? '').split(',').map(part => part.trim()).filter(Boolean).map(Number);
+    } else if (item.kind === 'pickOne') {
+      const chosen = Number(value);
+      properties[item.key] = item.key === 'useremail' ? { email: chosen } : chosen;
+    } else properties[item.key] = String(value ?? '').trim();
+  }
+  return { ...(draft.id ? { id: draft.id } : {}), type: draft.type, properties };
+}
+
 function PointTriggerForm({ trigger, onClose, onDone }: { trigger?: PointTrigger; onClose: () => void; onDone: () => void }) {
   const action = useAction();
   const { values, field } = useFields({ name: trigger?.name ?? '', description: trigger?.description ?? '' });
   const [points, setPoints] = useState(trigger?.points ?? 50);
   const [published, setPublished] = useState(trigger?.published ?? true);
   const [triggerExistingLeads, setTriggerExistingLeads] = useState(trigger?.triggerExistingLeads ?? false);
+  const [drafts, setDrafts] = useState<EventDraft[]>(() =>
+    (trigger?.events ?? []).flatMap((event, index) => draftFromEvent(index, event) ?? []));
+  const [eventsChanged, setEventsChanged] = useState(false);
+  const [nextKey, setNextKey] = useState(trigger?.events.length ?? 0);
+  const [newType, setNewType] = useState<PointTriggerEventType>('lead.changetags');
+  const segments = useResource<Segment[]>(segmentPath);
+  const tags = useResource<Tag[]>(tagPath);
+  const stages = useResource<Stage[]>(stagePath);
+  const emails = useResource<JourneyEmail[]>('/journey-emails');
+  const campaigns = useResource<Workflow[]>('/workflows');
+  const choices: Record<TriggerSource, { value: string; label: string }[]> = {
+    segments: optionsOf(segments.data),
+    tags: (tags.data ?? []).map(item => ({ value: item.tag, label: item.tag })),
+    stages: optionsOf(stages.data),
+    emails: optionsOf(emails.data?.filter(item => item.published)),
+    campaigns: optionsOf(campaigns.data),
+  };
+  const skipped = (trigger?.events.length ?? 0) - (trigger?.events.filter(event => event.type in triggerEventKinds).length ?? 0);
 
-  return <Modal title={trigger ? 'Edit score trigger' : 'Create score trigger'} onClose={onClose}>
+  function update(key: number, next: (draft: EventDraft) => EventDraft) {
+    setDrafts(current => current.map(draft => draft.key === key ? next(draft) : draft));
+    setEventsChanged(true);
+  }
+
+  return <Modal title={trigger ? 'Edit score trigger' : 'Create score trigger'} onClose={onClose} size="large">
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
+        if (!drafts.length) throw new Error('Add at least one event. A trigger with no events does nothing.');
         await api(trigger ? `${pointTriggerPath}/${trigger.id}` : pointTriggerPath, trigger ? 'PATCH' : 'POST', {
           name: values.name.trim(),
           description: values.description.trim(),
           points,
           published,
           triggerExistingLeads,
+          ...(!trigger || eventsChanged ? { events: drafts.map(eventFromDraft) } : {}),
         });
         onDone();
       });
@@ -649,6 +811,51 @@ function PointTriggerForm({ trigger, onClose, onDone }: { trigger?: PointTrigger
       <TextArea label="Description" rows={2} isOptional {...field('description')} />
       <CheckboxInput label="Trigger for existing contacts who already meet this score" value={triggerExistingLeads} onChange={setTriggerExistingLeads} />
       <Switch label="Published" value={published} onChange={setPublished} />
+      <Text weight="semibold">Events</Text>
+      <Text type="supporting" color="secondary">What happens when a contact reaches the threshold. A trigger with no events does nothing.</Text>
+      {skipped > 0 ? <Text type="supporting" color="secondary">{skipped} event{skipped === 1 ? '' : 's'} of an unsupported type {skipped === 1 ? 'is' : 'are'} kept until you change events here.</Text> : null}
+      {drafts.map((draft, index) => <Panel key={draft.key} title={`${index + 1}. ${triggerEventKinds[draft.type].label}`}
+        action={<Button size="sm" variant="ghost" label="Remove" icon={<Trash2 size={14} />} onClick={() => {
+          setDrafts(current => current.filter(item => item.key !== draft.key));
+          setEventsChanged(true);
+        }} />}>
+        <div className="ov-stack-sm">
+          {triggerEventKinds[draft.type].fields.map(item => {
+            const value = draft.values[item.key];
+            const set = (next: string | string[] | boolean) => update(draft.key, current => ({ ...current, values: { ...current.values, [item.key]: next } }));
+            if (item.kind === 'flag') return <CheckboxInput key={item.key} label={item.label} value={value === true} onChange={set} />;
+            if (item.kind === 'pickOne') {
+              return <Selector key={item.key} label={item.label} placeholder="Select an option" value={String(value || '') || null} hasClear
+                options={choices[item.source!]} onChange={next => set(next ?? '')} />;
+            }
+            if (item.kind === 'pick') {
+              const chosen = Array.isArray(value) ? value : [];
+              const options = choices[item.source!];
+              return <fieldset key={item.key} className="ov-stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
+                <Text weight="semibold">{item.label}</Text>
+                {options.length ? options.map(option => <CheckboxInput key={option.value} label={option.label} value={chosen.includes(option.value)}
+                  onChange={on => set(on ? [...chosen, option.value] : chosen.filter(entry => entry !== option.value))} />)
+                  : <Text type="supporting" color="secondary">Nothing to choose from yet.</Text>}
+              </fieldset>;
+            }
+            return <TextInput key={item.key} label={item.label} description={item.description} isOptional
+              value={String(value ?? '')} onChange={set} />;
+          })}
+        </div>
+      </Panel>)}
+      <div className="ov-toolbar">
+        <Selector label="Event type" value={newType} options={triggerEventTypeOptions}
+          onChange={value => setNewType((value as PointTriggerEventType) || 'lead.changetags')} width={260} />
+        <Button label="Add event" icon={<Plus size={14} />} onClick={() => {
+          setDrafts(current => [...current, draftFromEvent(nextKey, { type: newType })!]);
+          setNextKey(nextKey + 1);
+          setEventsChanged(true);
+        }} />
+      </div>
+      <AsyncState loading={segments.loading || tags.loading || stages.loading || emails.loading || campaigns.loading}
+        error={segments.error || tags.error || stages.error || emails.error || campaigns.error} retry={() => {
+          segments.refresh(); tags.refresh(); stages.refresh(); emails.refresh(); campaigns.refresh();
+        }} />
       <Feedback error={action.error} />
       <FormActions>
         <Button label="Cancel" onClick={onClose} />
@@ -1730,6 +1937,7 @@ export function ContactView({ id }: { id: string }) {
   const mailingLists = useResource<MailingList[]>(listPath);
   const stages = useResource<Stage[]>(stagePath);
   const workflows = useResource<Workflow[]>('/workflows');
+  const fieldDefinitions = useResource<CustomField[]>(`${fieldPath}/contact`);
   const action = useAction();
 
   const [modal, setModal] = useState<'edit' | 'delete' | 'send-email' | 'clear-bounces'>();
@@ -1833,6 +2041,15 @@ export function ContactView({ id }: { id: string }) {
             <MetadataListItem label="Updated">{date(contact.updatedAt)}</MetadataListItem>
           </MetadataList>
         </Panel>
+
+        {(fieldDefinitions.data ?? []).some(item => item.published && !coreFieldAliases.has(item.alias)) ? <Panel title="Custom fields"
+          description="Values from your contact field definitions."
+          action={<Button size="sm" variant="ghost" label="Edit" icon={<Pencil size={14} />} onClick={() => setModal('edit')} />}>
+          <MetadataList>
+            {(fieldDefinitions.data ?? []).filter(item => item.published && !coreFieldAliases.has(item.alias)).map(item =>
+              <MetadataListItem key={item.id} label={item.label || item.alias}>{showCustomValue(item, contact.customFields?.[item.alias])}</MetadataListItem>)}
+          </MetadataList>
+        </Panel> : null}
 
         <Panel title="Email consent" action={<StatusBadge label={consentLabel[contact.consent][0]} tone={consentLabel[contact.consent][1]} />}>
           {contact.consent === 'suppressed' ? <Text color="secondary">Marketing emails are blocked for this contact across newsletters and automations.</Text>

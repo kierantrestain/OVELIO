@@ -71,6 +71,24 @@ export function published(value: ApiRecord) {
   return flag(value.isPublished) && (!start || start <= now) && (!end || end > now);
 }
 
+const coreContactKeys = new Set([
+  'email', 'firstname', 'lastname', 'company', 'phone', 'position', 'city', 'country', 'website',
+  'id', 'points', 'last_active', 'date_added', 'date_modified', 'date_identified',
+]);
+
+function customFieldValues(all: ApiRecord) {
+  const values: Record<string, string> = {};
+  for (const [alias, raw] of Object.entries(all)) {
+    if (coreContactKeys.has(alias)) continue;
+    const value = typeof raw === 'string' ? raw
+      : typeof raw === 'number' ? String(raw)
+        : typeof raw === 'boolean' ? (raw ? '1' : '0')
+          : Array.isArray(raw) ? raw.filter(part => typeof part === 'string').join('|') : '';
+    if (value.trim()) values[alias] = value;
+  }
+  return values;
+}
+
 export function toContact(value: ApiRecord): Contact {
   const fields = record(record(value.fields).all);
   const tags = Object.values(record(value.tags));
@@ -99,6 +117,7 @@ export function toContact(value: ApiRecord): Contact {
       .map(tag => text(record(tag).tag)).filter(Boolean),
     suppressed: Object.entries(entries).some(([channel, entry]) =>
       channel === 'email' || text(record(entry).channel) === 'email'),
+    customFields: customFieldValues(fields),
   };
 }
 
