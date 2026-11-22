@@ -1,0 +1,66 @@
+name: Verify OVELIO
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: Lint, type check, unit tests and dependency audit
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test
+          npm audit --omit=dev --audit-level=high
+      - name: Install acceptance browser
+        run: npx playwright install --with-deps chromium
+      - name: Build and start test deployment
+        run: |
+          sh deploy/init-env.sh
+          docker compose build app
+          docker compose up -d --wait --wait-timeout 420
+      - name: Exercise live audience, delivery, automation and analytics
+        run: |
+          npm run test:integration
+          npm run test:e2e
+      - name: Restart and verify persisted data
+        run: |
+          docker compose down
+          docker compose up -d --wait --wait-timeout 240
+          node --import tsx test/integration/verify-state.ts persisted
+      - name: Verify backup, client isolation and restore
+        run: |
+          sh deploy/backup.sh "${RUNNER_TEMP}/ovelio-backup"
+          docker compose down
+          OVELIO_PORT=3101 MAILPIT_PORT=8026 sh deploy/init-env.sh .env.isolated
+          export OVELIO_PRIMARY_TEST_PASSWORD="$(sed -n 's/^OVELIO_ADMIN_PASSWORD=//p' .env)"
+          docker compose --env-file .env.isolated -p ovelio-isolated up -d --wait --wait-timeout 240
+          OVELIO_TEST_ENV_FILE=.env.isolated node --import tsx test/integration/verify-state.ts isolated
+          docker compose --env-file .env.isolated -p ovelio-isolated down --volumes
+          COMPOSE_PROJECT_NAME=ovelio-restored sh deploy/restore.sh "${RUNNER_TEMP}/ovelio-backup"
+          docker compose -p ovelio-restored up -d --wait --wait-timeout 240
+          node --import tsx test/integration/verify-state.ts persisted
+      - name: Show service health on failure
+        if: failure()
+        run: |
+          docker compose ps --all || true
+          if [ -f .env.isolated ]; then docker compose --env-file .env.isolated -p ovelio-isolated ps --all || true; fi
+          docker compose -p ovelio-restored ps --all || true

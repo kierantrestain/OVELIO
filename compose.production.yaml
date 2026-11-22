@@ -1,0 +1,20 @@
+services:
+  gateway:
+    environment:
+      CADDY_SITE: "${OVELIO_HOST:?Set OVELIO_HOST to the public DNS name}"
+    ports: !override ["80:80", "443:443", "443:443/udp"]
+  app:
+    environment:
+      OVELIO_ENV: production
+      SMTP_FROM_EMAIL: "${SMTP_FROM_EMAIL:?Set SMTP_FROM_EMAIL}"
+      SMTP_RELAY_HOST: "${SMTP_RELAY_HOST:?Set SMTP_RELAY_HOST}"
+  worker:
+    environment:
+      OVELIO_ENV: production
+  smtp-policy:
+    environment:
+      OVELIO_ENV: production
+      SMTP_RELAY_HOST: "${SMTP_RELAY_HOST:?Set SMTP_RELAY_HOST}"
+      SMTP_RELAY_TLS: "${SMTP_RELAY_TLS:?Set SMTP_RELAY_TLS to starttls or smtps}"
+  mailpit:
+    profiles: [local-smtp]

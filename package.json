@@ -1,0 +1,49 @@
+{
+  "name": "ovelio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/unit/*.test.ts",
+    "test:integration": "node --import tsx --test test/integration/*.test.ts",
+    "test:e2e": "playwright test",
+    "migrate": "node --import tsx scripts/migrate.ts",
+    "worker": "node --import tsx scripts/worker.ts",
+    "smtp": "node --import tsx scripts/smtp.ts"
+  },
+  "dependencies": {
+    "lucide-react": "1.77.0",
+    "next": "16.4.6",
+    "nodemailer": "10.6.1",
+    "papaparse": "5.5.2",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "sanitize-html": "2.18.2",
+    "smtp-server": "3.21.7",
+    "tsx": "4.23.15",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@tailwindcss/postcss": "4.3.5",
+    "@types/node": "^22",
+    "@types/nodemailer": "8.0.2",
+    "@types/papaparse": "^5.5.0",
+    "@types/pg": "8.23.1",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/sanitize-html": "2.16.2",
+    "@types/smtp-server": "3.5.13",
+    "eslint": "^9.39.0",
+    "eslint-config-next": "16.4.6",
+    "tailwindcss": "4.3.5",
+    "typescript": "5.9.3"
+  }
+}

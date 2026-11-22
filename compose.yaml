@@ -1,0 +1,401 @@
+x-postgres: &postgres
+  image: postgres:17.9-alpine
+  restart: unless-stopped
+  healthcheck:
+    test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+    interval: 5s
+    timeout: 4s
+    retries: 30
+
+x-platform: &platform
+  image: ovelio-local:0.1.0
+  pull_policy: never
+  init: true
+
+x-platform-env: &platform-env
+  APP_ORIGIN: "${APP_ORIGIN:-http://localhost:3100}"
+  OVELIO_ADMIN_EMAIL: "${OVELIO_ADMIN_EMAIL:-admin@ovelio.test}"
+  OVELIO_ADMIN_NAME: "${OVELIO_ADMIN_NAME:-Administrator}"
+  OVELIO_ADMIN_PASSWORD: "${OVELIO_ADMIN_PASSWORD:?Run deploy/init-env.sh first}"
+  CONTACT_HMAC_KEY: "${CONTACT_HMAC_KEY:?Set CONTACT_HMAC_KEY}"
+  SUPPRESSION_WEBHOOK_SECRET: "${SUPPRESSION_WEBHOOK_SECRET:?Set SUPPRESSION_WEBHOOK_SECRET}"
+  DATABASE_URL: "postgresql://ovelio:${OVELIO_DB_PASSWORD:?Set OVELIO_DB_PASSWORD}@ovelio-db:5432/ovelio"
+  MAUTIC_URL: http://mautic
+  MAUTIC_USERNAME: "${MAUTIC_USERNAME:-ovelio}"
+  MAUTIC_PASSWORD: "${MAUTIC_PASSWORD:?Set MAUTIC_PASSWORD}"
+  LISTMONK_URL: http://listmonk:9000
+  LISTMONK_USERNAME: ovelio
+  LISTMONK_PASSWORD_FILE: /run/ovelio-listmonk/token
+  UMAMI_URL: http://umami:3000
+  UMAMI_USERNAME: admin
+  UMAMI_PASSWORD: "${UMAMI_PASSWORD:?Set UMAMI_PASSWORD}"
+  SMTP_FROM_EMAIL: "${SMTP_FROM_EMAIL:-hello@ovelio.test}"
+  SMTP_GATEWAY_HOST: smtp-policy
+  SMTP_GATEWAY_PORT: 2525
+  SMTP_LISTMONK_USERNAME: newsletters
+  SMTP_LISTMONK_PASSWORD: "${SMTP_LISTMONK_PASSWORD:?Set SMTP_LISTMONK_PASSWORD}"
+  SMTP_MAUTIC_USERNAME: journeys
+  SMTP_MAUTIC_PASSWORD: "${SMTP_MAUTIC_PASSWORD:?Set SMTP_MAUTIC_PASSWORD}"
+  SMTP_RELAY_HOST: "${SMTP_RELAY_HOST:-mailpit}"
+  SMTP_RELAY_PORT: "${SMTP_RELAY_PORT:-1025}"
+  SMTP_RELAY_TLS: "${SMTP_RELAY_TLS:-local}"
+  SMTP_RELAY_USERNAME: "${SMTP_RELAY_USERNAME:-}"
+  SMTP_RELAY_PASSWORD: "${SMTP_RELAY_PASSWORD:-}"
+  SMTP_DKIM_SELECTOR: "${SMTP_DKIM_SELECTOR:-}"
+  SMTP_VERIFIED_DOMAIN: "${SMTP_VERIFIED_DOMAIN:-}"
+
+x-platform-runtime: &platform-runtime
+  <<: *platform
+  environment: *platform-env
+  restart: unless-stopped
+  volumes:
+    - listmonk-access:/run/ovelio-listmonk:ro
+  networks: [integration, appdata]
+
+x-mautic-env: &mautic-env
+  APP_ORIGIN: "${APP_ORIGIN:-http://localhost:3100}"
+  MAUTIC_DB_HOST: mautic-db
+  MAUTIC_DB_PORT: 3306
+  MAUTIC_DB_DATABASE: mautic
+  MAUTIC_DB_USER: mautic
+  MAUTIC_DB_PASSWORD: "${MAUTIC_DB_PASSWORD:?Set MAUTIC_DB_PASSWORD}"
+  MAUTIC_API_ENABLED: 'true'
+  MAUTIC_API_ENABLE_BASIC_AUTH: 'true'
+  MAUTIC_CONTACT_API_COUNT_CACHE_TTL: 0
+  MAUTIC_MAILER_FROM_EMAIL: "${SMTP_FROM_EMAIL:-hello@ovelio.test}"
+  MAUTIC_MAILER_FROM_NAME: "${MAIL_FROM_NAME:-OVELIO}"
+  MAUTIC_MAILER_DSN: "smtp://journeys:${SMTP_MAUTIC_PASSWORD:?Set SMTP_MAUTIC_PASSWORD}@smtp-policy:2525?auto_tls=false"
+  MAUTIC_MAILER_RETURN_PATH: "${SMTP_FROM_EMAIL:-hello@ovelio.test}"
+  MAUTIC_MESSENGER_DSN_EMAIL: "doctrine://default?queue_name=email"
+  MAUTIC_MESSENGER_DSN_HIT: "doctrine://default?queue_name=hit"
+  DOCKER_MAUTIC_WORKERS_CONSUME_EMAIL: 1
+  DOCKER_MAUTIC_WORKERS_CONSUME_HIT: 1
+  DOCKER_MAUTIC_WORKERS_CONSUME_FAILED: 1
+
+x-mautic: &mautic
+  image: mautic/mautic:7.2.2-apache
+  init: true
+  networks: [integration, mauticdata]
+  volumes:
+    - mautic-config:/var/www/html/config
+    - mautic-media:/var/www/html/docroot/media
+  environment: *mautic-env
+
+x-listmonk-env: &listmonk-env
+  LISTMONK_app__address: 0.0.0.0:9000
+  LISTMONK_db__host: listmonk-db
+  LISTMONK_db__port: 5432
+  LISTMONK_db__user: listmonk
+  LISTMONK_db__password: "${LISTMONK_DB_PASSWORD:?Set LISTMONK_DB_PASSWORD}"
+  LISTMONK_db__database: listmonk
+  LISTMONK_db__ssl_mode: disable
+  LISTMONK_db__max_open: 12
+  LISTMONK_db__max_idle: 4
+  TZ: Etc/UTC
+
+services:
+  gateway:
+    image: caddy:2.11.2-alpine
+    environment:
+      CADDY_SITE: 'http://:80'
+    ports:
+      - "${OVELIO_BIND:-127.0.0.1}:${OVELIO_PORT:-3100}:80"
+    networks: [edge, integration]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:9900/health"]
+
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  ovelio-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: ovelio
+      POSTGRES_DB: ovelio
+      POSTGRES_PASSWORD: "${OVELIO_DB_PASSWORD:?Set OVELIO_DB_PASSWORD}"
+    networks: [appdata]
+    volumes: [ovelio-data:/var/lib/postgresql/data]
+
+  migrate:
+    <<: *platform
+    command: [node, --import, tsx, scripts/migrate.ts]
+    environment: *platform-env
+    networks: [appdata]
+    depends_on:
+      ovelio-db:
+        condition: service_healthy
+
+  app:
+    <<: *platform-runtime
+    build: .
+    command: [node, node_modules/next/dist/bin/next, start, --hostname, 0.0.0.0, --port, '3000']
+    networks: [integration, appdata, outbound]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      listmonk:
+        condition: service_healthy
+      mautic:
+        condition: service_healthy
+      umami-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 7s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    <<: *platform-runtime
+    command: [node, --import, tsx, scripts/worker.ts]
+    networks: [integration, appdata, outbound]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      listmonk:
+        condition: service_healthy
+      mautic:
+        condition: service_healthy
+      smtp-policy:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, deploy/health-worker.mjs]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  smtp-policy:
+    <<: *platform-runtime
+    command: [node, --import, tsx, scripts/smtp.ts]
+    networks: [integration, appdata, outbound]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      listmonk:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "const s=require('net').connect(2525,'127.0.0.1');s.on('data',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  mautic-db:
+    image: mariadb:11.8.5
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: mautic
+      MARIADB_USER: mautic
+      MARIADB_PASSWORD: "${MAUTIC_DB_PASSWORD:?Set MAUTIC_DB_PASSWORD}"
+      MARIADB_ROOT_PASSWORD: "${MAUTIC_DB_ROOT_PASSWORD:?Set MAUTIC_DB_ROOT_PASSWORD}"
+    networks: [mauticdata]
+    volumes: [mautic-data:/var/lib/mysql]
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mautic-init:
+    <<: *mautic
+    entrypoint: [/bin/sh, /ovelio/mautic-init.sh]
+    volumes:
+      - mautic-config:/var/www/html/config
+      - mautic-media:/var/www/html/docroot/media
+      - ./deploy/mautic-init.sh:/ovelio/mautic-init.sh:ro
+    environment:
+      <<: *mautic-env
+      MAUTIC_USERNAME: "${MAUTIC_USERNAME:-ovelio}"
+      MAUTIC_PASSWORD: "${MAUTIC_PASSWORD:?Set MAUTIC_PASSWORD}"
+      MAUTIC_ADMIN_EMAIL: "${MAUTIC_ADMIN_EMAIL:-journeys@ovelio.test}"
+    depends_on:
+      mautic-db:
+        condition: service_healthy
+
+  mautic:
+    <<: *mautic
+    restart: unless-stopped
+    depends_on:
+      mautic-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *mautic-env
+      DOCKER_MAUTIC_ROLE: mautic_web
+      DOCKER_MAUTIC_RUN_MIGRATIONS: 'true'
+    healthcheck:
+      test: [CMD-SHELL, 'curl -fsS -o /dev/null http://127.0.0.1/s/login']
+      interval: 8s
+      timeout: 6s
+      retries: 30
+      start_period: 25s
+
+  mautic-cron:
+    <<: *mautic
+    restart: unless-stopped
+    depends_on:
+      mautic:
+        condition: service_healthy
+    environment:
+      <<: *mautic-env
+      DOCKER_MAUTIC_ROLE: mautic_cron
+    healthcheck:
+      test: [CMD-SHELL, 'pgrep -x cron >/dev/null']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  mautic-worker:
+    <<: *mautic
+    restart: unless-stopped
+    depends_on:
+      mautic:
+        condition: service_healthy
+    environment:
+      <<: *mautic-env
+      DOCKER_MAUTIC_ROLE: mautic_worker
+    healthcheck:
+      test: [CMD-SHELL, 'pgrep -f "[m]essenger:consume" >/dev/null']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  listmonk-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: listmonk
+      POSTGRES_DB: listmonk
+      POSTGRES_PASSWORD: "${LISTMONK_DB_PASSWORD:?Set LISTMONK_DB_PASSWORD}"
+    networks: [listmonkdata]
+    volumes: [listmonk-data:/var/lib/postgresql/data]
+
+  listmonk-init:
+    image: listmonk/listmonk:v6.2.0
+    entrypoint: [/bin/sh, /ovelio/listmonk-init.sh]
+    environment:
+      <<: *listmonk-env
+      LISTMONK_ADMIN_USER: "${LISTMONK_ADMIN_USER:-internal-admin}"
+      LISTMONK_ADMIN_PASSWORD: "${LISTMONK_ADMIN_PASSWORD:?Set LISTMONK_ADMIN_PASSWORD}"
+      LISTMONK_ADMIN_API_USER: ovelio
+    networks: [listmonkdata]
+    volumes:
+      - listmonk-access:/setup
+      - ./deploy/listmonk-init.sh:/ovelio/listmonk-init.sh:ro
+    depends_on:
+      listmonk-db:
+        condition: service_healthy
+
+  listmonk:
+    image: listmonk/listmonk:v6.2.0
+    init: true
+    restart: unless-stopped
+    command: [./listmonk, '--config=']
+    environment:
+      <<: *listmonk-env
+      PUID: 1000
+      PGID: 1000
+    networks: [integration, listmonkdata]
+    volumes: [listmonk-uploads:/listmonk/uploads]
+    depends_on:
+      listmonk-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:9000/health']
+      interval: 8s
+      timeout: 5s
+      retries: 20
+
+  umami-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: umami
+      POSTGRES_DB: umami
+      POSTGRES_PASSWORD: "${UMAMI_DB_PASSWORD:?Set UMAMI_DB_PASSWORD}"
+    networks: [umamidata]
+    volumes: [umami-data:/var/lib/postgresql/data]
+
+  umami:
+    image: ghcr.io/umami-software/umami:3.5.0
+    init: true
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://umami:${UMAMI_DB_PASSWORD:?Set UMAMI_DB_PASSWORD}@umami-db:5432/umami"
+      APP_SECRET: "${UMAMI_APP_SECRET:?Set UMAMI_APP_SECRET}"
+      DISABLE_TELEMETRY: 1
+      CLIENT_IP_HEADER: x-ovelio-client-ip
+      IGNORE_BOT: 1
+      TWO_FACTOR_ENCRYPTION_KEY: "${UMAMI_2FA_KEY:?Set UMAMI_2FA_KEY}"
+    networks: [integration, umamidata]
+    depends_on:
+      umami-db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -fsS, -o, /dev/null, 'http://localhost:3000/api/heartbeat']
+      interval: 8s
+      timeout: 5s
+      retries: 25
+      start_period: 20s
+
+  umami-init:
+    <<: *platform
+    command: [node, deploy/umami-init.mjs]
+    environment:
+      UMAMI_URL: http://umami:3000
+      UMAMI_PASSWORD: "${UMAMI_PASSWORD:?Set UMAMI_PASSWORD}"
+    networks: [integration]
+    depends_on:
+      umami:
+        condition: service_healthy
+
+  mailpit:
+    image: axllent/mailpit:v1.28.4
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_DATABASE: /data/mailpit.db
+    networks: [outbound]
+    volumes: [mailpit-data:/data]
+    healthcheck:
+      test: [CMD, /mailpit, readyz]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  edge:
+  outbound:
+  integration:
+    internal: true
+  appdata:
+    internal: true
+  mauticdata:
+    internal: true
+  listmonkdata:
+    internal: true
+  umamidata:
+    internal: true
+
+volumes:
+  ovelio-data:
+  mautic-data:
+  mautic-config:
+  mautic-media:
+  listmonk-data:
+  listmonk-access:
+  listmonk-uploads:
+  umami-data:
+  caddy-data:
+  caddy-config:
+  mailpit-data:

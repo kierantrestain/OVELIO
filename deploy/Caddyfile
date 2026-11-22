@@ -1,0 +1,106 @@
+{
+	admin off
+	servers {
+		timeouts {
+			read_header 10s
+			idle 1m
+		}
+	}
+}
+
+# A separate, container-local endpoint lets TLS certificates be provisioned asynchronously.
+http://127.0.0.1:9900 {
+	bind 127.0.0.1
+	respond /health "ready" 200
+}
+
+{$CADDY_SITE:http://:80} {
+	encode zstd gzip
+	header -Server
+
+	@tracker {
+		method GET HEAD
+		path /script.js
+	}
+	handle @tracker {
+		reverse_proxy umami:3000 {
+			header_up -Authorization
+			header_up -Cookie
+		}
+	}
+
+	@collect {
+		method POST OPTIONS
+		path /api/send
+	}
+	handle @collect {
+		request_body {
+			max_size 32KB
+		}
+		reverse_proxy umami:3000 {
+			header_up -Authorization
+			header_up -Cookie
+			header_up X-Ovelio-Client-Ip {remote_host}
+		}
+	}
+
+	@listmonkPublic {
+		method GET HEAD
+		path_regexp listmonk ^/(subscription/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}|campaign/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}(/px[.]png)?|link/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}|public/static/([A-Za-z0-9_-]+/)*[A-Za-z0-9][A-Za-z0-9_.-]*|public/custom[.]css)$
+	}
+	handle @listmonkPublic {
+		header Referrer-Policy no-referrer
+		reverse_proxy listmonk:9000 {
+			header_up -Authorization
+			header_up -Cookie
+			header_down -Set-Cookie
+		}
+	}
+
+	@mauticPage {
+		method GET HEAD
+		path_regexp mautic ^/(email/(unsubscribe|dnc)/[A-Za-z0-9_-]+(/[^/]+/[A-Za-z0-9_-]+)?|email/view/[A-Za-z0-9_-]+|email/[A-Za-z0-9_-]+[.]gif|r/[A-Za-z0-9_-]+|form/(generate[.]js|embed/[0-9]+|[0-9]+|message)|media/js/mautic-form[.]js)$
+	}
+	handle @mauticPage {
+		header Referrer-Policy no-referrer
+		reverse_proxy mautic:80 {
+			header_up -Authorization
+			header_up Cookie "(^|; *)ovelio_session=[^;]*" ""
+		}
+	}
+
+	@mauticForm {
+		method POST OPTIONS
+		path /form/submit /form/submit/ajax
+	}
+	handle @mauticForm {
+		request_body {
+			max_size 2MB
+		}
+		reverse_proxy mautic:80 {
+			header_up -Authorization
+			header_up Cookie "(^|; *)ovelio_session=[^;]*" ""
+		}
+	}
+
+	@mauticOneClick {
+		method POST
+		path_regexp ^/email/unsubscribe/[A-Za-z0-9_-]+(/[^/]+/[A-Za-z0-9_-]+)?$
+	}
+	handle @mauticOneClick {
+		request_body {
+			max_size 2KB
+		}
+		reverse_proxy mautic:80 {
+			header_up -Authorization
+			header_up Cookie "(^|; *)ovelio_session=[^;]*" ""
+		}
+	}
+
+	handle {
+		request_body {
+			max_size 5MB
+		}
+		reverse_proxy app:3000
+	}
+}
