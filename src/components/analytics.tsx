@@ -98,7 +98,7 @@ function TrackingCode({ website, origin, onClose }: { website: Website; origin: 
     <div className="form-stack">
       <p>Place this script in the <code>&lt;head&gt;</code> of each page on <strong>{website.domain}</strong> you want to measure.</p>
       <pre className="snippet">{snippet}</pre>
-      <details><summary>Track a custom event</summary><pre className="snippet">{'<button data-umami-event="signed_up">Sign up</button>'}</pre></details>
+      <details><summary>Track a custom event</summary><code className="snippet">{'<button data-umami-event="signed_up">Sign up</button>'}</code></details>
       <Feedback error={action.error} notice={action.notice} />
       <div className="form-actions"><Button onClick={() => void action.run(async () => navigator.clipboard.writeText(snippet), 'Tracking code copied.')}><Copy size={15} /> Copy tracking code</Button></div>
     </div>

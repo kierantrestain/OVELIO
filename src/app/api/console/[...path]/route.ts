@@ -151,7 +151,7 @@ const endpoints: Entry[] = [
   route('GET', /^templates$/, async () => listmonk.templates(), 'marketer'),
   route('POST', /^templates$/, async ({ request }) => {
     const input = await readBody(request, z.object({ name, body: html }));
-    return json(await listmonk.createTemplate({ ...input, body: mailContent(input.body) }), 201);
+    return json(await listmonk.createTemplate({ ...input, body: mailContent(input.body, true) }), 201);
   }, 'marketer'),
   route('GET', /^forms$/, async () => mautic.forms(), 'marketer'),
   route('POST', /^forms$/, async ({ request }) => {

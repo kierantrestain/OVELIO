@@ -162,11 +162,13 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
   onDone: (notice: string) => void;
 }) {
   const action = useAction();
+  const scheduled = campaign.status === 'scheduled';
   const copy = {
     test: { title: 'Send test email', endpoint: 'test', notice: 'Test email submitted to delivery.' },
     schedule: { title: 'Schedule newsletter', endpoint: 'schedule', notice: 'Newsletter scheduled.' },
     send: { title: campaign.status === 'paused' ? 'Resume sending' : 'Send newsletter', endpoint: 'start', notice: 'Delivery started.' },
-    pause: { title: 'Pause sending', endpoint: 'pause', notice: 'Delivery paused.' },
+    pause: scheduled ? { title: 'Cancel schedule', endpoint: 'pause', notice: 'Schedule cancelled. The newsletter is now a draft.' }
+      : { title: 'Pause sending', endpoint: 'pause', notice: 'Delivery paused.' },
   }[mode];
   return <Dialog title={copy.title} onClose={onClose}>
     <form className="form-stack" onSubmit={event => {
@@ -182,7 +184,9 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
       {mode === 'test' ? <Field label="Recipient email" help="Use an audience contact with recorded marketing consent."><input name="email" type="email" required maxLength={254} /></Field> : null}
       {mode === 'schedule' ? <Field label="Send date and time" help="Enter the time in your device’s local timezone."><input name="sendAt" required type="datetime-local" /></Field> : null}
       {mode === 'send' ? <p>Start sending <strong>{campaign.name}</strong> to eligible subscribers on its selected lists?</p> : null}
-      {mode === 'pause' ? <p>Pause delivery of <strong>{campaign.name}</strong>? Emails already submitted for delivery may still arrive.</p> : null}
+      {mode === 'pause' ? scheduled
+        ? <p>Return <strong>{campaign.name}</strong> to draft and cancel its scheduled send?</p>
+        : <p>Pause delivery of <strong>{campaign.name}</strong>? Emails already submitted for delivery may still arrive.</p> : null}
       <Feedback error={action.error} />
       <div className="form-actions"><Button onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={action.busy}>{mode === 'send' && campaign.status !== 'paused' ? 'Send now' : copy.title}</Button></div>
     </form>
@@ -210,7 +214,8 @@ export function CampaignView({ id }: { id: string }) {
         <Button onClick={() => setModal('test')}><MailCheck size={15} /> Send test</Button>
         {['draft', 'paused', 'scheduled'].includes(campaign.status) ? <Button onClick={() => setModal('schedule')}><Timer size={15} /> Schedule</Button> : null}
         {['draft', 'paused'].includes(campaign.status) ? <Button variant="primary" onClick={() => setModal('send')}><Send size={15} /> {campaign.status === 'paused' ? 'Resume' : 'Send newsletter'}</Button> : null}
-        {campaign.status === 'running' ? <Button onClick={() => setModal('pause')}>Pause</Button> : null}
+        {campaign.status === 'running' || campaign.status === 'scheduled'
+          ? <Button onClick={() => setModal('pause')}>{campaign.status === 'scheduled' ? 'Cancel schedule' : 'Pause'}</Button> : null}
       </> : undefined} />
     {!campaign ? <Panel><AsyncState loading={resource.loading} error={resource.error} retry={resource.refresh} /></Panel>
       : <div className="stack">

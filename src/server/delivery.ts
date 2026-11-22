@@ -8,10 +8,14 @@ import { db, transaction } from './db';
 import { listmonk } from './listmonk';
 
 const metricKeys: (keyof CampaignMetrics)[] = ['sent', 'delivered', 'opens', 'clicks', 'bounces', 'unsubscribes'];
+const contentSlot = '{{ template "content" . }}';
+const contentMarker = 'OVELIO_NEWSLETTER_CONTENT_SLOT';
+const spacing = /^\d+(?:\.\d+)?(?:px|rem|em|%)?(?:\s+\d+(?:\.\d+)?(?:px|rem|em|%)?){0,3}$/;
 
-export function mailContent(body: string) {
-  const output = sanitize(body.replaceAll('{{', '&#123;&#123;'), {
-    allowedTags: [...sanitize.defaults.allowedTags, 'img', 'center', 'font', 'hr', 'header', 'section', 'tfoot'],
+export function mailContent(body: string, template = false) {
+  const source = template ? body.replaceAll(contentSlot, contentMarker) : body;
+  const output = sanitize(source.replaceAll('{{', '&#123;&#123;'), {
+    allowedTags: [...sanitize.defaults.allowedTags, 'img', 'center', 'font', 'hr', 'header', 'section', 'tfoot', 'main'],
     allowedAttributes: {
       '*': ['style', 'align', 'width', 'height', 'valign', 'bgcolor', 'lang', 'dir'],
       a: ['href', 'name', 'target', 'title'],
@@ -31,8 +35,8 @@ export function mailContent(body: string) {
         'line-height': [/^[\d.]+(?:px|rem|em|%)?$/],
         'text-align': [/^(?:left|center|right|justify)$/],
         'text-decoration': [/^(?:underline|none|line-through)$/],
-        padding: [/^[\d.\s]+(?:px|rem|em|%)?[\d.\spxrem%]*$/],
-        margin: [/^[\d.\s]+(?:px|rem|em|%)?[\d.\spxrem%]*$/],
+        padding: [spacing],
+        margin: [spacing],
         width: [/^[\d.]+(?:px|rem|em|%)$/],
         'max-width': [/^[\d.]+(?:px|rem|em|%)$/],
         height: [/^[\d.]+(?:px|rem|em|%)$/],
@@ -44,7 +48,8 @@ export function mailContent(body: string) {
     allowProtocolRelative: false,
   });
   if (!output.trim()) throw new AppError(400, 'Enter email content.');
-  return output.replaceAll('{{', '&#123;&#123;');
+  const safe = output.replaceAll('{{', '&#123;&#123;');
+  return template ? safe.replaceAll(contentMarker, contentSlot) : safe;
 }
 
 export function approvedCampaign(input: CampaignInput): CampaignInput {

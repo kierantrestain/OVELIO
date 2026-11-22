@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import type {
-  Campaign, Contact, ContactDetail, Dashboard, JourneyEmail, MailingList, Page, Segment, Settings, Workflow,
+  Campaign, Contact, ContactDetail, Dashboard, JourneyEmail, MailingList, Page, Segment, Settings, Template, Workflow,
 } from '../../src/contracts/index';
 import { apiClient, eventually, testEnv } from './client';
 
@@ -70,12 +70,19 @@ test('real audience, newsletter, suppression and welcome workflows', { timeout: 
   }, item => item?.subscriberCount === 2);
   assert.ok(list);
 
-  const campaignBody = { name: subject, subject, body: '<h1>News from OVELIO</h1><p>Welcome to the edition.</p>', listIds: [list.id] };
+  const template = await api.get<Template>('/templates', 'POST', {
+    name: 'Editorial template ' + unique, body: '<header>Editorial header</header><main>{{ template "content" . }}</main>',
+  });
+  const campaignBody = {
+    name: subject, subject, body: '<h1>News from OVELIO</h1><p>Welcome to the edition.</p>', listIds: [list.id], templateId: template.id,
+  };
   const campaign = await api.get<Campaign>('/campaigns', 'POST', campaignBody);
   assert.equal(campaign.status, 'draft');
   const preview = await api.response('/campaigns/' + campaign.id + '/preview');
   assert.ok(preview.ok);
-  assert.match(await preview.text(), /News from OVELIO/);
+  const rendered = await preview.text();
+  assert.match(rendered, /Editorial header/);
+  assert.match(rendered, /<main>\s*<h1>News from OVELIO<\/h1>/);
 
   async function messages() {
     const response = await fetch(env.mailpit + '/api/v1/messages');
@@ -138,7 +145,7 @@ test('real audience, newsletter, suppression and welcome workflows', { timeout: 
 
   const docker = process.env.OVELIO_TEST_DOCKER ?? 'docker';
   for (const command of ['mautic:segments:update', 'mautic:campaigns:update', 'mautic:campaigns:trigger']) {
-    await run(docker, ['compose', 'exec', '-T', '-u', 'www-data', 'mautic', 'php', 'bin/console', command, '--no-interaction'],
+    await run(docker, ['compose', 'exec', '-T', '-u', 'www-data', 'mautic', 'php', '/var/www/html/bin/console', command, '--no-interaction'],
       { timeout: 60000 });
   }
   await eventually('native welcome workflow email', messages, items => Boolean(delivered(items, welcomeSubject, journeyAddress)));

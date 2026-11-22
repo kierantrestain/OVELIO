@@ -23,7 +23,7 @@ export function Overview() {
   const user = useUser();
   const { data, loading, error, refresh } = useResource<Dashboard>('/overview');
   return <>
-    <PageHeader title="Overview" description="A live view of your audience, campaigns and website activity."
+    <PageHeader title="Overview" description="Audience, email and website activity for this workspace."
       actions={<Button onClick={refresh} disabled={loading}><RefreshCw size={15} /> Refresh</Button>} />
     {!data ? <Panel><AsyncState loading={loading} error={error} retry={refresh} /></Panel> : <div className="stack">
       <div className="metric-grid">
