@@ -25,8 +25,15 @@ import { Token } from '@astryxdesign/core/Token';
 import type {
   BounceRecord, Company, Contact, ContactDetail, ContactNote, CustomField, CustomFieldObject,
   JourneyEmail, MailingList, Page, PointAction, PointTrigger, PointTriggerEventInput, PointTriggerEventType,
-  Segment, SegmentFilter, Stage, SuppressionRecord, Tag, Workflow,
+  Segment, SegmentFilter, SegmentFilterField, SegmentOffsetUnit, SegmentOptions, SegmentPicker, SegmentRule, Stage,
+  SuppressionRecord, Tag, Workflow,
 } from '@/contracts';
+import {
+  canonicalSegmentOperator, emptySegmentRule, formatSegmentOffset, parseSegmentDate, resolveSegmentField, segmentDateUnits,
+  segmentFieldCatalogue, segmentFilterFromRule, segmentOffsetUnits, segmentOperatorsFor, segmentRelativeDates,
+  segmentRuleFromFilter, segmentValueMode,
+} from '@/contracts';
+import type { SelectorOptionType } from '@astryxdesign/core/Selector';
 import { api, date, number, saveFile, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
 import {
@@ -93,24 +100,6 @@ const csvTemplate = [
   'alex.morgan@example.com,Alex,Morgan,Northwind Studio,+44 20 7946 0192,Marketing Lead,London,United Kingdom,https://northwind.example.com,newsletter|vip,opted_in,Website signup form 2026-01-15',
   'sam.taylor@example.com,Sam,Taylor,Beacon Labs,,Product Manager,Manchester,United Kingdom,,product-updates,,',
 ].join('\n') + '\n';
-
-const segmentFieldOptions = [
-  { value: 'email', label: 'Email' },
-  { value: 'company', label: 'Company' },
-  { value: 'country', label: 'Country' },
-  { value: 'city', label: 'City' },
-  { value: 'points', label: 'Lead score' },
-  { value: 'tags', label: 'Tags' },
-];
-
-const segmentOperatorOptions = [
-  { value: 'like', label: 'Contains / matches' },
-  { value: 'eq', label: 'Equals' },
-  { value: 'neq', label: 'Does not equal' },
-  { value: 'gt', label: 'Greater than' },
-  { value: 'lt', label: 'Less than' },
-  { value: 'in', label: 'In list' },
-];
 
 const fallbackPointActionTypes: Record<string, string> = {
   'email.open': 'Opens an email',
@@ -350,75 +339,170 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
 
 /* ── Segments & Mailing Lists Modals ───────────────────────────────────────── */
 
-type FilterRow = {
-  key: number;
-  glue: 'and' | 'or';
-  field: string;
-  operator: string;
-  value: string;
-};
+type Choice = { value: string; label: string };
+type ValuePatch = Partial<Pick<SegmentRule, 'text' | 'text2' | 'list' | 'interval' | 'unit'>>;
+
+const yesNoChoices: Choice[] = [{ value: '1', label: 'Yes' }, { value: '0', label: 'No' }];
+const offsetUnitChoices = segmentOffsetUnits.map(unit => ({ value: unit, label: unit }));
+const dateModeChoices: Choice[] = [
+  { value: 'absolute', label: 'A specific date' },
+  { value: 'relative', label: 'A named period (today, this month…)' },
+  { value: 'offset', label: 'A number of days, weeks, months or years from today' },
+];
+
+function ChoiceChecklist({ label, choices, selected, onChange }: {
+  label: string; choices: Choice[]; selected: string[]; onChange: (next: string[]) => void;
+}) {
+  // Values saved earlier but no longer in the list stay visible so they are not dropped silently.
+  const extra = selected.filter(value => !choices.some(choice => choice.value === value)).map(value => ({ value, label: value }));
+  const all = [...choices, ...extra];
+  return <fieldset className="ov-stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
+    <Text weight="semibold">{label}</Text>
+    {all.length ? <div className="ov-stack-sm" style={{ maxHeight: 180, overflowY: 'auto' }}>
+      {all.map(choice => <CheckboxInput key={choice.value} label={choice.label} value={selected.includes(choice.value)}
+        onChange={on => onChange(on ? [...selected, choice.value] : selected.filter(entry => entry !== choice.value))} />)}
+    </div> : <Text type="supporting" color="secondary">Nothing to choose from yet.</Text>}
+  </fieldset>;
+}
+
+function DateValueInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const parsed = parseSegmentDate(value);
+  const [mode, setMode] = useState(value ? parsed.mode : 'absolute');
+  const offset = parsed.mode === 'offset' ? parsed : { amount: 7, unit: 'days' as const, direction: 'ago' as const };
+  function pick(next: string | null) {
+    const chosen = next === 'relative' || next === 'offset' ? next : 'absolute';
+    setMode(chosen);
+    onChange(chosen === 'relative' ? 'today' : chosen === 'offset' ? formatSegmentOffset(7, 'days', 'ago') : '');
+  }
+  return <div className="ov-stack-sm">
+    <Selector label={`${label} type`} value={mode} options={dateModeChoices} onChange={pick} />
+    {mode === 'relative'
+      ? <Selector label={label} value={parsed.mode === 'relative' ? parsed.value : 'today'} options={segmentRelativeDates} onChange={next => onChange(next ?? 'today')} />
+      : mode === 'offset'
+        ? <div className="ov-form-grid ov-form-grid--three">
+          <TextInput label="Amount" inputMode="numeric" value={String(offset.amount)}
+            onChange={next => onChange(formatSegmentOffset(Number(next) || 1, offset.unit, offset.direction))} />
+          <Selector label="Unit" value={offset.unit} options={offsetUnitChoices}
+            onChange={next => onChange(formatSegmentOffset(offset.amount, (next ?? 'days') as SegmentOffsetUnit, offset.direction))} />
+          <Selector label="Direction" value={offset.direction}
+            options={[{ value: 'ago', label: 'ago' }, { value: 'ahead', label: 'from now' }]}
+            onChange={next => onChange(formatSegmentOffset(offset.amount, offset.unit, next === 'ahead' ? 'ahead' : 'ago'))} />
+        </div>
+        : <TextInput label={label} placeholder="YYYY-MM-DD" description="Add a time (YYYY-MM-DD HH:MM:SS) for date and time fields." value={value}
+          onChange={onChange} />}
+  </div>;
+}
+
+function SegmentValueInput({ field, rule, choices, onChange }: {
+  field: SegmentFilterField; rule: SegmentRule; choices: Choice[]; onChange: (patch: ValuePatch) => void;
+}) {
+  const mode = segmentValueMode(rule.operator);
+  const dated = field.kind === 'date' || field.kind === 'behaviorDate';
+  if (mode === 'none') return <Text type="supporting" color="secondary">No value needed.</Text>;
+  if (mode === 'span') {
+    return <div className="ov-form-grid">
+      <TextInput label="Number" inputMode="numeric" isRequired value={rule.interval} onChange={interval => onChange({ interval })} />
+      <Selector label="Unit" value={rule.unit} options={segmentDateUnits}
+        onChange={unit => onChange({ unit: unit === 'month' || unit === 'year' ? unit : 'day' })} />
+    </div>;
+  }
+  if (mode === 'pair') {
+    return dated
+      ? <div className="ov-stack-sm">
+        <DateValueInput label="From" value={rule.text} onChange={text => onChange({ text })} />
+        <DateValueInput label="To" value={rule.text2} onChange={text2 => onChange({ text2 })} />
+      </div>
+      : <div className="ov-form-grid">
+        <TextInput label="From" isRequired value={rule.text} onChange={text => onChange({ text })} />
+        <TextInput label="To" isRequired value={rule.text2} onChange={text2 => onChange({ text2 })} />
+      </div>;
+  }
+  if (mode === 'multi') {
+    if (choices.length || field.picker) return <ChoiceChecklist label="Values" choices={choices} selected={rule.list} onChange={list => onChange({ list })} />;
+    return <TextInput label="Values" isRequired placeholder="Comma-separated values"
+      value={rule.text || rule.list.join(', ')} onChange={text => onChange({ text, list: [] })} />;
+  }
+  if (field.kind === 'boolean') return <Selector label="Value" value={rule.text === '0' ? '0' : '1'} options={yesNoChoices} onChange={text => onChange({ text: text ?? '1' })} />;
+  if ((field.kind === 'owner' || field.kind === 'stage' || choices.length) && field.kind !== 'date') {
+    return <Selector label="Value" value={rule.text} placeholder="Choose a value" hasSearch options={choices} onChange={text => onChange({ text: text ?? '' })} />;
+  }
+  if (dated) return <DateValueInput label="Value" value={rule.text} onChange={text => onChange({ text })} />;
+  const numeric = field.kind === 'number' || field.kind === 'behaviorNumber';
+  return <TextInput label="Value" isRequired inputMode={numeric ? 'decimal' : undefined}
+    placeholder={numeric ? 'e.g. 50' : rule.operator === 'regexp' || rule.operator === '!regexp' ? 'Regular expression' : 'Filter value'}
+    value={rule.text} onChange={text => onChange({ text })} />;
+}
 
 function SegmentForm({ segment, onClose, onDone }: { segment?: Segment; onClose: () => void; onDone: () => void }) {
+  const contactFields = useResource<CustomField[]>(`${fieldPath}/contact`);
+  const companyFields = useResource<CustomField[]>(`${fieldPath}/company`);
+  const lookups = useResource<SegmentOptions>('/segment-options');
+  const segments = useResource<Segment[]>(segmentPath);
+  const tags = useResource<Tag[]>(tagPath);
+  const stages = useResource<Stage[]>(stagePath);
+  const emails = useResource<JourneyEmail[]>('/journey-emails');
+  const assets = useResource<{ id: number; title: string }[]>('/assets');
+  const campaigns = useResource<Workflow[]>('/workflows');
+  const categories = useResource<{ id: number; title: string }[]>('/categories?bundle=global');
+  const error = contactFields.error || companyFields.error || lookups.error;
+  if (!contactFields.data || !companyFields.data || !lookups.data) {
+    return <Modal title={segment ? 'Edit segment' : 'Create segment'} onClose={onClose} size="large">
+      <AsyncState loading={!error} error={error} retry={() => { contactFields.refresh(); companyFields.refresh(); lookups.refresh(); }} />
+    </Modal>;
+  }
+  // Stored rows are read once the field definitions are known, so custom fields resolve to their real type.
+  const catalogue = segmentFieldCatalogue({ contactFields: contactFields.data, companyFields: companyFields.data, pointGroups: lookups.data.pointGroups });
+  const picker: Record<SegmentPicker, Choice[]> = {
+    segments: (segments.data ?? []).filter(item => item.id !== segment?.id).map(item => ({ value: String(item.id), label: item.name })),
+    tags: (tags.data ?? []).map(item => ({ value: String(item.id), label: item.tag })),
+    stages: optionsOf(stages.data),
+    owners: optionsOf(lookups.data.owners),
+    campaigns: optionsOf(campaigns.data),
+    emails: optionsOf(emails.data),
+    assets: (assets.data ?? []).map(item => ({ value: String(item.id), label: item.title })),
+    categories: (categories.data ?? []).map(item => ({ value: String(item.id), label: item.title })),
+  };
+  return <SegmentEditor segment={segment} catalogue={catalogue} picker={picker} onClose={onClose} onDone={onDone} />;
+}
+
+type RuleRow = { key: number; rule: SegmentRule };
+
+function SegmentEditor({ segment, catalogue, picker, onClose, onDone }: {
+  segment?: Segment; catalogue: SegmentFilterField[]; picker: Record<SegmentPicker, Choice[]>; onClose: () => void; onDone: () => void;
+}) {
   const action = useAction();
   const { values, field } = useFields({ name: segment?.name ?? '', description: segment?.description ?? '' });
   const [published, setPublished] = useState(segment?.published ?? true);
-  const [rules, setRules] = useState<FilterRow[]>(() =>
-    (segment?.filters ?? []).map((entry, index) => ({
-      key: index,
-      glue: entry.glue,
-      field: entry.field,
-      operator: entry.operator,
-      value: Array.isArray(entry.filter) ? entry.filter.join(', ') : String(entry.filter ?? ''),
-    })),
-  );
-  const nextKey = useRef(rules.length);
+  const [rows, setRows] = useState<RuleRow[]>(() =>
+    (segment?.filters ?? []).map((entry, key) => ({ key, rule: segmentRuleFromFilter(entry, resolveSegmentField(catalogue, entry)) })));
+  const nextKey = useRef(rows.length);
+  const byId = (id: string) => catalogue.find(entry => entry.id === id)
+    ?? resolveSegmentField(catalogue, { field: id.slice(id.indexOf(':') + 1), object: id.startsWith('company:') ? 'company' : id.startsWith('behaviors:') ? 'behaviors' : 'lead', operator: '=', filter: '' });
+  const fieldChoices = (entry: SegmentFilterField): Choice[] =>
+    entry.picker ? picker[entry.picker] : (entry.options ?? []).map(option => ({ value: option, label: option }));
+  const fieldOptions: SelectorOptionType[] = [...new Set(catalogue.map(entry => entry.group))].map(group => ({
+    type: 'section' as const, title: group,
+    options: catalogue.filter(entry => entry.group === group).map(entry => ({ value: entry.id, label: entry.label })),
+  }));
 
   function addRule() {
-    setRules(items => [...items, { key: nextKey.current++, glue: 'and', field: 'email', operator: 'like', value: '' }]);
+    const first = catalogue.find(entry => entry.id === 'lead:email') ?? catalogue[0];
+    setRows(items => [...items, { key: nextKey.current++, rule: emptySegmentRule(first) }]);
   }
 
-  function updateRule(ruleKey: number, patch: Partial<FilterRow>) {
-    setRules(items => items.map(item => item.key === ruleKey ? { ...item, ...patch } : item));
+  function updateRule(key: number, patch: Partial<SegmentRule>) {
+    setRows(items => items.map(item => item.key === key ? { ...item, rule: { ...item.rule, ...patch } } : item));
   }
 
-  function fieldOptionsFor(current: string) {
-    return segmentFieldOptions.some(opt => opt.value === current)
-      ? segmentFieldOptions
-      : [...segmentFieldOptions, { value: current, label: prettifyKey(current) }];
-  }
-
-  function operatorOptionsFor(current: string) {
-    return segmentOperatorOptions.some(opt => opt.value === current)
-      ? segmentOperatorOptions
-      : [...segmentOperatorOptions, { value: current, label: prettifyKey(current) }];
+  function changeField(key: number, id: string) {
+    setRows(items => items.map(item => item.key === key ? { ...item, rule: emptySegmentRule(byId(id), item.rule.glue) } : item));
   }
 
   return <Modal title={segment ? 'Edit segment' : 'Create segment'} onClose={onClose} size="large">
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
-        const filters: SegmentFilter[] = rules.map((rule, index) => {
-          const raw = rule.value.trim();
-          if (!raw) throw new Error(`Enter a value for filter rule ${index + 1}.`);
-          if (rule.field === 'points') {
-            const numeric = Number(raw);
-            if (!Number.isFinite(numeric)) throw new Error(`Enter a numeric score for filter rule ${index + 1}.`);
-            return { glue: index === 0 ? 'and' : rule.glue, field: rule.field, type: 'number', operator: rule.operator, filter: numeric };
-          }
-          if (rule.operator === 'in' || rule.field === 'tags') {
-            const list = raw.split(',').map(item => item.trim()).filter(Boolean);
-            if (!list.length) throw new Error(`Enter at least one value for filter rule ${index + 1}.`);
-            return {
-              glue: index === 0 ? 'and' : rule.glue,
-              field: rule.field,
-              type: rule.field === 'tags' ? 'tags' : 'text',
-              operator: rule.operator,
-              filter: list,
-            };
-          }
-          return { glue: index === 0 ? 'and' : rule.glue, field: rule.field, type: 'text', operator: rule.operator, filter: raw };
-        });
-
+        const filters: SegmentFilter[] = rows.map(({ rule }, index) => segmentFilterFromRule(rule, byId(rule.field), index));
         await api(segment ? `${segmentPath}/${segment.id}` : segmentPath, segment ? 'PATCH' : 'POST', {
           name: values.name.trim(),
           description: values.description.trim(),
@@ -435,29 +519,34 @@ function SegmentForm({ segment, onClose, onDone }: { segment?: Segment; onClose:
         <div className="ov-actions ov-actions--between">
           <div>
             <Text weight="semibold">Filter rules</Text>
-            <Text type="supporting" color="secondary">Automatically include contacts matching these conditions, or leave empty for manual membership.</Text>
+            <Text type="supporting" color="secondary">Automatically include contacts matching these conditions, or leave empty for manual membership. Rules join with AND first, then OR.</Text>
           </div>
-          {rules.length < 20 ? <Button size="sm" label="Add rule" icon={<Plus size={14} />} onClick={addRule} /> : null}
+          {rows.length < 20 ? <Button size="sm" label="Add rule" icon={<Plus size={14} />} onClick={addRule} /> : null}
         </div>
-        {rules.map((rule, index) => <div key={rule.key} className="ov-step">
-          <div className="ov-step-heading">
-            <Text weight="medium">Rule {index + 1}</Text>
-            <IconButton variant="ghost" size="sm" label={`Remove rule ${index + 1}`} icon={<Trash2 size={15} />}
-              onClick={() => setRules(items => items.filter(item => item.key !== rule.key))} />
-          </div>
-          <div className={index > 0 ? 'ov-form-grid' : 'ov-form-grid ov-form-grid--three'}>
-            {index > 0 ? <Selector label="Match" value={rule.glue}
-              options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]}
-              onChange={value => updateRule(rule.key, { glue: value === 'or' ? 'or' : 'and' })} /> : null}
-            <Selector label="Field" value={rule.field} options={fieldOptionsFor(rule.field)}
-              onChange={value => updateRule(rule.key, { field: value ?? 'email' })} />
-            <Selector label="Operator" value={rule.operator} options={operatorOptionsFor(rule.operator)}
-              onChange={value => updateRule(rule.key, { operator: value ?? 'like' })} />
-            <TextInput label="Value" isRequired value={rule.value}
-              placeholder={rule.field === 'points' ? 'e.g. 50' : rule.operator === 'in' || rule.field === 'tags' ? 'Comma-separated values' : 'Filter value'}
-              onChange={value => updateRule(rule.key, { value })} />
-          </div>
-        </div>)}
+        {rows.map(({ key, rule }, index) => {
+          const entry = byId(rule.field);
+          const operators = segmentOperatorsFor(entry, rule.operator);
+          return <div key={key} className="ov-step">
+            <div className="ov-step-heading">
+              <Text weight="medium">Rule {index + 1}</Text>
+              <IconButton variant="ghost" size="sm" label={`Remove rule ${index + 1}`} icon={<Trash2 size={15} />}
+                onClick={() => setRows(items => items.filter(item => item.key !== key))} />
+            </div>
+            <div className="ov-stack-sm">
+              <div className={index > 0 ? 'ov-form-grid ov-form-grid--three' : 'ov-form-grid'}>
+                {index > 0 ? <Selector label="Match" value={rule.glue}
+                  options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]}
+                  onChange={value => updateRule(key, { glue: value === 'or' ? 'or' : 'and' })} /> : null}
+                <Selector label="Field" value={rule.field} hasSearch
+                  options={catalogue.some(item => item.id === rule.field) ? fieldOptions : [...fieldOptions, { value: rule.field, label: entry.label }]}
+                  onChange={value => value && changeField(key, value)} />
+                <Selector label="Operator" value={canonicalSegmentOperator(rule.operator)} options={operators.map(({ value, label }) => ({ value, label }))}
+                  onChange={value => value && updateRule(key, { operator: value })} />
+              </div>
+              <SegmentValueInput field={entry} rule={rule} choices={fieldChoices(entry)} onChange={patch => updateRule(key, patch)} />
+            </div>
+          </div>;
+        })}
       </div>
       <Feedback error={action.error} />
       <FormActions>
@@ -465,6 +554,30 @@ function SegmentForm({ segment, onClose, onDone }: { segment?: Segment; onClose:
         <Button type="submit" variant="primary" label={segment ? 'Save segment' : 'Create segment'} isLoading={action.busy} isDisabled={!values.name.trim()} />
       </FormActions>
     </form>
+  </Modal>;
+}
+
+function SegmentPreview({ segment, onClose }: { segment: Segment; onClose: () => void }) {
+  const members = useResource<Page<Contact>>(`${contactsPath}?segmentId=${segment.id}&limit=50`);
+  return <Modal title={`Members of “${segment.name}”`} onClose={onClose} size="large">
+    <div className="ov-stack-sm">
+      <Text type="supporting" color="secondary">
+        {segment.contactCount == null ? 'Member count not reported yet.' : `${number(segment.contactCount)} member${segment.contactCount === 1 ? '' : 's'} counted by the engine.`}
+        {' '}Rebuilds run on the engine’s schedule, so recent rule or contact changes may not show until its next run.
+      </Text>
+      {!members.data ? <AsyncState loading={members.loading} error={members.error} retry={members.refresh} />
+        : members.data.items.length ? <>
+          <Rows>{members.data.items.map(item => <li key={item.id}>
+            <span className="ov-cell">
+              <Text>{[item.firstName, item.lastName].filter(Boolean).join(' ') || item.email || `Contact ${item.id}`}</Text>
+              {item.email ? <Text type="supporting" color="secondary">{item.email}</Text> : null}
+            </span>
+          </li>)}</Rows>
+          {members.data.total > members.data.items.length
+            ? <Text type="supporting" color="secondary">Showing the first {number(members.data.items.length)} of {number(members.data.total)} identified members.</Text> : null}
+        </> : <Empty title="No members yet" description="Nobody is in this segment as of the engine’s last rebuild." />}
+      <FormActions><Button label="Close" onClick={onClose} /></FormActions>
+    </div>
   </Modal>;
 }
 
@@ -1247,6 +1360,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const [contactModal, setContactModal] = useState(false);
   const [importModal, setImportModal] = useState(false);
   const [segmentModal, setSegmentModal] = useState<'new' | Segment>();
+  const [previewSegment, setPreviewSegment] = useState<Segment>();
   const [listModal, setListModal] = useState<'new' | MailingList>();
   const [tagModal, setTagModal] = useState(false);
   const [stageModal, setStageModal] = useState<'new' | Stage>();
@@ -1461,7 +1575,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
       </>}
     </Panel> : null}
 
-    {tab === 'Segments' ? <Panel title="Segments" description="Build dynamic or manual groups for automations and synchronise opted-in members for newsletters.">
+    {tab === 'Segments' ? <Panel title="Segments" description="Build dynamic or manual groups for automations and synchronise opted-in members for newsletters. Rebuilds run on the engine's schedule, so counts and members can lag behind recent changes.">
       {!segments.data ? <AsyncState loading={segments.loading} error={segments.error} retry={segments.refresh} />
         : <Table data={segments.data} idKey="id" hasHover emptyState={<Empty title="No segments yet" description="Create a segment to target automations and newsletters." />}
           columns={[
@@ -1481,12 +1595,24 @@ export function Audience({ initialTab }: { initialTab?: string }) {
                 return count ? <StatusBadge label={`${number(count)} rule${count === 1 ? '' : 's'}`} tone="info" /> : <StatusBadge label="Manual" />;
               },
             },
+            {
+              key: 'contactCount',
+              header: 'Members',
+              align: 'end',
+              renderCell: group => group.contactCount == null ? <Text color="secondary">—</Text> : <Text>{number(group.contactCount)}</Text>,
+            },
+            {
+              key: 'lastBuiltAt',
+              header: 'Last built',
+              renderCell: group => group.lastBuiltAt ? <Timestamp value={group.lastBuiltAt} /> : <Text color="secondary">Not reported</Text>,
+            },
             { key: 'published', header: 'Status', renderCell: group => <StatusBadge label={group.published ? 'Published' : 'Draft'} tone={group.published ? 'success' : 'neutral'} /> },
             {
               key: 'alias',
               header: 'Actions',
               align: 'end',
               renderCell: group => <span className="ov-actions ov-actions--end">
+                <Button size="sm" variant="ghost" label="Preview" icon={<Search size={14} />} onClick={() => setPreviewSegment(group)} />
                 <Button size="sm" label="Sync subscribers" icon={<ListFilter size={14} />} isDisabled={action.busy || !group.published}
                   tooltip={!group.published ? 'Publish this segment before synchronising it.' : undefined}
                   onClick={() => void action.run(async () => { await api(`${segmentPath}/${group.id}/sync`, 'POST'); setNotice(''); }, `Sync queued for ${group.name}.`)} />
@@ -1863,6 +1989,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
 
     {contactModal ? <ContactForm onClose={() => setContactModal(false)} onDone={contact => router.push(`/audience/${contact.id}`)} /> : null}
     {importModal ? <ImportForm onClose={() => setImportModal(false)} onImported={() => { contacts.refresh(); setNotice('Import processed.'); }} /> : null}
+    {previewSegment ? <SegmentPreview segment={previewSegment} onClose={() => setPreviewSegment(undefined)} /> : null}
     {segmentModal ? <SegmentForm segment={segmentModal === 'new' ? undefined : segmentModal} onClose={() => setSegmentModal(undefined)} onDone={() => {
       setNotice(segmentModal === 'new' ? 'Segment created.' : 'Segment updated.');
       setSegmentModal(undefined);

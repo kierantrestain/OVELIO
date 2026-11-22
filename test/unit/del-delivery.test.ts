@@ -97,6 +97,9 @@ test('DEL-04 metrics say why delivered and unsubscribes are unavailable', () => 
   assert.equal(metrics.delivered, null);
   assert.equal(metrics.sent, 5);
   assert.ok(metrics.unavailable?.delivered && metrics.unavailable.unsubscribes);
+  const counted = aggregateEmailMetrics([{ metrics: { sent: 5, delivered: null, opens: 1, clicks: 0, bounces: 0, unsubscribes: 2 } }]);
+  assert.equal(counted.unsubscribes, 2);
+  assert.equal(counted.unavailable?.unsubscribes, undefined);
 });
 
 test('DEL-04 dashboard totals stay numeric past 100 campaigns', async () => {

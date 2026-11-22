@@ -115,4 +115,8 @@ The integration and browser suites require the local Compose stack and use synth
 - Public analytics share pages need their own subdomain and aren't linked from the console yet. Tracked links (`/q/`) and pixels (`/p/`) work on the main address.
 - Website reports can't be filtered by channel or screen size, because the analytics engine has no filter for them. Both still appear as breakdowns.
 - Point triggers can't add contacts to workflows. Mautic 7.2.2 registers that trigger action without a working handler, so OVELIO doesn't offer it.
+- Segment membership is rebuilt on the audience engine's own schedule. Mautic 7.2.2 has no API to rebuild on demand, and its member counts can be cached for up to 12 hours.
+- Before a newsletter starts, segments of up to 1,000 contacts are refreshed so recipients match current membership. Larger segments start from their last background sync while a fresh one runs. Scheduled newsletters are refreshed when they are scheduled, not when they go out.
+- Any newsletter unsubscribe is treated as a marketing opt-out across both sending engines, so the per-list preferences page stays off.
+- Website report filters follow Umami 3.5.0: "equals" and "not equals" can take several values, but a single value can't contain a comma. Other operators take one value each.
 - Each client runs as a separate Compose project with its own credentials and volumes. There is no shared multi-tenant control plane.

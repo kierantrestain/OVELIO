@@ -1,12 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import sanitize from 'sanitize-html';
-import type { Campaign, CampaignInput, Page, CampaignMetrics, DateRange, TransactionalEmailInput } from '../contracts';
+import type { Campaign, CampaignInput, CampaignMetrics, CampaignStartResult, DateRange, Page, SegmentSyncReport, TransactionalEmailInput } from '../contracts';
 import { recordActivity } from './activity';
-import { checkRecipient } from './audience';
-import { AppError, requiredEnv } from './config';
+import { checkRecipient, syncContact } from './audience';
+import { enqueue } from './jobs';
+import { AppError, logError, requiredEnv } from './config';
 import { db, transaction } from './db';
 import { listmonk } from './listmonk';
+import { mautic } from './mautic';
 
 const metricKeys: Exclude<keyof CampaignMetrics, 'unavailable'>[] = ['sent', 'delivered', 'opens', 'clicks', 'bounces', 'unsubscribes'];
 const contentSlot = '{{ template "content" . }}';
@@ -111,9 +113,16 @@ export async function testSmtpRelay(email: string) {
   await recordActivity('SMTP diagnostic email sent', '/settings?view=connections');
 }
 
-export async function changeCampaign(id: number, action: 'start' | 'pause' | 'schedule', sendAt?: string) {
+export async function changeCampaign(id: number, action: 'start' | 'pause' | 'schedule', sendAt?: string): Promise<CampaignStartResult> {
   if (action !== 'pause') await assertDeliveryReady();
-  return transaction(async client => {
+  // Recipients must equal current segment membership when sending begins, so refresh the mirrored lists first.
+  // A failed refresh stops here: nothing has been started or scheduled yet.
+  let segmentSync: SegmentSyncReport | undefined;
+  if (action !== 'pause') {
+    const before = await listmonk.campaign(id);
+    if (['draft', 'paused', 'scheduled'].includes(before.status)) segmentSync = await syncCampaignSegments(before.listIds);
+  }
+  const changed = await transaction(async client => {
     await client.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [64338, String(id)]);
     const current = await listmonk.campaign(id);
     if (action === 'start' && ['running', 'finished'].includes(current.status)) return current;
@@ -141,12 +150,205 @@ export async function changeCampaign(id: number, action: 'start' | 'pause' | 'sc
     await client.query('INSERT INTO activity (description, href) VALUES ($1, $2)', [descriptions[action], '/campaigns']);
     return result;
   });
+  return segmentSync?.segments.length ? { ...changed, segmentSync } : changed;
+}
+
+export type SegmentSyncDeps = {
+  mappings(listIds: number[]): Promise<{ segmentId: number; listId: number }[]>;
+  segments(): Promise<{ id: number; name: string; published: boolean }[]>;
+  members(segmentId: number, page: number): Promise<{ ids: number[]; total: number; limit: number }>;
+  listSubscribers(listId: number, page: number): Promise<Page<{ id: number; email: string; mauticId: number | null }>>;
+  syncContact(contactId: number): Promise<void>;
+  /** Queues the normal background segment sync for segments too large to refresh inline. */
+  deferSync(segmentId: number): Promise<void>;
+};
+
+const segmentSyncDeps: SegmentSyncDeps = {
+  async mappings(listIds) {
+    const rows = await db.query<{ segment_id: string; list_id: string }>(
+      'SELECT segment_id, list_id FROM segment_lists WHERE list_id = ANY($1::bigint[]) ORDER BY segment_id', [listIds]);
+    return rows.rows.map(row => ({ segmentId: Number(row.segment_id), listId: Number(row.list_id) }));
+  },
+  segments: () => mautic.segments(),
+  async members(segmentId, page) {
+    const result = await mautic.contacts({ segmentId, page, limit: 100 });
+    return { ids: result.items.map(item => item.id), total: result.total, limit: result.limit };
+  },
+  listSubscribers: (listId, page) => listmonk.listSubscribers(listId, page, 100),
+  syncContact,
+  deferSync: segmentId => enqueue('segment_sync', segmentId + ':1', { segmentId, page: 1 }),
+};
+// Segments up to this size are refreshed inside the start request; larger ones keep the pre-Phase 1 behaviour
+// (start from the last background sync) so a big audience never blocks or stalls a send.
+export const inlineSyncLimit = 1000;
+const syncPageLimit = 200;
+const syncParallel = 5;
+
+async function inGroups<T>(items: T[], work: (item: T) => Promise<void>) {
+  const failures: unknown[] = [];
+  for (let at = 0; at < items.length; at += syncParallel) {
+    const results = await Promise.allSettled(items.slice(at, at + syncParallel).map(work));
+    for (const result of results) if (result.status === 'rejected') failures.push(result.reason);
+  }
+  return failures;
+}
+
+/**
+ * Brings every segment-backed list of a campaign up to date before it starts. Segment members are added to
+ * the list, and list subscribers that have left the segment are removed. Any failure throws, so the caller never starts.
+ */
+export async function syncCampaignSegments(listIds: number[], deps: SegmentSyncDeps = segmentSyncDeps): Promise<SegmentSyncReport> {
+  const mapped = listIds.length ? await deps.mappings(listIds) : [];
+  if (!mapped.length) return { segments: [] };
+  const known = await deps.segments();
+  const report: SegmentSyncReport = { segments: [] };
+  for (const { segmentId, listId } of mapped) {
+    const segment = known.find(item => item.id === segmentId);
+    const label = segment?.name ?? 'Segment ' + segmentId;
+    if (!segment?.published) {
+      throw new AppError(409, `The segment "${label}" is no longer published, so its recipients cannot be refreshed. The newsletter was not started.`);
+    }
+    const fail = (detail: string): never => {
+      throw new AppError(502, `Could not refresh the segment "${label}": ${detail} The newsletter was not started.`);
+    };
+    try {
+      const members = new Set<number>();
+      let deferred = false;
+      for (let page = 1; ; page++) {
+        const result = await deps.members(segmentId, page);
+        if (page === 1 && result.total > inlineSyncLimit) {
+          await deps.deferSync(segmentId);
+          report.segments.push({ segmentId, name: label, members: result.total, removed: 0, deferred: true });
+          deferred = true;
+          break;
+        }
+        for (const contactId of result.ids) members.add(contactId);
+        if (!result.ids.length || page * result.limit >= result.total) break;
+      }
+      if (deferred) continue;
+      const failed = await inGroups([...members], contactId => deps.syncContact(contactId));
+      if (failed.length) {
+        logError('campaign-segment-sync', failed[0]);
+        fail(`${failed.length} of ${members.size} contacts could not be updated.`);
+      }
+      const stale: number[] = [];
+      for (let page = 1; ; page++) {
+        const result = await deps.listSubscribers(listId, page);
+        for (const subscriber of result.items) {
+          if (subscriber.mauticId !== null && !members.has(subscriber.mauticId)) stale.push(subscriber.mauticId);
+        }
+        if (!result.items.length || page * result.limit >= result.total) break;
+        if (page >= syncPageLimit) fail('its newsletter list is too large to check before sending.');
+      }
+      const removedFailures = await inGroups(stale, contactId => deps.syncContact(contactId));
+      if (removedFailures.length) {
+        logError('campaign-segment-sync', removedFailures[0]);
+        fail(`${removedFailures.length} contacts who left the segment could not be removed.`);
+      }
+      report.segments.push({ segmentId, name: label, members: members.size, removed: stale.length });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      logError('campaign-segment-sync', error);
+      fail('the audience service did not respond.');
+    }
+  }
+  return report;
+}
+
+/* ── Unsubscribe handling (DEL-07) and per-campaign counts (DEL-21) ─────────── */
+
+export type UnsubscribeScope = 'lists' | 'everything' | 'preferences';
+const truthy = (value: string | null) => value === 'true' || value === '1' || value === 'on';
+
+/**
+ * Decides what an unsubscribe POST means. A bare one-click POST (RFC 8058 sends only List-Unsubscribe=One-Click)
+ * leaves the campaign's lists. Blocklisting everything needs an explicit field, and the preferences page sends manage.
+ */
+export function unsubscribeRequest(form: URLSearchParams): { scope: UnsubscribeScope; body: URLSearchParams } {
+  if (truthy(form.get('blocklist')) || truthy(form.get('everything'))) {
+    return { scope: 'everything', body: new URLSearchParams({ blocklist: 'true' }) };
+  }
+  if (truthy(form.get('manage'))) {
+    const body = new URLSearchParams({ manage: 'true', name: (form.get('name') ?? '').slice(0, 256) });
+    for (const list of form.getAll('l').slice(0, 100)) if (/^[A-Fa-f0-9-]{36}$/.test(list)) body.append('l', list);
+    return { scope: 'preferences', body };
+  }
+  return { scope: 'lists', body: new URLSearchParams() };
+}
+
+type UnsubscribeOptions = {
+  base?: string;
+  transport?: typeof fetch;
+  record?: (campaign: string, subscriber: string, scope: 'lists' | 'everything') => Promise<void>;
+};
+
+async function recordUnsubscribe(campaign: string, subscriber: string, scope: 'lists' | 'everything') {
+  await db.query(
+    `INSERT INTO campaign_unsubscribes (campaign_uuid, subscriber_uuid, scope) VALUES ($1, $2, $3)
+     ON CONFLICT (campaign_uuid, subscriber_uuid) DO UPDATE
+     SET scope = CASE WHEN EXCLUDED.scope = 'everything' THEN 'everything' ELSE campaign_unsubscribes.scope END`,
+    [campaign, subscriber, scope],
+  );
+}
+
+/** Forwards an unsubscribe to Listmonk and, once it succeeds, counts it against the campaign. */
+export async function unsubscribe(ids: { campaign: string; subscriber: string }, form: URLSearchParams, options: UnsubscribeOptions = {}) {
+  const base = options.base ?? process.env.LISTMONK_URL;
+  if (!base) return { status: 503, error: 'Unsubscribe is temporarily unavailable.' };
+  const { scope, body } = unsubscribeRequest(form);
+  try {
+    const response = await (options.transport ?? fetch)(new URL('/subscription/' + ids.campaign + '/' + ids.subscriber, base), {
+      method: 'POST', body, cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(12000),
+    });
+    if (!response.ok) {
+      return { status: response.status === 404 ? 404 : response.status === 400 ? 400 : 502, error: 'The unsubscribe request could not be completed. Check the link and try again.' };
+    }
+    if (scope !== 'preferences') {
+      try {
+        await (options.record ?? recordUnsubscribe)(ids.campaign, ids.subscriber, scope);
+      } catch (error) {
+        // The unsubscribe has already happened, so a counting failure must not turn it into an error page.
+        logError('campaign-unsubscribe-count', error);
+      }
+    }
+    return {
+      status: response.status, scope, body: await response.text(),
+      contentType: response.headers.get('content-type') ?? 'text/plain; charset=utf-8',
+    };
+  } catch {
+    return { status: 503, error: 'Unsubscribe is temporarily unavailable. Please try again.' };
+  }
+}
+
+async function countUnsubscribes(uuids: string[]) {
+  const rows = await db.query<{ campaign_uuid: string; total: string }>(
+    'SELECT campaign_uuid, count(*) AS total FROM campaign_unsubscribes WHERE campaign_uuid = ANY($1::uuid[]) GROUP BY campaign_uuid', [uuids]);
+  return new Map(rows.rows.map(row => [row.campaign_uuid, Number(row.total)]));
+}
+
+/** Fills in the unsubscribe count that Listmonk does not keep per campaign. Leaves the reason in place if the count cannot be read. */
+export async function withUnsubscribeCounts<T extends Campaign>(items: T[], count: (uuids: string[]) => Promise<Map<string, number>> = countUnsubscribes): Promise<T[]> {
+  const uuids = items.flatMap(item => item.uuid ? [item.uuid] : []);
+  if (!uuids.length) return items;
+  let counts: Map<string, number>;
+  try {
+    counts = await count(uuids);
+  } catch (error) {
+    logError('campaign-unsubscribe-count', error);
+    return items;
+  }
+  return items.map(item => {
+    if (!item.uuid) return item;
+    const unavailable = { ...item.metrics.unavailable };
+    delete unavailable.unsubscribes;
+    return { ...item, metrics: { ...item.metrics, unsubscribes: counts.get(item.uuid) ?? 0, unavailable } };
+  });
 }
 
 export function aggregateEmailMetrics(items: { metrics: CampaignMetrics }[], complete = true): CampaignMetrics {
   const values = metricKeys.map(key => {
     const counts = items.map(item => item.metrics[key]);
-    const tracked = key !== 'delivered' && key !== 'unsubscribes';
+    const tracked = key !== 'delivered';
     const total = counts.reduce<number>((sum, count) => sum + (count ?? 0), 0);
     return [key, complete && (counts.length ? counts.every(count => count !== null) : tracked) ? total : null] as const;
   });
@@ -154,7 +356,8 @@ export function aggregateEmailMetrics(items: { metrics: CampaignMetrics }[], com
     ...Object.fromEntries(values) as Omit<CampaignMetrics, 'unavailable'>,
     unavailable: {
       delivered: 'Needs delivery feedback from your email provider. Listmonk only records sent and bounced.',
-      unsubscribes: 'Per-campaign unsubscribes are not recorded yet.',
+      ...(values.some(([key, value]) => key === 'unsubscribes' && value === null)
+        ? { unsubscribes: 'Unsubscribes could not be counted for every newsletter right now.' } : {}),
     },
   };
 }
@@ -163,7 +366,10 @@ const summaryPageLimit = 100;
 const summaryMaxPages = 50;
 
 /** Reads every campaign page by page. `complete` is false only if the safety limit stopped the read early. */
-export async function allCampaigns(read: (options: { page: number; limit: number }) => Promise<Page<Campaign>> = options => listmonk.campaigns(options)) {
+export async function allCampaigns(read: (options: { page: number; limit: number }) => Promise<Page<Campaign>> = async options => {
+  const batch = await listmonk.campaigns(options);
+  return { ...batch, items: await withUnsubscribeCounts(batch.items) };
+}) {
   const items: Campaign[] = [];
   let total = 0;
   for (let page = 1; page <= summaryMaxPages; page++) {

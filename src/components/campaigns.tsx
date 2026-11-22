@@ -24,7 +24,7 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, MailingList, MediaItem, Page, Point,
+  Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, CampaignStartResult, MailingList, MediaItem, Page, Point,
   RunningCampaignStat, Template, TemplateInput, TransactionalEmailInput,
 } from '@/contracts';
 import { api, date, number, saveFile, upload, useAction, useFields, useResource } from './client';
@@ -1049,12 +1049,20 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
       void action.run(async () => {
         if (mode === 'schedule' && !sendAt) throw new Error('Choose a send date and time.');
         const body = mode === 'test' ? { email: email.trim() } : mode === 'schedule' ? { sendAt: new Date(sendAt!).toISOString() } : undefined;
-        await api(`${path}/${campaign.id}/${copy.endpoint}`, 'POST', body);
-        onDone(copy.notice);
+        const result = await api<CampaignStartResult | undefined>(`${path}/${campaign.id}/${copy.endpoint}`, 'POST', body);
+        const segments = result?.segmentSync?.segments ?? [];
+        const synced = segments.filter(item => !item.deferred);
+        const deferred = segments.filter(item => item.deferred);
+        onDone([
+          copy.notice,
+          synced.length ? `Recipients were refreshed from ${synced.map(item => `${item.name} (${item.members} ${item.members === 1 ? 'contact' : 'contacts'}${item.removed ? `, ${item.removed} removed` : ''})`).join(', ')}.` : '',
+          deferred.length ? `${deferred.map(item => `${item.name} (${item.members} contacts)`).join(', ')} ${deferred.length === 1 ? 'is' : 'are'} too large to refresh first, so recipients come from the last sync and a fresh sync is running in the background.` : '',
+        ].filter(Boolean).join(' '));
       });
     }}>
       {mode === 'test' ? <TextInput label="Recipient email" type="email" description="Use an audience contact with recorded marketing consent." isRequired value={email} onChange={setEmail} /> : null}
       {mode === 'schedule' ? <DateTimeInput label="Send date and time" description="Uses your device's local timezone." isRequired value={sendAt} onChange={setSendAt} /> : null}
+      {action.busy && (mode === 'send' || mode === 'schedule') ? <Text type="supporting" color="secondary">Refreshing segment recipients before {mode === 'send' ? 'sending' : 'scheduling'}. Segments over 1,000 contacts use their last sync instead. Nothing is sent if the refresh fails.</Text> : null}
       {mode === 'send' ? <Text>Start sending <strong>{campaign.name}</strong> to eligible subscribers on its selected lists? Suppressed and unsubscribed addresses are excluded.</Text> : null}
       {mode === 'pause' ? <Text>Pause delivery of <strong>{campaign.name}</strong>? Emails already submitted for delivery may still arrive.</Text> : null}
       <Feedback error={action.error} />

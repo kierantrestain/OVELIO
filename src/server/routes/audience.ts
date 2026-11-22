@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { pointTriggerEventTypes, type CustomFieldObject } from '@/contracts';
+import { pointTriggerEventTypes, segmentOperatorKeys, type CustomFieldObject } from '@/contracts';
 import { recordActivity } from '@/server/activity';
 import {
   bulkUpdateContacts, clearContactBounces, contactDetail, contactDirectory, contactFields,
@@ -18,10 +18,13 @@ import type { Entry } from './shared';
 const segmentFilter = z.object({
   glue: z.enum(['and', 'or']),
   field: z.string().trim().min(1).max(60),
-  object: z.enum(['lead', 'company']).optional(),
+  object: z.enum(['lead', 'company', 'behaviors']).optional(),
   type: z.string().trim().max(40).optional(),
-  operator: z.string().trim().min(1).max(40),
-  filter: z.union([z.string().max(300), z.number(), z.array(z.string().max(100)).max(30)]),
+  operator: z.enum([...segmentOperatorKeys, 'eq', 'neq']),
+  filter: z.union([
+    z.string().max(300), z.number(), z.array(z.string().max(100)).max(200),
+    z.object({ interval: z.number().int().min(1).max(100000), unit: z.enum(['day', 'month', 'year']) }),
+  ]),
 });
 
 const triggerEvents = z.array(z.object({
@@ -37,6 +40,7 @@ export const audienceEndpoints: Entry[] = [
     search: z.string().trim().max(128).optional().parse(query.get('q') ?? undefined),
     page: page(query),
     segmentId: query.has('segmentId') ? numberId.parse(query.get('segmentId')) : undefined,
+    limit: query.has('limit') ? z.coerce.number().int().min(1).max(50).parse(query.get('limit')) : undefined,
     tag: z.string().trim().max(70).optional().parse(query.get('tag') ?? undefined),
   }), 'marketer'),
   route('POST', /^contacts$/, async ({ request }) => {
@@ -204,6 +208,7 @@ export const audienceEndpoints: Entry[] = [
     return json({ suppressed: true }, 201);
   }, 'marketer'),
   route('GET', /^segments$/, async () => mautic.segments(), 'marketer'),
+  route('GET', /^segment-options$/, async () => mautic.segmentOptions(), 'marketer'),
   route('POST', /^segments$/, async ({ request }) => json(await mautic.createSegment(await readBody(request, z.object({
     name, description, published: z.boolean().optional(), filters: z.array(segmentFilter).max(20).optional(),
   }))), 201), 'marketer'),

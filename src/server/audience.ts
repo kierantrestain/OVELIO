@@ -264,7 +264,7 @@ export async function clearContactBounces(contactId: number) {
   return contactDetail(contactId);
 }
 
-export async function contactDirectory(options: { search?: string; page?: number; segmentId?: number; tag?: string }) {
+export async function contactDirectory(options: { search?: string; page?: number; limit?: number; segmentId?: number; tag?: string }) {
   const page = await mautic.contacts(options);
   const keys = page.items.filter(item => item.email).map(item => emailKey(item.email));
   const muted = await db.query<{ email_key: string }>(`SELECT email_key FROM suppressions WHERE email_key = ANY($1::text[])`, [keys]);

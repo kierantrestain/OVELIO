@@ -80,6 +80,8 @@ export type CampaignArchiveInput = {
 
 export type Campaign = CampaignInput & {
   id: number;
+  /** Listmonk's public campaign identifier, used in unsubscribe links. */
+  uuid?: string;
   status: string;
   sendAt: string | null;
   createdAt: string | null;
@@ -133,3 +135,11 @@ export type TransactionalEmailInput = {
 export type MaintenanceResult = {
   count: number;
 };
+
+/** What a pre-send segment refresh did, shown after a newsletter starts. */
+export type SegmentSyncReport = {
+  /** `deferred`: the segment was too large to refresh inline, so it started from its last sync and refreshes in the background. */
+  segments: { segmentId: number; name: string; members: number; removed: number; deferred?: boolean }[];
+};
+
+export type CampaignStartResult = Campaign & { segmentSync?: SegmentSyncReport };

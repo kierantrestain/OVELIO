@@ -36,3 +36,22 @@ export type Settings = {
   team: User[];
   failedJobs?: { id: string; kind: string; attempts: number; at: string }[];
 };
+
+/** Whether opens and clicks are recorded: not at all, as anonymous totals, or per subscriber. */
+export type TrackingMode = 'off' | 'anonymous' | 'individual';
+
+export type DeliverySettings = {
+  concurrency: number;
+  messageRate: number;
+  batchSize: number;
+  maxSendErrors: number;
+  slidingWindow: boolean;
+  slidingWindowDuration: string;
+  slidingWindowRate: number;
+  trackingMode: TrackingMode;
+  recordOptinIp: boolean;
+};
+
+export type DeliverySettingsInput = Partial<DeliverySettings>;
+
+export type DeliverySettingsResult = DeliverySettings & { needsRestart: boolean };

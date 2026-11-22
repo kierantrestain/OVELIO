@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { PerformanceBreakdownType, PerformanceMetricKey, ReportDimension, ReportFilters, RevenueMetricType } from '@/contracts';
-import { ANALYTICS_LIMITS, SEGMENT_DIMENSION_OPERATORS, UNFILTERABLE_DIMENSIONS } from '@/contracts';
+import { ANALYTICS_LIMITS, FILTER_DIMENSIONS, PROPERTY_OPERATORS, SEGMENT_DIMENSION_OPERATORS, filterQueryParams, hasFilters, parseFilterParams } from '@/contracts';
 import { AppError } from '@/server/config';
 import { recordActivity } from '@/server/activity';
 import { json, readBody } from '@/server/http';
@@ -10,28 +10,51 @@ import type { Context, Entry } from './shared';
 
 const step = z.object({ type: z.enum(['event', 'path']), value: z.string().trim().min(1).max(ANALYTICS_LIMITS.stepValueLength) });
 
-const filterKeys: ReportDimension[] = [
-  'path', 'referrer', 'title', 'query', 'hostname', 'device', 'browser', 'os',
-  'country', 'region', 'city', 'language', 'event', 'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
-];
-
 const site = (context: Context) => siteId.parse(context.params[0]);
 
+const filterRuleBody = z.object({
+  dimension: z.string().trim().min(1).max(40),
+  operator: z.string().trim().min(1).max(10),
+  values: z.array(z.string().max(ANALYTICS_LIMITS.filterValueLength)).min(1).max(ANALYTICS_LIMITS.filterValues),
+});
+
+const propertyFilterBody = z.object({
+  scope: z.enum(['session', 'event']),
+  name: z.string().trim().min(1).max(200),
+  dataType: z.enum(['string', 'number', 'boolean', 'date', 'array']),
+  operator: z.string().trim().min(1).max(10),
+  value: z.string().max(ANALYTICS_LIMITS.filterValueLength),
+});
+
+/** The filters object the console posts in a request body (the same shape the report URLs spell as query parameters). */
+const filtersBody = z.object({
+  rules: z.array(filterRuleBody).max(ANALYTICS_LIMITS.filterRules).optional(),
+  match: z.enum(['all', 'any']).optional(),
+  segment: z.string().trim().max(40).optional(),
+  cohort: z.string().trim().max(40).optional(),
+  properties: z.array(propertyFilterBody).max(ANALYTICS_LIMITS.propertyFilters).optional(),
+});
+
+/** Turns the filter model's RangeError into a 400 with its plain message instead of a server error. */
+function checked<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    if (error instanceof RangeError) throw new AppError(400, error.message);
+    throw error;
+  }
+}
+
+/** Reads every filter parameter Umami 3.5.0 takes (see parseFilterParams): operators, several values, OR, segments, properties. */
 function reportFilters(query: URLSearchParams): ReportFilters | undefined {
-  const filters: ReportFilters = {};
-  let hasAny = false;
-  // Umami 3.5.0 cannot filter by these; say so instead of returning an unfiltered report.
-  for (const key of UNFILTERABLE_DIMENSIONS) {
-    if (query.get(key)?.trim()) throw new AppError(400, `The analytics engine cannot filter by ${key}.`);
-  }
-  for (const key of filterKeys) {
-    const val = query.get(key)?.trim();
-    if (val) {
-      filters[key] = val.slice(0, ANALYTICS_LIMITS.filterValueLength);
-      hasAny = true;
-    }
-  }
-  return hasAny ? filters : undefined;
+  return checked(() => parseFilterParams(query.entries()));
+}
+
+function bodyFilters(input: z.infer<typeof filtersBody> | undefined): ReportFilters | undefined {
+  if (!input) return undefined;
+  const filters = input as ReportFilters;
+  checked(() => filterQueryParams(filters));
+  return hasFilters(filters) ? filters : undefined;
 }
 
 export const analyticsEndpoints: Entry[] = [
@@ -100,14 +123,20 @@ export const analyticsEndpoints: Entry[] = [
       name,
       type: z.enum(['segment', 'cohort']),
       filters: z.array(z.object({
-        name: z.string().trim().min(1).max(40),
+        name: z.enum(FILTER_DIMENSIONS),
         operator: z.enum([...SEGMENT_DIMENSION_OPERATORS, 'nc']),
         value: z.string().trim().min(1).max(ANALYTICS_LIMITS.filterValueLength),
       })).max(20).optional(),
       match: z.enum(['all', 'any']).optional(),
       dateRange: z.string().trim().max(40).optional(),
       action: z.object({ type: z.enum(['path', 'event']), value: z.string().trim().min(1).max(ANALYTICS_LIMITS.stepValueLength) }).optional(),
+      sessionPropertyFilters: z.array(propertyFilterBody.extend({ scope: z.literal('session') })).max(ANALYTICS_LIMITS.propertyFilters).optional(),
     }));
+    for (const property of input.sessionPropertyFilters ?? []) {
+      if (!PROPERTY_OPERATORS[property.dataType].includes(property.operator)) {
+        throw new AppError(400, `That operator cannot be used on ${property.dataType} properties.`);
+      }
+    }
     return json(await umami.createSegment(site(context), input), 201);
   }, 'marketer'),
   route('DELETE', /^websites\/([0-9a-f-]+)\/segments\/([0-9a-f-]+)$/i, async context => {
@@ -134,10 +163,11 @@ export const analyticsEndpoints: Entry[] = [
   route('GET', /^websites\/([0-9a-f-]+)\/sessions\/stats$/i, async context =>
     umami.sessionStats(site(context), date(context.query), reportFilters(context.query))),
   route('GET', /^websites\/([0-9a-f-]+)\/sessions\/properties$/i, async context =>
-    umami.sessionProperties(site(context), date(context.query))),
+    umami.sessionProperties(site(context), date(context.query), reportFilters(context.query))),
   route('GET', /^websites\/([0-9a-f-]+)\/sessions\/properties\/values$/i, async context => {
     const propertyName = z.string().trim().min(1).max(200).parse(context.query.get('propertyName'));
-    return umami.sessionPropertyValues(site(context), date(context.query), propertyName);
+    const dataType = context.query.has('dataType') ? z.coerce.number().int().min(1).max(5).parse(context.query.get('dataType')) : undefined;
+    return umami.sessionPropertyValues(site(context), date(context.query), propertyName, reportFilters(context.query), dataType);
   }),
   route('GET', /^websites\/([0-9a-f-]+)\/sessions\/weekly$/i, async context =>
     umami.weeklyTraffic(site(context), date(context.query), reportFilters(context.query))),
@@ -214,9 +244,9 @@ export const analyticsEndpoints: Entry[] = [
     const data = await readBody(context.request, z.object({
       startAt: timestamp, endAt: timestamp,
       fields: z.array(z.string().trim().min(1).max(40)).min(1).max(ANALYTICS_LIMITS.breakdownFields),
-      filters: z.record(z.string(), z.string().max(ANALYTICS_LIMITS.filterValueLength)).optional(),
+      filters: filtersBody.optional(),
     }));
-    return umami.breakdown(site(context), reportDate.parse(data), data.fields, data.filters as ReportFilters | undefined);
+    return umami.breakdown(site(context), reportDate.parse(data), data.fields, bodyFilters(data.filters));
   }),
   route('GET', /^websites\/([0-9a-f-]+)\/annotations$/i, async context =>
     umami.annotations(site(context), context.query.has('startAt') ? date(context.query) : undefined)),

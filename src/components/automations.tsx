@@ -22,11 +22,11 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  Asset, Category, DynamicContent, FocusItem, FocusItemInput, FormSubmission, JourneyEmail,
-  LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
+  Asset, Category, DynamicContent, FocusItem, FocusItemInput, FormActionSpec, FormField, FormFieldOptions, FormFieldPropertySpec,
+  FormFieldTypeSpec, FormPostAction, FormSubmission, JourneyEmail, LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
   WorkflowInput, WorkflowStep, WorkflowStepKind,
 } from '@/contracts';
-import { maxWorkflowSteps } from '@/contracts';
+import { formActionSpecs, formFieldSpecs, maxWorkflowSteps } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
 import {
@@ -40,7 +40,6 @@ const tabs = [
 ] as const;
 type AutomationsTab = typeof tabs[number];
 type TriggerType = 'segment' | 'form';
-type FormFieldType = NonNullable<LeadFormInput['fields']>[number]['type'];
 type FocusType = FocusItemInput['type'];
 type FocusStyle = FocusItemInput['style'];
 type FocusWhen = NonNullable<FocusItemInput['when']>;
@@ -123,14 +122,6 @@ const conditions = [
   { value: 'none', label: 'Continue without a condition' },
   { value: 'opened_previous', label: 'Previous email was opened' },
   { value: 'clicked_previous', label: 'Previous email link was clicked' },
-];
-
-const formFieldTypes: { value: FormFieldType; label: string }[] = [
-  { value: 'text', label: 'Short text' },
-  { value: 'email', label: 'Email address' },
-  { value: 'textarea', label: 'Long text' },
-  { value: 'select', label: 'Dropdown' },
-  { value: 'checkboxgrp', label: 'Checkboxes' },
 ];
 
 const mappedContactFields = [
@@ -646,21 +637,239 @@ function JourneyEmailForm({ email, onClose, onDone }: { email?: JourneyEmail; on
 
 type EditableFormField = {
   key: number;
+  /** The field as Mautic returned it, so properties the editor does not show are kept. */
+  base: FormField;
   label: string;
   alias: string;
-  type: FormFieldType;
+  type: string;
   mappedField: string;
   isRequired: boolean;
   optionsText: string;
+  showLabel: boolean;
+  defaultValue: string;
+  helpMessage: string;
+  validationMessage: string;
+  props: Record<string, string | boolean>;
+  open: boolean;
 };
 
-const validFieldTypes = new Set<string>(['text', 'email', 'textarea', 'select', 'checkboxgrp']);
+type EditableFormAction = {
+  key: number;
+  id?: number;
+  type: string;
+  name: string;
+  properties: Record<string, unknown>;
+};
+
+const fieldSpecByType = new Map<string, FormFieldTypeSpec>(formFieldSpecs.map(spec => [spec.type, spec]));
+const fieldTypeOptions = formFieldSpecs.filter(spec => spec.type !== 'button').map(spec => ({ value: spec.type, label: spec.label }));
+const actionSpecByType = new Map<string, FormActionSpec>(formActionSpecs.map(spec => [spec.type as string, spec]));
+const actionTypeOptions = formActionSpecs.map(spec => ({ value: spec.type as string, label: spec.label, description: spec.description }));
+
+const postActionOptions = [
+  { value: 'message', label: 'Show a message' },
+  { value: 'redirect', label: 'Go to another page' },
+  { value: 'return', label: 'Return to the form page' },
+  { value: 'hideform', label: 'Hide the form and show a message' },
+];
+
+function propKey(prop: FormFieldPropertySpec) {
+  return `${prop.store ?? 'properties'}:${prop.key}`;
+}
+
+function readFieldProp(base: FormField, prop: FormFieldPropertySpec): string | boolean {
+  const found = (prop.store === 'validation' ? base.validation : base.properties)?.[prop.key];
+  if (prop.kind === 'boolean') return found === true || found === 1 || found === '1';
+  if (Array.isArray(found)) return found.join(', ');
+  return found === undefined || found === null ? '' : String(found);
+}
+
+function editableField(item: FormField, key: number): EditableFormField {
+  const spec = fieldSpecByType.get(item.type);
+  return {
+    key,
+    base: item,
+    label: item.label || prettifyTriggerKey(item.alias),
+    alias: item.alias || slugAlias(item.label),
+    type: item.type,
+    mappedField: item.mappedField || 'none',
+    isRequired: Boolean(item.isRequired),
+    optionsText: (item.options ?? []).join(', '),
+    showLabel: item.showLabel ?? true,
+    defaultValue: item.defaultValue ?? '',
+    helpMessage: item.helpMessage ?? '',
+    validationMessage: item.validationMessage ?? '',
+    props: Object.fromEntries((spec?.props ?? []).map(prop => [propKey(prop), readFieldProp(item, prop)])),
+    open: false,
+  };
+}
 
 function defaultBuilderFields(): EditableFormField[] {
   return [
-    { key: 0, label: 'First name', alias: 'first_name', type: 'text', mappedField: 'firstname', isRequired: false, optionsText: '' },
-    { key: 1, label: 'Email address', alias: 'email', type: 'email', mappedField: 'email', isRequired: true, optionsText: '' },
+    editableField({ label: 'First name', alias: 'first_name', type: 'text', mappedField: 'firstname' }, 0),
+    editableField({ label: 'Email address', alias: 'email', type: 'email', mappedField: 'email', isRequired: true }, 1),
   ];
+}
+
+function builtField(item: EditableFormField, index: number): FormFieldOptions {
+  const label = item.label.trim();
+  const alias = item.alias.trim().toLowerCase();
+  if (!label) throw new Error(`Enter a label for field ${index + 1}.`);
+  if (!/^[a-z][a-z0-9_]{0,59}$/.test(alias) || (alias === 'submit' && !item.base.id)) {
+    throw new Error(`Field ${index + 1} alias must start with a lowercase letter and use only lowercase letters, numbers and underscores.`);
+  }
+  const spec = fieldSpecByType.get(item.type);
+  const options = spec?.choices ? item.optionsText.split(',').map(opt => opt.trim()).filter(Boolean) : undefined;
+  if (spec?.choices && item.type !== 'country' && !options?.length && !item.base.properties?.syncList) {
+    throw new Error(`Add at least one choice for field ${index + 1}.`);
+  }
+  const properties: Record<string, unknown> = { ...item.base.properties };
+  const validation: Record<string, unknown> = { ...item.base.validation };
+  for (const prop of spec?.props ?? []) {
+    const value = item.props[propKey(prop)];
+    (prop.store === 'validation' ? validation : properties)[prop.key] = value;
+  }
+  const { options: _options, ...base } = item.base;
+  void _options;
+  return {
+    ...base,
+    label,
+    alias,
+    type: item.type,
+    mappedField: item.mappedField === 'none' ? (item.base.id ? '' : undefined) : item.mappedField,
+    isRequired: item.isRequired,
+    showLabel: item.showLabel,
+    defaultValue: item.defaultValue,
+    helpMessage: item.helpMessage,
+    validationMessage: item.validationMessage,
+    ...(options?.length ? { options } : {}),
+    properties,
+    validation,
+  };
+}
+
+function LeadFormFieldEditor({ item, index, count, update, remove }: {
+  item: EditableFormField; index: number; count: number;
+  update: (patch: Partial<EditableFormField>) => void; remove: () => void;
+}) {
+  const spec = fieldSpecByType.get(item.type);
+  const existing = Boolean(item.base.id);
+  const typeOptions = spec ? fieldTypeOptions : [...fieldTypeOptions, { value: item.type, label: `${item.type} (from Mautic)` }];
+  return <div className="ov-step">
+    <div className="ov-step-heading">
+      <Text weight="medium">Field {index + 1}{spec ? ` · ${spec.label}` : ''}</Text>
+      {count > 1 ? <IconButton variant="ghost" size="sm" label={`Remove field ${index + 1}`} icon={<Trash2 size={15} />} onClick={remove} /> : null}
+    </div>
+    <div className="ov-form-grid">
+      <TextInput label="Label" isRequired value={item.label} onChange={value => {
+        const autoAlias = !existing && (!item.alias || item.alias.startsWith('field_') || item.alias === slugAlias(item.label));
+        update({ label: value, ...(autoAlias && value.trim() ? { alias: slugAlias(value) } : {}) });
+      }} />
+      <TextInput label="Field alias" description={existing ? 'Aliases cannot change after a field is saved.' : 'Lowercase letters, numbers, underscores'}
+        isRequired isDisabled={existing} value={item.alias} onChange={value => update({ alias: value })} />
+      <Selector label="Field type" value={item.type} options={typeOptions} isDisabled={existing}
+        onChange={value => {
+          const next = value || 'text';
+          const nextSpec = fieldSpecByType.get(next);
+          update({
+            type: next,
+            props: Object.fromEntries((nextSpec?.props ?? []).map(prop => [propKey(prop), readFieldProp({ ...item.base, type: next }, prop)])),
+            ...(nextSpec?.mappable === false ? { mappedField: 'none' } : {}),
+            ...(nextSpec?.required === false ? { isRequired: false } : {}),
+          });
+        }} />
+      {spec?.mappable !== false ? <Selector label="Map to contact field" value={item.mappedField} options={mappedContactFields}
+        onChange={value => update({ mappedField: value ?? 'none' })} /> : null}
+    </div>
+    {spec?.choices && item.type !== 'country' ? (
+      <TextInput label="Choices" description="Separate options with commas." placeholder="Option A, Option B, Option C" isRequired
+        value={item.optionsText} onChange={value => update({ optionsText: value })} />
+    ) : null}
+    {(spec?.props ?? []).length ? <div className="ov-form-grid">
+      {spec!.props.map(prop => {
+        const id = propKey(prop);
+        const value = item.props[id];
+        const set = (next: string | boolean) => update({ props: { ...item.props, [id]: next } });
+        if (prop.kind === 'boolean') return <CheckboxInput key={id} label={prop.label} value={value === true} onChange={set} />;
+        if (prop.kind === 'textarea') return <TextArea key={id} label={prop.label} rows={3} isOptional value={String(value ?? '')} onChange={set} />;
+        return <TextInput key={id} label={prop.label} description={prop.hint} isOptional value={String(value ?? '')} onChange={set} />;
+      })}
+    </div> : null}
+    <div className="ov-actions">
+      {spec?.required !== false ? <CheckboxInput label="Required field" value={item.isRequired} onChange={checked => update({ isRequired: checked })} /> : null}
+      {spec?.showLabel !== false ? <CheckboxInput label="Show label" value={item.showLabel} onChange={checked => update({ showLabel: checked })} /> : null}
+    </div>
+    {spec?.defaultValue !== false || spec?.helpMessage !== false || item.isRequired ? <div className="ov-form-grid">
+      {spec?.defaultValue !== false ? <TextInput label="Default value" isOptional value={item.defaultValue} onChange={value => update({ defaultValue: value })} /> : null}
+      {spec?.helpMessage !== false ? <TextInput label="Help text" isOptional value={item.helpMessage} onChange={value => update({ helpMessage: value })} /> : null}
+      {item.isRequired ? <TextInput label="Required message" isOptional placeholder="This is required." value={item.validationMessage}
+        onChange={value => update({ validationMessage: value })} /> : null}
+    </div> : null}
+  </div>;
+}
+
+function readActionList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function LeadFormActionEditor({ item, index, update, remove, emails, segments, assets, users }: {
+  item: EditableFormAction; index: number; update: (patch: Partial<EditableFormAction>) => void; remove: () => void;
+  emails: JourneyEmail[]; segments: Segment[]; assets: Asset[]; users: { id: number; name: string; email: string }[];
+}) {
+  const spec = actionSpecByType.get(item.type);
+  const setProp = (key: string, value: unknown) => update({ properties: { ...item.properties, [key]: value } });
+  const sourceOptions = (source?: string) => source === 'emails' ? emails.map(email => ({ value: String(email.id), label: email.name }))
+    : source === 'assets' ? assets.map(asset => ({ value: String(asset.id), label: asset.title }))
+    : [];
+  return <div className="ov-step">
+    <div className="ov-step-heading">
+      <Text weight="medium">Action {index + 1}</Text>
+      <IconButton variant="ghost" size="sm" label={`Remove action ${index + 1}`} icon={<Trash2 size={15} />} onClick={remove} />
+    </div>
+    <div className="ov-form-grid">
+      <Selector label="Action" value={item.type} isDisabled={Boolean(item.id)} options={spec ? actionTypeOptions : [...actionTypeOptions, { value: item.type, label: item.type, description: 'From Mautic' }]}
+        onChange={value => update({ type: value ?? item.type, properties: {} })} />
+      <TextInput label="Action name" isOptional placeholder={spec?.label} value={item.name} onChange={value => update({ name: value })} />
+    </div>
+    {spec ? <Text type="supporting" color="secondary">{spec.description}</Text> : null}
+    <div className="ov-form-grid">
+      {(spec?.props ?? []).map(prop => {
+        const raw = item.properties[prop.key];
+        if (prop.kind === 'boolean') {
+          const checked = raw === undefined ? prop.key === 'set_replyto' : raw === true || raw === 1 || raw === '1';
+          return <CheckboxInput key={prop.key} label={prop.label} value={checked} onChange={value => setProp(prop.key, value)} />;
+        }
+        if (prop.kind === 'textarea') {
+          return <TextArea key={prop.key} label={prop.label} description={prop.hint} rows={3} isOptional={!prop.required} value={String(raw ?? '')} onChange={value => setProp(prop.key, value)} />;
+        }
+        if (prop.kind === 'select') {
+          const options = prop.choices ?? sourceOptions(prop.source);
+          const current = prop.key === 'useremail' ? (raw as { email?: unknown } | undefined)?.email : raw;
+          return <Selector key={prop.key} label={prop.label} value={current === undefined || current === null ? null : String(current)} options={options} hasClear
+            placeholder={prop.source === 'emails' ? 'Choose a published email' : 'Choose'}
+            onChange={value => setProp(prop.key, prop.key === 'useremail' ? { email: value } : value)} />;
+        }
+        if (prop.kind === 'ids') {
+          const chosen = readActionList(raw).map(String);
+          const options = prop.source === 'users' ? users.map(user => ({ value: String(user.id), label: `${user.name} (${user.email})` }))
+            : segments.map(segment => ({ value: String(segment.id), label: segment.name }));
+          return <div key={prop.key} className="ov-stack-sm">
+            <Text weight="medium">{prop.label}</Text>
+            {options.length ? options.map(option => <CheckboxInput key={option.value} label={option.label} value={chosen.includes(option.value)}
+              onChange={checked => setProp(prop.key, checked ? [...chosen, option.value] : chosen.filter(entry => entry !== option.value))} />)
+              : <Text type="supporting" color="secondary">Nothing to choose from yet.</Text>}
+          </div>;
+        }
+        const display = prop.kind === 'tags' ? readActionList(raw).join(', ') : String(raw ?? '');
+        return <TextInput key={prop.key} label={prop.label} description={prop.hint ?? (prop.kind === 'tags' ? 'Separate tags with commas.' : undefined)}
+          isRequired={prop.required} isOptional={!prop.required} value={display}
+          onChange={value => setProp(prop.key, prop.kind === 'tags' ? value.split(',').map(tag => tag.trim()).filter(Boolean) : value)} />;
+      })}
+    </div>
+    {item.type === 'lead.updatelead' ? <TextArea label="Contact fields to set" rows={4} description="One per line as field_alias=value, for example city=Austin."
+      value={Object.entries(item.properties).map(([key, value]) => `${key}=${String(value ?? '')}`).join('\n')}
+      onChange={value => update({ properties: Object.fromEntries(value.split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)).filter(([key]) => key?.trim()).map(([key, entry]) => [key.trim(), entry ?? ''])) })} /> : null}
+  </div>;
 }
 
 function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: () => void; onDone: () => void }) {
@@ -668,23 +877,24 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
   const { values, field } = useFields({
     name: form?.name ?? '',
     description: form?.description ?? '',
-    message: '',
+    message: form?.postAction === 'message' || form?.postAction === 'hideform' ? form.postActionProperty ?? '' : '',
+    redirectUrl: form?.postAction === 'redirect' ? form.postActionProperty ?? '' : '',
   });
   const [published, setPublished] = useState(form?.published ?? true);
+  const [postAction, setPostAction] = useState<string>(form?.postAction || 'message');
+  const emails = useResource<JourneyEmail[]>(emailPath);
+  const segments = useResource<Segment[]>('/segments');
+  const assets = useResource<Asset[]>(assetPath);
+  const users = useResource<{ id: number; name: string; email: string }[]>(`${formPath}/users`);
   const [fields, setFields] = useState<EditableFormField[]>(() => {
-    const existing = form?.fields?.filter(item => item.type !== 'button' && item.type !== 'hidden') ?? [];
-    if (!existing.length) return defaultBuilderFields();
-    return existing.map((item, index) => ({
-      key: index,
-      label: item.label || prettifyTriggerKey(item.alias),
-      alias: item.alias || slugAlias(item.label),
-      type: validFieldTypes.has(item.type) ? item.type as FormFieldType : 'text',
-      mappedField: item.mappedField || 'none',
-      isRequired: Boolean(item.isRequired),
-      optionsText: (item.options ?? []).join(', '),
-    }));
+    const existing = form?.fields?.filter(item => item.type !== 'button') ?? [];
+    return existing.length ? existing.map(editableField) : defaultBuilderFields();
   });
+  const [formActions, setFormActions] = useState<EditableFormAction[]>(() => (form?.actions ?? []).map((item, index) => ({
+    key: index, id: item.id, type: item.type, name: item.name, properties: item.properties,
+  })));
   const nextKey = useRef(fields.length);
+  const nextActionKey = useRef(formActions.length);
 
   function updateField(fieldKey: number, patch: Partial<EditableFormField>) {
     setFields(items => items.map(item => item.key === fieldKey ? { ...item, ...patch } : item));
@@ -692,15 +902,12 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
 
   function addField() {
     const idx = nextKey.current++;
-    setFields(items => [...items, {
-      key: idx,
-      label: '',
-      alias: `field_${idx + 1}`,
-      type: 'text',
-      mappedField: 'none',
-      isRequired: false,
-      optionsText: '',
-    }]);
+    setFields(items => [...items, editableField({ label: '', alias: `field_${idx + 1}`, type: 'text' }, idx)]);
+  }
+
+  function addAction() {
+    const idx = nextActionKey.current++;
+    setFormActions(items => [...items, { key: idx, type: 'lead.changetags', name: '', properties: {} }]);
   }
 
   return <Modal title={form ? 'Edit lead form' : 'Create lead form'} onClose={onClose} size="large">
@@ -709,46 +916,38 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
       void action.run(async () => {
         const seen = new Set<string>();
         const built = fields.map((item, index) => {
-          const label = item.label.trim();
-          const alias = item.alias.trim().toLowerCase();
-          if (!label) throw new Error(`Enter a label for field ${index + 1}.`);
-          if (!/^[a-z][a-z0-9_]{0,59}$/.test(alias) || alias === 'submit') {
-            throw new Error(`Field ${index + 1} alias must start with a lowercase letter and use only lowercase letters, numbers and underscores.`);
-          }
-          if (seen.has(alias)) throw new Error(`Duplicate field alias “${alias}”.`);
-          seen.add(alias);
-          const options = item.type === 'select' || item.type === 'checkboxgrp'
-            ? item.optionsText.split(',').map(opt => opt.trim()).filter(Boolean)
-            : undefined;
-          if ((item.type === 'select' || item.type === 'checkboxgrp') && !options?.length) {
-            throw new Error(`Add at least one choice for field ${index + 1}.`);
-          }
-          return {
-            label,
-            alias,
-            type: item.type,
-            mappedField: item.mappedField === 'none' ? undefined : item.mappedField,
-            isRequired: item.isRequired,
-            ...(options?.length ? { options } : {}),
-          };
+          const result = builtField(item, index);
+          if (seen.has(result.alias)) throw new Error(`Duplicate field alias “${result.alias}”.`);
+          seen.add(result.alias);
+          return result;
         });
+        const builtActions = formActions.map(item => ({
+          ...(item.id ? { id: item.id } : {}), type: item.type, name: item.name.trim(), properties: item.properties,
+        }));
 
         const payload: LeadFormInput = {
           name: values.name.trim(),
           description: values.description.trim(),
+          postAction: postAction as FormPostAction,
+          ...(postAction === 'redirect' ? { redirectUrl: values.redirectUrl.trim() } : {}),
           ...(values.message.trim() ? { message: values.message.trim() } : {}),
           published,
           fields: built,
+          actions: builtActions,
         };
         await api(form ? `${formPath}/${form.id}` : formPath, form ? 'PATCH' : 'POST', payload);
         onDone();
       });
     }}>
       <TextInput label="Form name" isRequired {...field('name')} />
+      <TextArea label="Description" rows={2} isOptional {...field('description')} />
       <div className="ov-form-grid">
-        <TextArea label="Description" rows={2} isOptional {...field('description')} />
-        <TextArea label="Confirmation message" rows={2} isOptional
-          placeholder={form ? 'Leave blank to keep existing message' : 'Thank you for getting in touch.'} {...field('message')} />
+        <Selector label="After the form is sent" value={postAction} options={postActionOptions} onChange={value => setPostAction(value ?? 'message')} />
+        {postAction === 'redirect'
+          ? <TextInput label="Redirect address" placeholder="https://example.com/thanks" isRequired {...field('redirectUrl')} />
+          : postAction === 'return' ? null
+          : <TextArea label="Confirmation message" rows={2} isOptional
+              placeholder={form ? 'Leave blank to keep existing message' : 'Thank you for getting in touch.'} {...field('message')} />}
       </div>
       <Switch label="Published" description="Published forms can be embedded and trigger workflows." value={published} onChange={setPublished} />
 
@@ -758,32 +957,25 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
             <Text weight="semibold">Form fields</Text>
             <Text type="supporting" color="secondary">An email field mapped to the contact email is required and preserved automatically.</Text>
           </div>
-          {fields.length < 20 ? <Button size="sm" label="Add field" icon={<Plus size={14} />} onClick={addField} /> : null}
+          {fields.length < 60 ? <Button size="sm" label="Add field" icon={<Plus size={14} />} onClick={addField} /> : null}
         </div>
-        {fields.map((item, index) => <div key={item.key} className="ov-step">
-          <div className="ov-step-heading">
-            <Text weight="medium">Field {index + 1}</Text>
-            {fields.length > 1 ? <IconButton variant="ghost" size="sm" label={`Remove field ${index + 1}`} icon={<Trash2 size={15} />}
-              onClick={() => setFields(current => current.filter(entry => entry.key !== item.key))} /> : null}
+        {fields.map((item, index) => <LeadFormFieldEditor key={item.key} item={item} index={index} count={fields.length}
+          update={patch => updateField(item.key, patch)}
+          remove={() => setFields(current => current.filter(entry => entry.key !== item.key))} />)}
+      </div>
+
+      <div className="ov-stack-sm">
+        <div className="ov-actions ov-actions--between">
+          <div>
+            <Text weight="semibold">When the form is sent</Text>
+            <Text type="supporting" color="secondary">Actions run in order each time someone submits the form.</Text>
           </div>
-          <div className="ov-form-grid">
-            <TextInput label="Label" isRequired value={item.label} onChange={value => {
-              const autoAlias = !item.alias || item.alias.startsWith('field_') || item.alias === slugAlias(item.label);
-              updateField(item.key, { label: value, ...(autoAlias && value.trim() ? { alias: slugAlias(value) } : {}) });
-            }} />
-            <TextInput label="Field alias" description="Lowercase letters, numbers, underscores" isRequired value={item.alias}
-              onChange={value => updateField(item.key, { alias: value })} />
-            <Selector label="Field type" value={item.type} options={formFieldTypes}
-              onChange={value => updateField(item.key, { type: (value as FormFieldType) || 'text' })} />
-            <Selector label="Map to contact field" value={item.mappedField} options={mappedContactFields}
-              onChange={value => updateField(item.key, { mappedField: value ?? 'none' })} />
-          </div>
-          {item.type === 'select' || item.type === 'checkboxgrp' ? (
-            <TextInput label="Choices" description="Separate options with commas." placeholder="Option A, Option B, Option C" isRequired
-              value={item.optionsText} onChange={value => updateField(item.key, { optionsText: value })} />
-          ) : null}
-          <CheckboxInput label="Required field" value={item.isRequired} onChange={checked => updateField(item.key, { isRequired: checked })} />
-        </div>)}
+          {formActions.length < 30 ? <Button size="sm" label="Add action" icon={<Plus size={14} />} onClick={addAction} /> : null}
+        </div>
+        {formActions.map((item, index) => <LeadFormActionEditor key={item.key} item={item} index={index}
+          emails={emails.data ?? []} segments={segments.data ?? []} assets={assets.data ?? []} users={users.data ?? []}
+          update={patch => setFormActions(current => current.map(entry => entry.key === item.key ? { ...entry, ...patch } : entry))}
+          remove={() => setFormActions(current => current.filter(entry => entry.key !== item.key))} />)}
       </div>
 
       <Text type="supporting" color="secondary">Record marketing consent separately before sending marketing emails to new leads.</Text>

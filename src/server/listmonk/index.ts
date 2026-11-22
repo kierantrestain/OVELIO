@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type {
   BounceRecord, Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, DateRange, Health, MailingList,
-  MailingListInput, MaintenanceResult, MediaItem, Page, Point, RunningCampaignStat, Subscriber, SubscriberActivity,
+  DeliverySettings, DeliverySettingsInput, MailingListInput, MaintenanceResult, MediaItem, Page, Point, RunningCampaignStat, Subscriber, SubscriberActivity,
   SubscriberBounce, SubscriberInput, Template, TemplateInput, TransactionalEmailInput,
 } from '../../contracts';
 import { basic, upstream, upstreamResponse, UpstreamError } from '../upstream';
@@ -45,6 +45,7 @@ type NativeSubscriber = {
 };
 type NativeCampaign = {
   id: number;
+  uuid?: string;
   name: string;
   subject: string;
   body: string;
@@ -129,6 +130,17 @@ type NativeSettings = Record<string, unknown> & {
   'privacy.disable_tracking'?: boolean;
   'bounce.enabled'?: boolean;
 };
+// Accepted ranges, taken from Listmonk's settings form (frontend/src/views/settings/performance.vue:3-26).
+// The settings API itself does not range-check these (cmd/settings.go:88-326), so OVELIO does.
+export const deliveryLimits = {
+  concurrency: { min: 1, max: 10000 },
+  messageRate: { min: 1, max: 100000 },
+  batchSize: { min: 1, max: 100000 },
+  maxSendErrors: { min: 0, max: 100000 },
+  slidingWindowRate: { min: 1, max: 10_000_000 },
+} as const;
+// Listmonk reads the window length with Go's duration parser, which has no day unit.
+const windowDuration = /^[1-9]\d{0,5}(?:ms|s|m|h)$/;
 export type BounceProvider = 'ses' | 'sendgrid' | 'postmark' | 'azure' | 'forwardemail' | 'lettermint';
 export type BounceOptions = {
   providers: BounceProvider[];
@@ -345,6 +357,7 @@ function campaignFromNative(campaign: NativeCampaign, settings: NativeSettings =
   const tracking = settings['privacy.disable_tracking'] === false;
   return {
     id: campaign.id,
+    ...(campaign.uuid ? { uuid: campaign.uuid } : {}),
     name: campaign.name,
     subject: campaign.subject,
     body: removedAdditions(campaign.body ?? ''),
@@ -362,7 +375,7 @@ function campaignFromNative(campaign: NativeCampaign, settings: NativeSettings =
     templateId: campaign.template_id || undefined,
     metrics: {
       sent: campaign.sent ?? null,
-      // Listmonk records no delivery receipts, and OVELIO does not yet count unsubscribes per campaign.
+      // Listmonk records no delivery receipts. Unsubscribes are counted by OVELIO's own route, so delivery.ts fills them in.
       delivered: null,
       opens: trackedCount(campaign.views, tracking),
       clicks: trackedCount(campaign.clicks, tracking),
@@ -370,7 +383,7 @@ function campaignFromNative(campaign: NativeCampaign, settings: NativeSettings =
       unsubscribes: null,
       unavailable: {
         delivered: 'Needs delivery feedback from your email provider. Listmonk only records sent and bounced.',
-        unsubscribes: 'Per-campaign unsubscribes are not recorded yet.',
+        unsubscribes: 'Unsubscribe counts could not be read right now.',
       },
     },
   };
@@ -413,6 +426,62 @@ export function bounceOptionsFromEnv(env: Record<string, string | undefined> = p
 // Listmonk masks saved secrets with bullets, so a secret matches when the mask has the same length.
 function secretMatches(saved: unknown, wanted: string | undefined) {
   return wanted === undefined || (typeof saved === 'string' && /^•+$/.test(saved) && [...saved].length === [...wanted].length);
+}
+
+
+const numberSetting = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+
+/** Reads throughput and privacy settings from Listmonk's settings blob, using Listmonk's own defaults when a key is missing. */
+export function deliverySettingsFromNative(native: Record<string, unknown>): DeliverySettings {
+  const text = native['app.message_sliding_window_duration'];
+  return {
+    concurrency: numberSetting(native['app.concurrency'], 10),
+    messageRate: numberSetting(native['app.message_rate'], 10),
+    batchSize: numberSetting(native['app.batch_size'], 1000),
+    maxSendErrors: numberSetting(native['app.max_send_errors'], 1000),
+    slidingWindow: native['app.message_sliding_window'] === true,
+    slidingWindowDuration: typeof text === 'string' && text ? text : '1h',
+    slidingWindowRate: numberSetting(native['app.message_sliding_window_rate'], 10000),
+    trackingMode: native['privacy.disable_tracking'] === true ? 'off'
+      : native['privacy.individual_tracking'] === true ? 'individual' : 'anonymous',
+    recordOptinIp: native['privacy.record_optin_ip'] === true,
+  };
+}
+
+function inRange(name: keyof typeof deliveryLimits, label: string, value: number | undefined) {
+  if (value === undefined) return;
+  const { min, max } = deliveryLimits[name];
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new UpstreamError(service, 400, `${label} must be a whole number from ${min} to ${max}.`);
+  }
+}
+
+/** Validates the changed delivery settings and returns only the Listmonk keys to change. */
+export function deliverySettingsPatch(input: DeliverySettingsInput): Record<string, unknown> {
+  inRange('concurrency', 'Concurrency', input.concurrency);
+  inRange('messageRate', 'Messages per second', input.messageRate);
+  inRange('batchSize', 'Batch size', input.batchSize);
+  inRange('maxSendErrors', 'Maximum send errors', input.maxSendErrors);
+  inRange('slidingWindowRate', 'Sliding window message limit', input.slidingWindowRate);
+  if (input.slidingWindowDuration !== undefined && !windowDuration.test(input.slidingWindowDuration)) {
+    throw new UpstreamError(service, 400, 'Enter the sliding window length as a number and a unit, for example 30m or 1h.');
+  }
+  const patch: Record<string, unknown> = {};
+  const set = (key: string, value: unknown) => { if (value !== undefined) patch[key] = value; };
+  set('app.concurrency', input.concurrency);
+  set('app.message_rate', input.messageRate);
+  set('app.batch_size', input.batchSize);
+  set('app.max_send_errors', input.maxSendErrors);
+  set('app.message_sliding_window', input.slidingWindow);
+  set('app.message_sliding_window_duration', input.slidingWindowDuration);
+  set('app.message_sliding_window_rate', input.slidingWindowRate);
+  set('privacy.record_optin_ip', input.recordOptinIp);
+  if (input.trackingMode !== undefined) {
+    // Individual tracking only has an effect while tracking is on (internal/manager/manager.go:372-392).
+    patch['privacy.disable_tracking'] = input.trackingMode === 'off';
+    patch['privacy.individual_tracking'] = input.trackingMode === 'individual';
+  }
+  return patch;
 }
 
 /** Returns only the bounce settings that differ from what Listmonk has saved, so operator choices are never reset. */
@@ -1079,6 +1148,32 @@ export function createListmonk(options: Options) {
       return ids.length ? filterCsvByCampaign(text, ids) : text;
     },
 
+    async deliverySettings(): Promise<DeliverySettings> {
+      return deliverySettingsFromNative(await settings());
+    },
+
+    /** Saves throughput and privacy settings. The whole settings blob is sent back, because Listmonk replaces it. */
+    async saveDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings & { needsRestart: boolean }> {
+      const patch = deliverySettingsPatch(input);
+      const existing = await settings();
+      if (!Object.keys(patch).length) return { ...deliverySettingsFromNative(existing), needsRestart: false };
+      const merged = { ...(clearMaskedSecrets(existing) as NativeSettings), ...patch };
+      // With a running campaign Listmonk waits for a restart instead of reloading (cmd/settings.go:344-369).
+      const result = await request<true | { needs_restart?: boolean }>('/api/settings', 'PUT', merged);
+      return { ...deliverySettingsFromNative(merged), needsRestart: result !== true && result.needs_restart === true };
+    },
+
+    /** One page of the subscribers on a list, reduced to the fields a sync needs. */
+    async listSubscribers(listId: number, page: number, limit = 100): Promise<Page<{ id: number; email: string; mauticId: number | null }>> {
+      const query = withPagination({ page, limit });
+      query.set('list_id', String(safeId(listId)));
+      const data = await request<NativePage<NativeSubscriber>>(`/api/subscribers?${query}`);
+      return mappedPage(data, { page, limit }, (item) => {
+        const mauticId = Number(item.attribs?.mautic_id);
+        return { id: item.id, email: item.email, mauticId: Number.isSafeInteger(mauticId) && mauticId > 0 ? mauticId : null };
+      });
+    },
+
     async configureDelivery(input: DeliveryOptions): Promise<{ changed: boolean; needsRestart: boolean }> {
       const existing = await settings();
       const current = existing.smtp?.find((entry) => entry.name === 'email-ovelio');
@@ -1137,6 +1232,8 @@ export function createListmonk(options: Options) {
         'app.enable_public_subscription_page': false,
         'privacy.unsubscribe_header': true,
         'privacy.allow_blocklist': true,
+        // Kept off: OVELIO treats any newsletter unsubscribe as a marketing opt-out across both engines
+        // (src/server/audience.ts nativeSuppressed), so a per-list preferences page would mislead subscribers.
         'privacy.allow_preferences': false,
         'privacy.allow_wipe': false,
         'privacy.allow_export': false,

@@ -264,9 +264,13 @@ test('creates a published lead capture form with mapped contact fields and no su
     submissions: 0,
     published: true,
     fields: [
-      { id: 43, label: 'First name', alias: 'first_name', type: 'text', mappedField: 'firstname', isRequired: false },
-      { id: 44, label: 'Email address', alias: 'email', type: 'email', mappedField: 'email', isRequired: true },
+      { id: 43, label: 'First name', alias: 'first_name', type: 'text', mappedObject: 'contact', mappedField: 'firstname', isRequired: false, showLabel: true },
+      { id: 44, label: 'Email address', alias: 'email', type: 'email', mappedObject: 'contact', mappedField: 'email', isRequired: true, showLabel: true },
     ],
+    // AUT-08: forms now read back their submit actions and post-submit behaviour.
+    actions: [],
+    postAction: 'message',
+    postActionProperty: 'Thanks & <welcome>. {formfield=name}',
   });
 });
 
@@ -680,6 +684,10 @@ test('supports custom form fields, update, delete, and paginated form submission
       ]);
       const fields = body.fields.map((field, index) => ({ id: index + 1, ...field }));
       return Response.json({ form: { ...body, id: 30, fields } }, { status: 201 });
+    }
+    // AUT-07: an update reads the saved form first so field ids, actions and the post-submit setting are kept.
+    if (request.method === 'GET' && url.pathname === '/api/forms/30') {
+      return Response.json({ form: { id: 30, name: 'Demo inquiry', postAction: 'message', postActionProperty: 'Thanks', fields: [], actions: [] } });
     }
     if (request.method === 'PATCH' && url.pathname === '/api/forms/30/edit') {
       const body = await request.json() as Record<string, unknown>;

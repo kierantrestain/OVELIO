@@ -1,27 +1,17 @@
 import { z } from 'zod';
+import { unsubscribe } from '@/server/delivery';
 import { json } from '@/server/http';
 
-// The native unsubscribe UUID pair is the authorization for a one-click POST.
-export async function POST(_request: Request, context: { params: Promise<{ campaign: string; subscriber: string }> }) {
+// The native unsubscribe UUID pair is the authorization for a POST. A bare one-click POST leaves the
+// campaign's lists. Blocklisting everything and the preferences form are explicit fields in the body.
+export async function POST(request: Request, context: { params: Promise<{ campaign: string; subscriber: string }> }) {
   const ids = z.object({ campaign: z.uuid(), subscriber: z.uuid() }).safeParse(await context.params);
   if (!ids.success) return json({ error: 'This unsubscribe link is invalid.' }, 400);
-  const base = process.env.LISTMONK_URL;
-  if (!base) return json({ error: 'Unsubscribe is temporarily unavailable.' }, 503);
-  try {
-    const { campaign, subscriber } = ids.data;
-    const response = await fetch(new URL('/subscription/' + campaign + '/' + subscriber, base), {
-      method: 'POST',
-      body: new URLSearchParams({ blocklist: 'true' }),
-      cache: 'no-store',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!response.ok) return json({ error: 'The unsubscribe request could not be completed. Check the link and try again.' }, response.status === 404 ? 404 : 502);
-    return new Response(response.body, {
-      status: response.status,
-      headers: { 'Content-Type': response.headers.get('content-type') ?? 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
-    });
-  } catch {
-    return json({ error: 'Unsubscribe is temporarily unavailable. Please try again.' }, 503);
-  }
+  const form = new URLSearchParams(await request.text().then(text => text.slice(0, 8192)).catch(() => ''));
+  const result = await unsubscribe(ids.data, form);
+  if ('error' in result) return json({ error: result.error }, result.status);
+  return new Response(result.body, {
+    status: result.status,
+    headers: { 'Content-Type': result.contentType, 'Cache-Control': 'no-store' },
+  });
 }

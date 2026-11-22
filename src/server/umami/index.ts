@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { ANALYTICS_LIMITS, UNFILTERABLE_DIMENSIONS, normalizeSegmentOperator } from '@/contracts/analytics';
+import {
+  ANALYTICS_LIMITS, FILTER_DIMENSIONS, PROPERTY_DATA_TYPE_CODES, UNFILTERABLE_DIMENSIONS,
+  filterQueryParams, hasFilters, normalizeSegmentOperator,
+} from '@/contracts/analytics';
 import type {
   Annotation,
   AnnotationInput,
@@ -26,6 +29,8 @@ import type {
   PerformanceReport,
   PerformanceStats,
   Point,
+  PropertyDataType,
+  PropertyFilter,
   RealtimeEvent,
   RealtimeReport,
   ReportDimension,
@@ -404,6 +409,26 @@ const websiteSegmentActionSchema = z
   .nullable()
   .optional();
 
+const propertyDataTypeNames = Object.fromEntries(
+  Object.entries(PROPERTY_DATA_TYPE_CODES).map(([name, code]) => [code, name]),
+) as Record<number, PropertyDataType>;
+
+/** Umami stores a segment's property filters as { propertyName, dataType: code, operator, value }. */
+const storedPropertyFilterSchema = z
+  .object({
+    propertyName: z.string(),
+    dataType: z.number().int().refine(code => code in propertyDataTypeNames),
+    operator: z.string(),
+    value: z.union([z.string(), z.number(), z.boolean()]).transform(String),
+  })
+  .transform((row): PropertyFilter => ({
+    scope: 'session',
+    name: row.propertyName,
+    dataType: propertyDataTypeNames[row.dataType],
+    operator: row.operator,
+    value: row.value,
+  }));
+
 const websiteSegmentSchema = z
   .object({
     id: uid,
@@ -415,6 +440,7 @@ const websiteSegmentSchema = z
         match: websiteSegmentMatchSchema.nullable().optional(),
         dateRange: websiteSegmentDateRangeSchema,
         action: websiteSegmentActionSchema,
+        sessionPropertyFilters: storedPropertyFilterSchema.array().nullable().optional(),
       })
       .nullable()
       .optional(),
@@ -428,6 +454,9 @@ const websiteSegmentSchema = z
     ...(segment.parameters?.match ? { match: segment.parameters.match } : {}),
     ...(segment.parameters?.dateRange ? { dateRange: segment.parameters.dateRange } : {}),
     ...(segment.parameters?.action ? { action: segment.parameters.action } : {}),
+    ...(segment.parameters?.sessionPropertyFilters?.length
+      ? { sessionPropertyFilters: segment.parameters.sessionPropertyFilters }
+      : {}),
     createdAt: segment.createdAt,
   }));
 
@@ -621,6 +650,7 @@ const sessionStatsSchema: z.ZodType<SessionStats> = z.object({
 
 const sessionPropertyStatSchema = z.object({
   propertyName: z.string(),
+  dataType: intCount.optional(),
   total: intCount,
 });
 
@@ -692,12 +722,6 @@ const reportDimensionSchema = z.enum([
   ...standardDimensions,
   'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
 ]);
-
-const filterKeys = [
-  'path', 'referrer', 'title', 'query', 'hostname',
-  'os', 'browser', 'device', 'country', 'region', 'city', 'language', 'event',
-  'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
-] as const;
 
 const filterValueSchema = z.string().trim().min(1).max(ANALYTICS_LIMITS.filterValueLength);
 
@@ -824,6 +848,13 @@ const websiteSegmentInputSchema = z.object({
   match: websiteSegmentMatchSchema.optional(),
   dateRange: z.string().trim().min(1).max(100).optional(),
   action: stepSchema.optional(),
+  sessionPropertyFilters: z.object({
+    scope: z.literal('session').default('session'),
+    name: z.string().trim().min(1).max(200),
+    dataType: z.enum(['string', 'number', 'boolean', 'date', 'array']),
+    operator: z.string().trim().min(1).max(20),
+    value: z.string().max(ANALYTICS_LIMITS.filterValueLength),
+  }).array().max(ANALYTICS_LIMITS.propertyFilters).optional(),
 });
 
 const currencySchema = z
@@ -862,27 +893,9 @@ function rangeUnit(range: DateRange): 'hour' | 'day' {
   return range.endAt - range.startAt <= 48 * hour ? 'hour' : 'day';
 }
 
+/** Umami 3.5.0 filter parameters (`path=c./blog`, `match=any`, `segment=`, `cohort=`, `spf0=`); see filterQueryParams. */
 function queryFilters(filters?: ReportFilters): Record<string, string> {
-  if (!filters) return {};
-  const result: Record<string, string> = {};
-  // Umami 3.5.0 ignores filters on columns outside its FILTER_COLUMNS, so refuse them instead of
-  // returning an unfiltered report that looks filtered.
-  const known = new Set<string>([...filterKeys, ...UNFILTERABLE_DIMENSIONS, 'entry', 'exit']);
-  for (const [key, raw] of Object.entries(filters)) {
-    if (raw === undefined || !raw.trim()) continue;
-    if (!known.has(key)) throw new RangeError(`Unknown filter "${key}".`);
-    if ((UNFILTERABLE_DIMENSIONS as readonly string[]).includes(key)) {
-      throw new RangeError(`The analytics engine cannot filter by ${key}. Remove that filter.`);
-    }
-  }
-  for (const key of filterKeys) {
-    const raw = filters[key];
-    if (raw === undefined) continue;
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    result[key] = filterValueSchema.parse(trimmed);
-  }
-  return result;
+  return filterQueryParams(filters);
 }
 
 function websitePath(id: string) {
@@ -1151,7 +1164,7 @@ export function createUmami(config: UmamiConfig) {
       return {
         website,
         range,
-        ...(Object.keys(appliedFilters).length ? { filters: appliedFilters as ReportFilters } : {}),
+        ...(hasFilters(filters) ? { filters } : {}),
         current: stats ? getTraffic(stats) : null,
         previous: stats ? getTraffic(stats.comparison) : null,
         activeVisitors: active,
@@ -1319,7 +1332,7 @@ export function createUmami(config: UmamiConfig) {
     async goalStats(id: string, goalId: string, range: DateRange): Promise<GoalStats> {
       const result = await authorized(`${websitePath(id)}/goals/${uid.parse(goalId)}/stats`, {}, queryRange(range));
       const { num, total } = validated(goalStatsSchema, result);
-      return { total, unique: num };
+      return { total, unique: num, rate: total > 0 ? num / total : 0 };
     },
 
     async retention(id: string, range: DateRange, filters?: ReportFilters): Promise<RetentionRow[]> {
@@ -1427,6 +1440,10 @@ export function createUmami(config: UmamiConfig) {
       const parsed = websiteSegmentInputSchema.parse(input);
       const blocked = parsed.filters?.find(rule => (UNFILTERABLE_DIMENSIONS as readonly string[]).includes(rule.name));
       if (blocked) throw new RangeError(`The analytics engine cannot filter segments by ${blocked.name}.`);
+      // Umami keeps only real filter columns when it applies a segment, so any other name would silently do nothing.
+      const unknown = parsed.filters?.find(rule => !(FILTER_DIMENSIONS as readonly string[]).includes(rule.name));
+      if (unknown) throw new RangeError(`Unknown filter "${unknown.name}".`);
+      if (parsed.sessionPropertyFilters?.length) filterQueryParams({ properties: parsed.sessionPropertyFilters });
       parsed.filters = parsed.filters?.map(rule => ({ ...rule, operator: normalizeSegmentOperator(rule.operator) }));
       const result = await authorized(`${websitePath(websiteId)}/segments`, {
         method: 'POST',
@@ -1438,6 +1455,16 @@ export function createUmami(config: UmamiConfig) {
             ...(parsed.match ? { match: parsed.match } : {}),
             ...(parsed.dateRange ? { dateRange: parsed.dateRange } : {}),
             ...(parsed.action ? { action: parsed.action } : {}),
+            ...(parsed.sessionPropertyFilters?.length
+              ? {
+                sessionPropertyFilters: parsed.sessionPropertyFilters.map(item => ({
+                  propertyName: item.name,
+                  dataType: PROPERTY_DATA_TYPE_CODES[item.dataType],
+                  operator: item.operator,
+                  value: item.value,
+                })),
+              }
+              : {}),
           },
         }),
       });
@@ -1570,11 +1597,11 @@ export function createUmami(config: UmamiConfig) {
       return validated(sessionStatsSchema, result);
     },
 
-    async sessionProperties(websiteId: string, range: DateRange): Promise<SessionPropertyStat[]> {
+    async sessionProperties(websiteId: string, range: DateRange, filters?: ReportFilters): Promise<SessionPropertyStat[]> {
       const result = await authorized(
         `${websitePath(websiteId)}/session-data/properties`,
         {},
-        queryRange(range),
+        { ...queryRange(range), ...queryFilters(filters) },
       );
       return validated(sessionPropertiesResponseSchema, result);
     },
@@ -1583,12 +1610,20 @@ export function createUmami(config: UmamiConfig) {
       websiteId: string,
       range: DateRange,
       propertyName: string,
+      filters?: ReportFilters,
+      dataType?: number,
     ): Promise<EventPropertyValue[]> {
       const parsedProperty = filterValueSchema.parse(propertyName);
+      const parsedType = dataType === undefined ? undefined : z.number().int().min(1).max(5).parse(dataType);
       const result = await authorized(
         `${websitePath(websiteId)}/session-data/values`,
         {},
-        { ...queryRange(range), propertyName: parsedProperty },
+        {
+          ...queryRange(range),
+          ...queryFilters(filters),
+          propertyName: parsedProperty,
+          ...(parsedType ? { dataType: String(parsedType) } : {}),
+        },
       );
       return validated(
         z.union([

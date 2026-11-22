@@ -28,28 +28,65 @@ const workflow = z.object({
 }).refine(input => input.segmentId > 0 || (input.formId ?? 0) > 0, 'Select a trigger segment or lead form.')
   .refine(input => !input.steps[0].condition, 'The first step starts when a contact triggers the workflow.');
 
+const shortText = z.string().max(500);
 const formField = z.object({
+  id: numberId.optional(),
   label: z.string().trim().min(1).max(100),
   alias: z.string().trim().regex(/^[a-z][a-z0-9_]{0,59}$/, 'Use lowercase letters, numbers and underscores for field aliases.'),
-  type: z.enum(['text', 'email', 'textarea', 'select', 'checkboxgrp']),
+  type: z.string().trim().min(1).max(40),
+  mappedObject: z.string().trim().max(30).optional(),
   mappedField: z.string().trim().max(60).optional(),
   isRequired: z.boolean().optional(),
-  options: z.array(z.string().trim().min(1).max(120)).max(30).optional(),
+  showLabel: z.boolean().optional(),
+  defaultValue: shortText.optional(),
+  helpMessage: shortText.optional(),
+  validationMessage: shortText.optional(),
+  labelAttributes: z.string().max(191).optional(),
+  inputAttributes: z.string().max(191).optional(),
+  containerAttributes: z.string().max(191).optional(),
+  fieldWidth: z.enum(['100%', '75%', '66.66%', '50%', '33.33%', '25%']).optional(),
+  saveResult: z.boolean().optional(),
+  alwaysDisplay: z.boolean().optional(),
+  showWhenValueExists: z.boolean().optional(),
+  showAfterXSubmissions: z.number().int().min(0).max(1_000_000).optional(),
+  isReadOnly: z.boolean().optional(),
+  isAutoFill: z.boolean().optional(),
+  options: z.array(z.string().trim().min(1).max(120)).max(200).optional(),
+  properties: z.record(z.string(), z.unknown()).optional(),
+  validation: z.record(z.string(), z.unknown()).optional(),
+  parent: z.union([z.string(), z.number()]).nullable().optional(),
+  conditions: z.unknown().optional(),
 });
+
+const formAction = z.object({
+  id: numberId.optional(),
+  type: z.string().trim().min(1).max(60),
+  name: z.string().trim().max(191).default(''),
+  description: z.string().max(1000).optional(),
+  properties: z.record(z.string(), z.unknown()).default({}),
+});
+
+const formBody = {
+  message: z.string().trim().max(500).optional(),
+  postAction: z.enum(['message', 'redirect', 'return', 'hideform']).optional(),
+  redirectUrl: z.string().trim().max(2000).optional(),
+  published: z.boolean().optional(),
+  fields: z.array(formField).min(1).max(60).optional(),
+  actions: z.array(formAction).max(30).optional(),
+};
 
 export const automationsEndpoints: Entry[] = [
   /* ── Automations: Workflows, Journey Emails, Forms, Assets, Pages, Webhooks */
   route('GET', /^forms$/, async () => mautic.forms(), 'marketer'),
+  route('GET', /^forms\/users$/, async () => mautic.formActionUsers(), 'marketer'),
   route('POST', /^forms$/, async ({ request }) => {
     const input = await readBody(request, z.object({
-      name, description, message: z.string().trim().max(500).optional(),
-      published: z.boolean().optional(), fields: z.array(formField).min(1).max(20).optional(),
+      name, description, ...formBody,
     }));
     return json(await mautic.createForm(input), 201);
   }, 'marketer'),
   route('PATCH', /^forms\/(\d+)$/, async context => mautic.updateForm(id(context), await readBody(context.request, z.object({
-    name: name.optional(), description, message: z.string().trim().max(500).optional(),
-    published: z.boolean().optional(), fields: z.array(formField).min(1).max(20).optional(),
+    name: name.optional(), description, ...formBody,
   }))), 'marketer'),
   route('DELETE', /^forms\/(\d+)$/, async context => {
     await mautic.deleteForm(id(context));

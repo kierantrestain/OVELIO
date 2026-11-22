@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { recordActivity } from '@/server/activity';
 import { rateLimit } from '@/server/auth';
 import { emailKey } from '@/server/config';
-import { approvedCampaign, changeCampaign, mailContent, sendTest, sendTransactional } from '@/server/delivery';
+import { approvedCampaign, changeCampaign, mailContent, sendTest, sendTransactional, withUnsubscribeCounts } from '@/server/delivery';
 import { json, readBody } from '@/server/http';
 import { listmonk } from '@/server/listmonk';
 import { name, subject, html, email, numberId, address, route, id, page, date } from './shared';
@@ -23,7 +23,8 @@ export const campaignsEndpoints: Entry[] = [
     const statusParam = query.get('status')?.trim();
     const statuses = statusParam && statusParam !== 'all' ? [statusParam] : undefined;
     const search = z.string().trim().max(120).optional().parse(query.get('q') ?? undefined);
-    return listmonk.campaigns({ page: page(query), status: statuses, query: search });
+    const result = await listmonk.campaigns({ page: page(query), status: statuses, query: search });
+    return { ...result, items: await withUnsubscribeCounts(result.items) };
   }),
   route('GET', /^campaigns\/running$/, async () => listmonk.runningCampaignStats()),
   route('POST', /^campaigns$/, async ({ request }) => {
@@ -31,7 +32,7 @@ export const campaignsEndpoints: Entry[] = [
     await recordActivity('Newsletter draft created', '/campaigns');
     return json(made, 201);
   }, 'marketer'),
-  route('GET', /^campaigns\/(\d+)$/, async context => listmonk.campaign(id(context))),
+  route('GET', /^campaigns\/(\d+)$/, async context => (await withUnsubscribeCounts([await listmonk.campaign(id(context))]))[0]),
   route('PATCH', /^campaigns\/(\d+)$/, async context => listmonk.updateCampaign(id(context), approvedCampaign(await readBody(context.request, campaign))), 'marketer'),
   route('DELETE', /^campaigns\/(\d+)$/, async context => {
     await listmonk.deleteCampaign(id(context));

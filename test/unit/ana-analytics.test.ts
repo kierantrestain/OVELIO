@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   ANALYTICS_LIMITS, OPERATOR_LABELS, SEGMENT_DIMENSION_OPERATORS, normalizeSegmentOperator, operatorLabel,
 } from '../../src/contracts/analytics';
+import type { ReportFilters } from '../../src/contracts';
 import { createUmami } from '../../src/server/umami';
 
 const siteId = '22b3bfe1-b34f-4472-bc18-123994f2ef31';
@@ -53,20 +54,23 @@ test('ANA-01 new segments are sent to Umami with dnc, never nc', async () => {
 
 test('ANA-04 channel and screen filters are refused, not silently dropped', async () => {
   const { api, calls } = harness(() => ({}));
-  await assert.rejects(() => api.retention(siteId, range, { channel: 'email' }), /cannot filter by channel/);
-  await assert.rejects(() => api.breakdown(siteId, range, ['country'], { screen: '1920x1080' }), /cannot filter by screen/);
+  const rule = (dimension: string, value: string) => ({ rules: [{ dimension, operator: 'eq', values: [value] }] }) as unknown as ReportFilters;
+  await assert.rejects(() => api.retention(siteId, range, rule('channel', 'email')), /cannot filter by channel/);
+  await assert.rejects(() => api.breakdown(siteId, range, ['country'], rule('screen', '1920x1080')), /cannot filter by screen/);
   await assert.rejects(() => api.createSegment(siteId, { name: 'S', type: 'segment', filters: [{ name: 'screen', operator: 'eq', value: 'x' }] }));
   assert.equal(calls.length, 0);
 });
 
 test('ANA-04 every supported filter reaches the engine on breakdown and attribution', async () => {
   const { api, calls } = harness(url => url.pathname.endsWith('/attribution') ? { total: { pageviews: 1, visitors: 1, visits: 1 } } : []);
-  await api.breakdown(siteId, range, ['country'], { device: 'mobile', utmSource: 'news' });
-  assert.equal(calls.at(-1)?.url.searchParams.get('device'), 'mobile');
-  assert.equal(calls.at(-1)?.url.searchParams.get('utmSource'), 'news');
-  await api.attribution(siteId, range, { model: 'last-click', type: 'event', step: 'buy', currency: 'eur', filters: { country: 'GB' } });
+  await api.breakdown(siteId, range, ['country'], {
+    rules: [{ dimension: 'device', operator: 'eq', values: ['mobile'] }, { dimension: 'utmSource', operator: 'eq', values: ['news'] }],
+  });
+  assert.equal(calls.at(-1)?.url.searchParams.get('device'), 'eq.mobile');
+  assert.equal(calls.at(-1)?.url.searchParams.get('utmSource'), 'eq.news');
+  await api.attribution(siteId, range, { model: 'last-click', type: 'event', step: 'buy', currency: 'eur', filters: { rules: [{ dimension: 'country', operator: 'eq', values: ['GB'] }] } });
   const q = calls.at(-1)!.url.searchParams;
-  assert.equal(q.get('country'), 'GB');
+  assert.equal(q.get('country'), 'eq.GB');
   assert.equal(q.get('currency'), 'EUR');
   assert.equal(q.get('step'), 'buy');
 });
