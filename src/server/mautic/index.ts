@@ -1,17 +1,23 @@
 import type {
-  Asset, AssetInput, Company, CompanyInput, Contact, ContactDetail, ContactInput,
-  ContactNote, ContactNoteInput, DateRange, FormSubmission, Health, JourneyEmail,
-  JourneyEmailInput, LandingPage, LandingPageInput, LeadForm, LeadFormInput, Page,
-  Point, PointAction, PointActionInput, PointTrigger, PointTriggerInput, Segment,
+  Asset, AssetInput, Category, CategoryInput, Company, CompanyInput, Contact,
+  ContactDetail, ContactDevice, ContactInput, ContactLinkedCompany, ContactNote,
+  ContactNoteInput, CustomField, CustomFieldInput, CustomFieldObject, DateRange,
+  DynamicContent, DynamicContentInput, FocusItem, FocusItemInput, FormSubmission,
+  Health, JourneyEmail, JourneyEmailInput, LandingPage, LandingPageInput,
+  LeadForm, LeadFormInput, MarketingReport, MarketingReportData, Page, Point,
+  PointAction, PointActionInput, PointTrigger, PointTriggerInput, Segment,
   SegmentFilter, SegmentInput, Stage, StageInput, Tag, Webhook, WebhookInput,
   Workflow, WorkflowContact, WorkflowInput,
 } from '../../contracts';
+import { appOrigin } from '../config';
 import { basic, upstream, UpstreamError } from '../upstream';
 import {
   date, flag, item, items, number, positiveId, published, record, requiredId, service,
-  text, toAsset, toCompany, toContact, toContactNote, toFormField, toFormSubmission,
-  toLandingPage, toPointAction, toPointTrigger, toSegment, toStage, toTag, toWebhook,
-  toWorkflowContact, total, type ApiRecord,
+  text, toAsset, toCategory, toCompany, toContact, toContactDevice,
+  toContactLinkedCompany, toContactNote, toCustomField, toDynamicContent,
+  toFocusItem, toFormField, toFormSubmission, toLandingPage, toMarketingReport,
+  toMarketingReportData, toPointAction, toPointTrigger, toSegment, toStage, toTag,
+  toWebhook, toWorkflowContact, total, type ApiRecord,
 } from './normalize';
 import { managedSteps, toWorkflow, verifySavedWorkflow, workflowPayload } from './workflows';
 
@@ -221,9 +227,47 @@ function buildFormFields(inputFields: NonNullable<LeadFormInput['fields']>): Nat
   return built;
 }
 
+const focusTypes = new Set<FocusItemInput['type']>(['form', 'notice', 'link']);
+const focusStyles = new Set<FocusItemInput['style']>(['bar', 'modal', 'notification', 'page']);
+
+function stripHash(value: string) {
+  return value.trim().replace(/^#/, '');
+}
+
+function fieldObject(object: CustomFieldObject): CustomFieldObject {
+  if (object !== 'contact' && object !== 'company') {
+    throw new UpstreamError(service, 400, 'Choose contact or company fields.');
+  }
+  return object;
+}
+
+function focusType(value: FocusItemInput['type']): FocusItemInput['type'] {
+  if (!focusTypes.has(value)) throw new UpstreamError(service, 400, 'Choose a valid focus item type.');
+  return value;
+}
+
+function focusStyle(value: FocusItemInput['style']): FocusItemInput['style'] {
+  if (!focusStyles.has(value)) throw new UpstreamError(service, 400, 'Choose a valid focus item style.');
+  return value;
+}
+
+function focusStyleOptions(style: FocusItemInput['style']) {
+  return style === 'bar'
+    ? { allow_hide: 1, push_page: 1, sticky: 1, size: 'large', placement: 'top' }
+    : { placement: 'top_right' };
+}
+
 export function createMautic(config: Config = {}) {
+  function baseUrl() {
+    return (config.url ?? process.env.MAUTIC_URL ?? '').trim().replace(/\/+$/, '').replace(/\/api$/, '');
+  }
+
+  function focusOrigin() {
+    return process.env.APP_ORIGIN ? appOrigin() : baseUrl();
+  }
+
   function request(path: string, method = 'GET', input?: object | URLSearchParams) {
-    const url = (config.url ?? process.env.MAUTIC_URL ?? '').trim().replace(/\/+$/, '').replace(/\/api$/, '');
+    const url = baseUrl();
     const username = config.username ?? process.env.MAUTIC_USERNAME;
     const password = config.password ?? process.env.MAUTIC_PASSWORD;
     if (!url || !username || !password) throw new UpstreamError(service, 503, 'Set the audience connection URL and API credentials.');
@@ -271,6 +315,13 @@ export function createMautic(config: Config = {}) {
 
   async function segment(id: number) {
     return toSegment(await get('/segments', 'list', id));
+  }
+
+  async function reports(): Promise<MarketingReport[]> {
+    const response = await request('/reports?limit=100');
+    return items(response.reports)
+      .map(toMarketingReport)
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async function memberships(id: number) {
@@ -961,6 +1012,240 @@ export function createMautic(config: Config = {}) {
 
     async deleteWebhook(id: number): Promise<void> {
       await remove(`/hooks/${requiredId(id)}/delete`);
+    },
+
+    async fields(object: CustomFieldObject = 'contact'): Promise<CustomField[]> {
+      const target = fieldObject(object);
+      const response = await request(`/fields/${target}?limit=100`);
+      return items(response.fields)
+        .map(entry => toCustomField(entry, target))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    },
+
+    async createField(object: CustomFieldObject, input: CustomFieldInput): Promise<CustomField> {
+      const target = fieldObject(object);
+      const label = requiredText(input.label, 'Enter a field label.');
+      const type = requiredText(input.type, 'Select a field type.');
+      const alias = input.alias?.trim();
+      const options = input.options?.map(value => value.trim()).filter(Boolean);
+      return toCustomField(await write(`/fields/${target}/new`, 'field', 'POST', {
+        label,
+        ...(alias ? { alias } : {}),
+        type,
+        group: input.group || 'core',
+        ...(input.defaultValue !== undefined ? { defaultValue: input.defaultValue } : {}),
+        isRequired: input.isRequired ?? false,
+        isPubliclyUpdatable: input.isPubliclyUpdatable ?? false,
+        isPublished: input.published ?? true,
+        ...(options?.length ? { properties: { list: options.map(value => ({ label: value, value })) } } : {}),
+      }), target);
+    },
+
+    async updateField(object: CustomFieldObject, id: number, input: Partial<CustomFieldInput>): Promise<CustomField> {
+      const target = fieldObject(object);
+      const payload: ApiRecord = {};
+      if (input.label !== undefined) payload.label = requiredText(input.label, 'Enter a field label.');
+      if (input.alias !== undefined && input.alias.trim()) payload.alias = input.alias.trim();
+      if (input.type !== undefined) payload.type = requiredText(input.type, 'Select a field type.');
+      if (input.group !== undefined) payload.group = input.group || 'core';
+      if (input.defaultValue !== undefined) payload.defaultValue = input.defaultValue;
+      if (input.isRequired !== undefined) payload.isRequired = input.isRequired;
+      if (input.isPubliclyUpdatable !== undefined) payload.isPubliclyUpdatable = input.isPubliclyUpdatable;
+      if (input.published !== undefined) payload.isPublished = input.published;
+      if (input.options !== undefined) {
+        const options = input.options.map(value => value.trim()).filter(Boolean);
+        payload.properties = { list: options.map(value => ({ label: value, value })) };
+      }
+      return toCustomField(await write(`/fields/${target}/${requiredId(id)}/edit`, 'field', 'PATCH', payload), target);
+    },
+
+    async deleteField(object: CustomFieldObject, id: number): Promise<void> {
+      await remove(`/fields/${fieldObject(object)}/${requiredId(id)}/delete`);
+    },
+
+    async categories(bundle?: string): Promise<Category[]> {
+      const response = await request('/categories?limit=100');
+      const target = bundle?.trim();
+      return items(response.categories)
+        .map(toCategory)
+        .filter(category => !target || category.bundle === target)
+        .sort((a, b) => a.title.localeCompare(b.title));
+    },
+
+    async createCategory(input: CategoryInput): Promise<Category> {
+      const title = requiredText(input.title, 'Enter a category title.');
+      const bundle = requiredText(input.bundle, 'Select a category bundle.');
+      const color = stripHash(input.color ?? '') || '2457d6';
+      return toCategory(await write('/categories/new', 'category', 'POST', {
+        title,
+        bundle,
+        description: input.description ?? '',
+        color,
+        isPublished: input.published ?? true,
+      }));
+    },
+
+    async updateCategory(id: number, input: Partial<CategoryInput>): Promise<Category> {
+      const payload: ApiRecord = {};
+      if (input.title !== undefined) payload.title = requiredText(input.title, 'Enter a category title.');
+      if (input.bundle !== undefined) payload.bundle = requiredText(input.bundle, 'Select a category bundle.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.color !== undefined) payload.color = stripHash(input.color);
+      if (input.published !== undefined) payload.isPublished = input.published;
+      return toCategory(await write(`/categories/${requiredId(id)}/edit`, 'category', 'PATCH', payload));
+    },
+
+    async deleteCategory(id: number): Promise<void> {
+      await remove(`/categories/${requiredId(id)}/delete`);
+    },
+
+    async dynamicContents(): Promise<DynamicContent[]> {
+      const response = await request('/dynamiccontents?limit=100');
+      return items(response.dynamicContents)
+        .map(toDynamicContent)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    async createDynamicContent(input: DynamicContentInput): Promise<DynamicContent> {
+      const name = requiredText(input.name, 'Enter a dynamic content name.');
+      const slotName = requiredText(input.slotName, 'Enter a dynamic content slot name.');
+      return toDynamicContent(await write('/dynamiccontents/new', 'dynamicContent', 'POST', {
+        name,
+        slotName,
+        content: input.content,
+        isCampaignBased: input.isCampaignBased ?? true,
+        isPublished: input.published ?? true,
+      }));
+    },
+
+    async updateDynamicContent(id: number, input: Partial<DynamicContentInput>): Promise<DynamicContent> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a dynamic content name.');
+      if (input.slotName !== undefined) payload.slotName = requiredText(input.slotName, 'Enter a dynamic content slot name.');
+      if (input.content !== undefined) payload.content = input.content;
+      if (input.isCampaignBased !== undefined) payload.isCampaignBased = input.isCampaignBased;
+      if (input.published !== undefined) payload.isPublished = input.published;
+      return toDynamicContent(await write(`/dynamiccontents/${requiredId(id)}/edit`, 'dynamicContent', 'PATCH', payload));
+    },
+
+    async deleteDynamicContent(id: number): Promise<void> {
+      await remove(`/dynamiccontents/${requiredId(id)}/delete`);
+    },
+
+    async focusItems(): Promise<FocusItem[]> {
+      const response = await request('/focus?limit=100');
+      const origin = focusOrigin();
+      return items(response.focus)
+        .map(entry => toFocusItem(entry, origin))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    async createFocusItem(input: FocusItemInput): Promise<FocusItem> {
+      const name = requiredText(input.name, 'Enter a focus item name.');
+      const type = focusType(input.type);
+      const style = focusStyle(input.style);
+      return toFocusItem(await write('/focus/new', 'focus', 'POST', {
+        name,
+        description: input.description ?? '',
+        type,
+        style,
+        htmlMode: 'basic',
+        ...(type === 'form' && input.formId ? { form: requiredId(input.formId) } : {}),
+        isPublished: input.published ?? true,
+        properties: {
+          animate: 1,
+          when: input.when ?? 'immediately',
+          [style]: focusStyleOptions(style),
+          content: {
+            headline: input.headline ?? name,
+            tagline: input.tagline ?? '',
+            link_text: input.linkText ?? '',
+            link_url: input.linkUrl ?? '',
+            link_new_window: 0,
+          },
+          colors: {
+            primary: stripHash(input.primaryColor ?? '2457d6') || '2457d6',
+            text: stripHash(input.textColor ?? '111827') || '111827',
+            button: stripHash(input.buttonColor ?? '2457d6') || '2457d6',
+            button_text: stripHash(input.buttonTextColor ?? 'ffffff') || 'ffffff',
+          },
+        },
+      }), focusOrigin());
+    },
+
+    async updateFocusItem(id: number, input: Partial<FocusItemInput>): Promise<FocusItem> {
+      const payload: ApiRecord = {};
+      const properties: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a focus item name.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.type !== undefined) payload.type = focusType(input.type);
+      if (input.style !== undefined) {
+        const style = focusStyle(input.style);
+        payload.style = style;
+        properties[style] = focusStyleOptions(style);
+      }
+      if (input.formId !== undefined) payload.form = input.formId === null ? null : requiredId(input.formId);
+      if (input.published !== undefined) payload.isPublished = input.published;
+      if (input.when !== undefined) properties.when = input.when;
+
+      const content: ApiRecord = {};
+      if (input.headline !== undefined) content.headline = input.headline;
+      if (input.tagline !== undefined) content.tagline = input.tagline;
+      if (input.linkText !== undefined) content.link_text = input.linkText;
+      if (input.linkUrl !== undefined) content.link_url = input.linkUrl;
+      if (Object.keys(content).length) properties.content = content;
+
+      const colors: ApiRecord = {};
+      if (input.primaryColor !== undefined) colors.primary = stripHash(input.primaryColor);
+      if (input.textColor !== undefined) colors.text = stripHash(input.textColor);
+      if (input.buttonColor !== undefined) colors.button = stripHash(input.buttonColor);
+      if (input.buttonTextColor !== undefined) colors.button_text = stripHash(input.buttonTextColor);
+      if (Object.keys(colors).length) properties.colors = colors;
+
+      if (Object.keys(properties).length) payload.properties = properties;
+      return toFocusItem(await write(`/focus/${requiredId(id)}/edit`, 'focus', 'PATCH', payload), focusOrigin());
+    },
+
+    async deleteFocusItem(id: number): Promise<void> {
+      await remove(`/focus/${requiredId(id)}/delete`);
+    },
+
+    reports,
+
+    async report(id: number, limit = 50): Promise<MarketingReportData> {
+      const reportId = requiredId(id);
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        throw new UpstreamError(service, 400, 'Choose a valid report row limit.');
+      }
+      const [response, allReports] = await Promise.all([
+        request(`/reports/${reportId}?limit=${limit}`),
+        reports().catch(() => [] as MarketingReport[]),
+      ]);
+      const meta = allReports.find(entry => entry.id === reportId);
+      return toMarketingReportData(response, reportId, meta);
+    },
+
+    async contactCompanies(contactId: number): Promise<ContactLinkedCompany[]> {
+      const response = await request(`/contacts/${requiredId(contactId)}/companies`);
+      const raw = response.companies;
+      if (!raw || typeof raw !== 'object') throw new UpstreamError(service, 502);
+      return Object.values(raw)
+        .map(entry => toContactLinkedCompany(record(entry)))
+        .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
+    },
+
+    async contactDevices(contactId: number): Promise<ContactDevice[]> {
+      const response = await request(`/contacts/${requiredId(contactId)}/devices`);
+      return items(response.devices)
+        .map(toContactDevice)
+        .sort((a, b) => (b.dateAdded ?? '').localeCompare(a.dateAdded ?? '') || b.id - a.id);
+    },
+
+    async sendEmailToContact(emailId: number, contactId: number): Promise<void> {
+      const response = record(await request(`/emails/${requiredId(emailId)}/contact/${requiredId(contactId)}/send`, 'POST'));
+      if (response.success === false) {
+        throw new UpstreamError(service, 502, 'The audience engine did not confirm sending the email.');
+      }
     },
   };
 }

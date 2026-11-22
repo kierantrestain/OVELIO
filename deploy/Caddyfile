@@ -46,7 +46,7 @@ http://127.0.0.1:9900 {
 
 	@listmonkPublic {
 		method GET HEAD
-		path_regexp listmonk ^/(subscription/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}|campaign/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}(/px[.]png)?|link/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}|public/static/([A-Za-z0-9_-]+/)*[A-Za-z0-9][A-Za-z0-9_.-]*|public/custom[.]css|uploads/[A-Za-z0-9][A-Za-z0-9_.-]*)$
+		path_regexp listmonk ^/(subscription/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}|campaign/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}(/px[.]png)?|link/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}/[A-Fa-f0-9-]{36}|archive(/[A-Za-z0-9_-]+)?|public/static/([A-Za-z0-9_-]+/)*[A-Za-z0-9][A-Za-z0-9_.-]*|public/custom[.]css|uploads/[A-Za-z0-9][A-Za-z0-9_.-]*)$
 	}
 	handle @listmonkPublic {
 		header Referrer-Policy no-referrer
@@ -59,7 +59,7 @@ http://127.0.0.1:9900 {
 
 	@mauticPage {
 		method GET HEAD
-		path_regexp mautic ^/(email/(unsubscribe|dnc)/[A-Za-z0-9_-]+(/[^/]+/[A-Za-z0-9_-]+)?|email/view/[A-Za-z0-9_-]+|email/[A-Za-z0-9_-]+[.]gif|r/[A-Za-z0-9_-]+|asset/[0-9]+:[A-Za-z0-9_-]+|form/(generate[.]js|embed/[0-9]+|[0-9]+|message)|media/js/mautic-form[.]js)$
+		path_regexp mautic ^/(email/(unsubscribe|dnc)/[A-Za-z0-9_-]+(/[^/]+/[A-Za-z0-9_-]+)?|email/view/[A-Za-z0-9_-]+|email/[A-Za-z0-9_-]+[.]gif|r/[A-Za-z0-9_-]+|asset/[0-9]+:[A-Za-z0-9_-]+|focus/[0-9]+[.]js|form/(generate[.]js|embed/[0-9]+|[0-9]+|message)|media/js/mautic-form[.]js)$
 	}
 	handle @mauticPage {
 		header Referrer-Policy no-referrer

@@ -185,13 +185,15 @@ export async function setConsent(id: number, action: 'opted_in' | 'suppressed', 
 }
 
 export async function contactDetail(id: number): Promise<ContactDetail> {
-  const [contact, segments, activity, state, notes, workflowIds, consentRows] = await Promise.all([
+  const [contact, segments, activity, state, notes, workflowIds, linkedCompanies, devices, consentRows] = await Promise.all([
     mautic.contact(id),
     mautic.contactSegments(id),
     mautic.contactActivity(id),
     getState(id),
     mautic.contactNotes(id).catch(() => []),
     mautic.contactCampaigns(id).catch(() => []),
+    mautic.contactCompanies(id).catch(() => []),
+    mautic.contactDevices(id).catch(() => []),
     db.query<{ id: string; action: 'opted_in' | 'suppressed'; evidence: string; created_at: Date }>(
       'SELECT id, action, evidence, created_at FROM consent_events WHERE contact_id = $1 ORDER BY id DESC LIMIT 30',
       [id],
@@ -200,10 +202,20 @@ export async function contactDetail(id: number): Promise<ContactDetail> {
   const key = contact.email ? emailKey(contact.email) : null;
   const suppressed = contact.suppressed || Boolean(key && await isSuppressed(key));
   let mailingListIds: number[] | undefined;
+  let newsletterActivity: ContactDetail['newsletterActivity'];
+  let subscriberBounces: ContactDetail['subscriberBounces'];
   if (key && state?.email_key === key) {
     try {
       const subscriber = state.subscriber_id ? await listmonk.subscriber(Number(state.subscriber_id)) : await listmonk.findSubscriber(contact.email);
       mailingListIds = subscriber?.lists.filter(list => list.status !== 'unsubscribed').map(list => list.id) ?? [];
+      if (subscriber) {
+        const [subAct, subBounces] = await Promise.all([
+          listmonk.subscriberActivity(subscriber.id).catch(() => ({ views: [], clicks: [] })),
+          listmonk.subscriberBounces(subscriber.id).catch(() => []),
+        ]);
+        newsletterActivity = subAct;
+        subscriberBounces = subBounces;
+      }
     } catch (error) {
       logError('contact-lists', error);
     }
@@ -221,10 +233,35 @@ export async function contactDetail(id: number): Promise<ContactDetail> {
     activity,
     notes,
     workflowIds,
+    linkedCompanies,
+    devices,
     consentHistory,
     mailingListIds,
+    newsletterActivity,
+    subscriberBounces,
     consent: suppressed ? 'suppressed' : state?.email_key === key ? state.consent : 'unknown',
   };
+}
+
+export async function sendContactEmail(contactId: number, emailId: number) {
+  const contact = await mautic.contact(contactId);
+  if (!contact.email) throw new AppError(409, 'Add an email address before sending.');
+  if (!await checkRecipient(contact.email)) {
+    throw new AppError(409, 'Record active marketing consent and ensure the contact is not suppressed before sending email.');
+  }
+  await mautic.sendEmailToContact(emailId, contactId);
+  await recordActivity('Direct journey email sent to contact', `/audience/${contactId}`);
+  return { sent: true };
+}
+
+export async function clearContactBounces(contactId: number) {
+  const [contact, state] = await Promise.all([mautic.contact(contactId), getState(contactId)]);
+  const subscriber = state?.subscriber_id
+    ? await listmonk.subscriber(Number(state.subscriber_id))
+    : contact.email ? await listmonk.findSubscriber(contact.email) : null;
+  if (subscriber) await listmonk.deleteSubscriberBounces(subscriber.id);
+  await recordActivity('Contact bounce records cleared', `/audience/${contactId}`);
+  return contactDetail(contactId);
 }
 
 export async function contactDirectory(options: { search?: string; page?: number; segmentId?: number; tag?: string }) {

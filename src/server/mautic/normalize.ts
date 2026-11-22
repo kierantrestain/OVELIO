@@ -1,7 +1,9 @@
 import type {
-  Asset, Company, Contact, ContactNote, FormField, FormSubmission,
-  LandingPage, PointAction, PointTrigger, PointTriggerEvent, Segment,
-  SegmentFilter, Stage, Tag, Webhook, WorkflowContact,
+  Asset, Category, Company, Contact, ContactDevice, ContactLinkedCompany,
+  ContactNote, CustomField, CustomFieldObject, DynamicContent, FocusItem,
+  FormField, FormSubmission, LandingPage, MarketingReport, MarketingReportData,
+  PointAction, PointTrigger, PointTriggerEvent, Segment, SegmentFilter, Stage,
+  Tag, Webhook, WorkflowContact,
 } from '../../contracts';
 import { UpstreamError } from '../upstream';
 
@@ -305,5 +307,193 @@ export function toWebhook(value: ApiRecord): Webhook {
     webhookUrl: text(value.webhookUrl),
     triggers,
     published: published(value),
+  };
+}
+
+export function normalizeColor(value: unknown): string {
+  const cleaned = text(value).trim().replace(/^#/, '');
+  return /^[0-9a-f]{6}$/i.test(cleaned) ? `#${cleaned}` : '';
+}
+
+export function toCustomField(value: ApiRecord, fallbackObject: CustomFieldObject = 'contact'): CustomField {
+  const props = record(value.properties);
+  const rawList = props.list;
+  const options = rawList && typeof rawList === 'object'
+    ? Object.values(rawList)
+        .map(entry => typeof entry === 'string' ? entry : text(record(entry).label) || text(record(entry).value))
+        .filter(Boolean)
+    : [];
+  const rawObject = text(value.object);
+  const object: CustomFieldObject = rawObject === 'company'
+    ? 'company'
+    : rawObject === 'contact' || rawObject === 'lead'
+      ? 'contact'
+      : fallbackObject;
+  const rawDefault = value.defaultValue;
+  const defaultValue = typeof rawDefault === 'string'
+    ? rawDefault
+    : typeof rawDefault === 'number' || typeof rawDefault === 'boolean'
+      ? String(rawDefault)
+      : '';
+  return {
+    id: requiredId(value.id),
+    label: text(value.label),
+    alias: text(value.alias),
+    type: text(value.type) || 'text',
+    group: text(value.group) || 'core',
+    object,
+    defaultValue,
+    isRequired: flag(value.isRequired),
+    isPubliclyUpdatable: flag(value.isPubliclyUpdatable),
+    isFixed: flag(value.isFixed),
+    published: flag(value.isPublished),
+    options,
+  };
+}
+
+export function toCategory(value: ApiRecord): Category {
+  return {
+    id: requiredId(value.id),
+    title: text(value.title),
+    alias: text(value.alias),
+    description: text(value.description),
+    color: normalizeColor(value.color),
+    bundle: text(value.bundle),
+    published: flag(value.isPublished),
+  };
+}
+
+export function toDynamicContent(value: ApiRecord): DynamicContent {
+  return {
+    id: requiredId(value.id),
+    name: text(value.name),
+    slotName: text(value.slotName),
+    content: text(value.content),
+    isCampaignBased: flag(value.isCampaignBased),
+    published: published(value),
+    sentCount: number(value.sentCount) ?? 0,
+    dateAdded: date(value.dateAdded),
+  };
+}
+
+export function toFocusItem(value: ApiRecord, origin = ''): FocusItem {
+  const id = requiredId(value.id);
+  const props = record(value.properties);
+  const content = record(props.content);
+  const colors = record(props.colors);
+  const base = origin.replace(/\/+$/, '');
+  return {
+    id,
+    name: text(value.name),
+    description: text(value.description),
+    type: text(value.type) || 'notice',
+    style: text(value.style) || 'bar',
+    headline: text(content.headline),
+    tagline: text(content.tagline),
+    linkText: text(content.link_text),
+    linkUrl: text(content.link_url),
+    formId: positiveId(value.form) ?? positiveId(record(value.form).id),
+    primaryColor: normalizeColor(colors.primary) || '#2457d6',
+    textColor: normalizeColor(colors.text) || '#111827',
+    buttonColor: normalizeColor(colors.button) || '#2457d6',
+    buttonTextColor: normalizeColor(colors.button_text) || '#ffffff',
+    when: text(props.when) || 'immediately',
+    published: published(value),
+    embedScript: `<script src="${base}/focus/${id}.js" type="text/javascript" charset="utf-8" async="async"></script>`,
+  };
+}
+
+export function toMarketingReport(value: ApiRecord): MarketingReport {
+  const columns = value.columns && typeof value.columns === 'object'
+    ? Object.values(value.columns).map(text).filter(Boolean)
+    : [];
+  return {
+    id: requiredId(value.id),
+    name: text(value.name),
+    description: text(value.description),
+    source: text(value.source),
+    columns,
+    system: flag(value.system),
+  };
+}
+
+function toReportCell(value: unknown): string | number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return JSON.stringify(value);
+}
+
+export function toMarketingReportData(response: ApiRecord, id: number, meta?: MarketingReport): MarketingReportData {
+  const rawData = response.data;
+  if (rawData !== undefined && (rawData === null || typeof rawData !== 'object')) {
+    throw new UpstreamError(service, 502);
+  }
+  const rawRows = Array.isArray(rawData)
+    ? rawData.map(record)
+    : rawData
+      ? Object.values(rawData).map(record)
+      : [];
+  const rows = rawRows.map(row => {
+    const normalized: Record<string, string | number | null> = {};
+    for (const [key, cell] of Object.entries(row)) {
+      normalized[key] = toReportCell(cell);
+    }
+    return normalized;
+  });
+  const dataColumns = response.dataColumns && typeof response.dataColumns === 'object'
+    ? Object.values(response.dataColumns).map(text).filter(Boolean)
+    : [];
+  const rowColumns: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!seen.has(key)) {
+        seen.add(key);
+        rowColumns.push(key);
+      }
+    }
+  }
+  const columns = rowColumns.length ? rowColumns : dataColumns.length ? dataColumns : (meta?.columns ?? []);
+  const report: MarketingReport = meta ?? {
+    id,
+    name: `Report #${id}`,
+    description: '',
+    source: '',
+    columns,
+    system: false,
+  };
+  return {
+    report,
+    totalResults: number(response.totalResults) ?? rows.length,
+    columns,
+    rows,
+  };
+}
+
+export function toContactLinkedCompany(value: ApiRecord): ContactLinkedCompany {
+  const id = positiveId(value.id ?? value.company_id);
+  if (!id) throw new UpstreamError(service, 502);
+  const fields = record(record(value.fields).all);
+  return {
+    id,
+    name: text(value.companyname ?? value.name ?? fields.companyname),
+    isPrimary: flag(value.is_primary ?? value.isPrimary),
+  };
+}
+
+export function toContactDevice(value: ApiRecord): ContactDevice {
+  const osObj = record(value.deviceOs);
+  const osName = text(value.deviceOsName ?? value.device_os_name ?? osObj.name);
+  const osVersion = text(value.deviceOsVersion ?? value.device_os_version ?? osObj.version);
+  const os = text(value.os) || [osName, osVersion].filter(Boolean).join(' ');
+  const brand = text(value.deviceBrand ?? value.device_brand ?? value.brand ?? value.deviceModel ?? value.device_model);
+  return {
+    id: requiredId(value.id),
+    device: text(value.device),
+    os,
+    brand,
+    dateAdded: date(value.dateAdded ?? value.date_added),
   };
 }

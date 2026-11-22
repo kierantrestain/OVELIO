@@ -1,11 +1,12 @@
 'use client';
 
 import {
-  Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Trash2, Users,
+  Code2, Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Trash2, Users,
 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core/Button';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
+import { Field } from '@astryxdesign/core/Field';
 import { Heading } from '@astryxdesign/core/Heading';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Link } from '@astryxdesign/core/Link';
@@ -21,8 +22,9 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  Asset, FormSubmission, JourneyEmail, LandingPage, LeadForm, LeadFormInput, Page,
-  Segment, Stage, Webhook, Workflow, WorkflowContact, WorkflowInput, WorkflowStep, WorkflowStepKind,
+  Asset, Category, DynamicContent, FocusItem, FocusItemInput, FormSubmission, JourneyEmail,
+  LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
+  WorkflowInput, WorkflowStep, WorkflowStepKind,
 } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
@@ -31,17 +33,74 @@ import {
   PageHeader, Pager, Panel, SlideDrawer, Snippet, StatusBadge, Tabs,
 } from './ui';
 
-const allTabs = ['Workflows', 'Journey emails', 'Lead forms', 'Assets', 'Landing pages', 'Webhooks'] as const;
-type AutomationTab = typeof allTabs[number];
+const tabs = [
+  'Workflows', 'Journey emails', 'Lead forms', 'Assets', 'Landing pages',
+  'Dynamic content', 'Popups & bars', 'Categories', 'Webhooks',
+] as const;
+type AutomationsTab = typeof tabs[number];
 type TriggerType = 'segment' | 'form';
 type FormFieldType = NonNullable<LeadFormInput['fields']>[number]['type'];
+type FocusType = FocusItemInput['type'];
+type FocusStyle = FocusItemInput['style'];
+type FocusWhen = NonNullable<FocusItemInput['when']>;
 
 const workflowPath = '/workflows';
 const emailPath = '/journey-emails';
 const formPath = '/forms';
 const assetPath = '/assets';
 const pagePath = '/pages';
+const dynamicContentPath = '/dynamic-content';
+const focusItemPath = '/focus-items';
+const categoryPath = '/categories';
 const webhookPath = '/webhooks';
+
+const focusTypes: { value: FocusType; label: string; description: string }[] = [
+  { value: 'notice', label: 'Notice', description: 'Display an announcement or banner message' },
+  { value: 'link', label: 'Click-through link', description: 'Promote a call-to-action button linking to a URL' },
+  { value: 'form', label: 'Lead form', description: 'Embed a lead capture form inside the popup or bar' },
+];
+
+const focusStyles: { value: FocusStyle; label: string }[] = [
+  { value: 'bar', label: 'Top bar' },
+  { value: 'modal', label: 'Modal popup' },
+  { value: 'notification', label: 'Notification' },
+  { value: 'page', label: 'Full page' },
+];
+
+const focusWhenOptions: { value: FocusWhen; label: string }[] = [
+  { value: 'immediately', label: 'Immediately on load' },
+  { value: 'scroll_slight', label: 'After slight scroll' },
+  { value: 'scroll_middle', label: 'Middle of page' },
+  { value: 'scroll_bottom', label: 'Bottom of page' },
+  { value: 'leave', label: 'On exit intent' },
+];
+
+const focusTypeLabels: Record<string, string> = Object.fromEntries(focusTypes.map(item => [item.value, item.label]));
+const focusStyleLabels: Record<string, string> = Object.fromEntries(focusStyles.map(item => [item.value, item.label]));
+const focusWhenLabels: Record<string, string> = Object.fromEntries(focusWhenOptions.map(item => [item.value, item.label]));
+const validFocusTypes = new Set<string>(focusTypes.map(item => item.value));
+const validFocusStyles = new Set<string>(focusStyles.map(item => item.value));
+const validFocusWhen = new Set<string>(focusWhenOptions.map(item => item.value));
+
+const categoryBundles = [
+  { value: 'global', label: 'Global' },
+  { value: 'campaign', label: 'Workflows' },
+  { value: 'email', label: 'Journey emails' },
+  { value: 'form', label: 'Lead forms' },
+  { value: 'asset', label: 'Assets' },
+  { value: 'page', label: 'Landing pages' },
+  { value: 'segment', label: 'Segments' },
+  { value: 'point', label: 'Lead scoring' },
+  { value: 'stage', label: 'Lifecycle stages' },
+  { value: 'dynamicContent', label: 'Dynamic content' },
+  { value: 'focus', label: 'Popups & bars' },
+] as const;
+
+type CategoryBundle = typeof categoryBundles[number]['value'];
+type CategoryFilter = 'all' | CategoryBundle;
+
+const categoryBundleLabels: Record<string, string> = Object.fromEntries(categoryBundles.map(item => [item.value, item.label]));
+const validCategoryBundles = new Set<string>(categoryBundles.map(item => item.value));
 
 const recipes = [
   { id: 'blank', name: 'Blank workflow', delays: [0] },
@@ -167,13 +226,33 @@ function escapeAttr(value: string) {
   return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
 
-function resolveTab(input: string | undefined, isAdmin: boolean): AutomationTab {
-  const allowed: readonly AutomationTab[] = isAdmin ? allTabs : allTabs.filter(item => item !== 'Webhooks');
+function slotSlug(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^[_-]+|[_-]+$/g, '').slice(0, 80);
+}
+
+function normalizeHex(value: string | undefined, fallback: string) {
+  const trimmed = (value ?? '').trim();
+  const withHash = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+  return /^#[0-9a-f]{6}$/i.test(withHash) ? withHash.toLowerCase() : fallback;
+}
+
+function resolveTab(input: string | undefined, isAdmin: boolean): AutomationsTab {
+  const allowed: readonly AutomationsTab[] = isAdmin ? tabs : tabs.filter(item => item !== 'Webhooks');
   if (!input) return 'Workflows';
   const exact = allowed.find(item => item === input);
   if (exact) return exact;
-  const lower = input.trim().toLowerCase();
-  return allowed.find(item => item.toLowerCase() === lower) ?? 'Workflows';
+  const normalized = input.trim().toLowerCase().replaceAll(/[-_]+/g, ' ').replaceAll(/\s+/g, ' ');
+  const aliasMap: Record<string, AutomationsTab> = {
+    'popups': 'Popups & bars',
+    'popups bars': 'Popups & bars',
+    'popups and bars': 'Popups & bars',
+    'focus': 'Popups & bars',
+    'focus items': 'Popups & bars',
+    'dynamic': 'Dynamic content',
+  };
+  const aliased = aliasMap[normalized];
+  if (aliased && allowed.includes(aliased)) return aliased;
+  return allowed.find(item => item.toLowerCase() === normalized) ?? 'Workflows';
 }
 
 /* ── HTML Preview Modal (Journey emails & Landing pages) ───────────────────── */
@@ -937,6 +1016,659 @@ function WebhookForm({
   </Modal>;
 }
 
+/* ── Dynamic Content Tab & Modals ──────────────────────────────────────────── */
+
+function DynamicContentForm({
+  item,
+  onClose,
+  onDone,
+}: {
+  item?: DynamicContent;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const action = useAction();
+  const { values, field, setValues } = useFields({
+    name: item?.name ?? '',
+    slotName: item?.slotName ?? '',
+    content: item?.content ?? '',
+  });
+  const [slotTouched, setSlotTouched] = useState(Boolean(item));
+  const [isCampaignBased, setIsCampaignBased] = useState(item?.isCampaignBased ?? true);
+  const [published, setPublished] = useState(item?.published ?? true);
+
+  return <Modal title={item ? 'Edit dynamic content' : 'Create dynamic content'} onClose={onClose} size="large">
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const cleanName = values.name.trim();
+        const cleanSlot = values.slotName.trim();
+        if (!cleanName) throw new Error('Enter a name for this dynamic content slot.');
+        if (!/^[a-z0-9_-]{1,80}$/i.test(cleanSlot)) {
+          throw new Error('Use letters, numbers, underscores or dashes for slot names.');
+        }
+        if (!values.content.trim()) throw new Error('Enter HTML content for this slot.');
+        await api(item ? `${dynamicContentPath}/${item.id}` : dynamicContentPath, item ? 'PATCH' : 'POST', {
+          name: cleanName,
+          slotName: cleanSlot,
+          content: values.content,
+          isCampaignBased,
+          published,
+        });
+        onDone();
+      });
+    }}>
+      <div className="ov-form-grid">
+        <TextInput label="Name" isRequired value={values.name} onChange={next => {
+          setValues(current => ({
+            ...current,
+            name: next,
+            ...(!slotTouched ? { slotName: slotSlug(next) } : {}),
+          }));
+        }} />
+        <TextInput label="Slot name" description="Letters, numbers, underscores or dashes." placeholder="hero_offer" isRequired
+          value={values.slotName} onChange={next => {
+            setSlotTouched(true);
+            setValues(current => ({ ...current, slotName: next }));
+          }} />
+      </div>
+      <TextArea label="Slot content (HTML)" rows={8} hasSpellCheck={false} isRequired
+        placeholder="<div><h2>Personalised offer</h2><p>Welcome back!</p></div>" {...field('content')} />
+      <div className="ov-stack-sm">
+        <Switch label="Campaign-based" description="Deliver via workflow actions rather than direct filter matching."
+          value={isCampaignBased} onChange={setIsCampaignBased} />
+        <Switch label="Published" description="Published slots render wherever the embed container is placed."
+          value={published} onChange={setPublished} />
+      </div>
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label={item ? 'Save changes' : 'Create slot'}
+          isLoading={action.busy} isDisabled={!values.name.trim() || !values.slotName.trim() || !values.content.trim()} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
+function DynamicContentEmbedModal({ item, onClose }: { item: DynamicContent; onClose: () => void }) {
+  const copy = useAction();
+  const embedCode = `<div data-slot="dwc" data-param-slot-name="${escapeAttr(item.slotName)}">Default content</div>`;
+  return <Modal title={`Embed ${item.name}`} onClose={onClose} size="large">
+    <div className="ov-stack-sm">
+      <Text type="supporting" color="secondary">
+        Place this container on any tracked page. Visitors who match this slot receive the personalised HTML in place of the default content.
+      </Text>
+      <div className="ov-actions ov-actions--between">
+        <Text weight="semibold">HTML slot snippet</Text>
+        <Button size="sm" label="Copy snippet" icon={<Copy size={14} />}
+          onClick={() => void copy.run(async () => navigator.clipboard.writeText(embedCode), 'Embed snippet copied.')} />
+      </div>
+      <Snippet code={embedCode} />
+      <Feedback notice={copy.notice} error={copy.error} />
+      <FormActions><Button label="Close" onClick={onClose} /></FormActions>
+    </div>
+  </Modal>;
+}
+
+function DynamicContentTab({
+  modal,
+  onModalChange,
+  onPreview,
+  onNotice,
+}: {
+  modal: 'new' | DynamicContent | undefined;
+  onModalChange: (next: 'new' | DynamicContent | undefined) => void;
+  onPreview: (preview: { title: string; html: string }) => void;
+  onNotice: (message: string) => void;
+}) {
+  const slots = useResource<DynamicContent[]>(dynamicContentPath);
+  const action = useAction();
+  const [embedItem, setEmbedItem] = useState<DynamicContent>();
+  const [deleteItem, setDeleteItem] = useState<DynamicContent>();
+
+  return <>
+    <Panel title="Dynamic content slots" description="Personalise sections of your website for returning contacts using embeddable HTML slots.">
+      <Feedback error={action.error} />
+      {!slots.data ? <AsyncState loading={slots.loading} error={slots.error} retry={slots.refresh} />
+        : <Table data={slots.data} idKey="id" hasHover
+          emptyState={<Empty title="No dynamic content slots yet" description="Create a slot to swap in personalised HTML on tracked pages." />}
+          columns={[
+            {
+              key: 'name',
+              header: 'Name',
+              renderCell: item => <span className="ov-cell">
+                <Text weight="medium">{item.name}</Text>
+                <Text type="supporting" color="secondary">
+                  {item.isCampaignBased ? 'Campaign-based' : 'Direct slot'}{item.dateAdded ? ` · Added ${date(item.dateAdded)}` : ''}
+                </Text>
+              </span>,
+            },
+            {
+              key: 'slotName',
+              header: 'Slot name',
+              renderCell: item => <StatusBadge label={item.slotName} tone="info" />,
+            },
+            {
+              key: 'sentCount',
+              header: 'Sent',
+              align: 'end',
+              renderCell: item => number(item.sentCount),
+            },
+            {
+              key: 'published',
+              header: 'Status',
+              renderCell: item => <StatusBadge label={item.published ? 'Published' : 'Draft'} tone={item.published ? 'success' : 'neutral'} />,
+            },
+            {
+              key: 'id',
+              header: 'Actions',
+              align: 'end',
+              renderCell: item => <span className="ov-actions ov-actions--end">
+                <Button size="sm" variant="ghost" label="Preview" icon={<Eye size={14} />}
+                  onClick={() => onPreview({ title: item.name, html: item.content })} />
+                <Button size="sm" label="Embed" icon={<Code2 size={14} />} onClick={() => setEmbedItem(item)} />
+                <Button size="sm" variant="ghost" label="Edit" icon={<Pencil size={14} />} onClick={() => onModalChange(item)} />
+                <IconButton size="sm" variant="ghost" label={`Delete ${item.name}`} icon={<Trash2 size={14} />}
+                  onClick={() => setDeleteItem(item)} />
+              </span>,
+            },
+          ]} />}
+    </Panel>
+
+    {modal ? <DynamicContentForm
+      item={modal === 'new' ? undefined : modal}
+      onClose={() => onModalChange(undefined)}
+      onDone={() => {
+        onNotice(modal === 'new' ? 'Dynamic content slot created.' : 'Dynamic content slot updated.');
+        onModalChange(undefined);
+        slots.refresh();
+      }}
+    /> : null}
+
+    {embedItem ? <DynamicContentEmbedModal item={embedItem} onClose={() => setEmbedItem(undefined)} /> : null}
+
+    {deleteItem ? <ConfirmDialog
+      title={`Delete dynamic content “${deleteItem.name}”`}
+      description="Pages embedding this slot will fall back to their default HTML content."
+      actionLabel="Delete slot"
+      destructive
+      busy={action.busy}
+      onClose={() => setDeleteItem(undefined)}
+      onConfirm={() => {
+        const target = deleteItem;
+        void action.run(async () => {
+          try {
+            await api(`${dynamicContentPath}/${target.id}`, 'DELETE');
+            slots.refresh();
+            onNotice('Dynamic content slot deleted.');
+          } finally {
+            setDeleteItem(undefined);
+          }
+        });
+      }}
+    /> : null}
+  </>;
+}
+
+/* ── Popups & Bars (Focus Items) Tab & Modals ──────────────────────────────── */
+
+function FocusItemForm({
+  item,
+  onClose,
+  onDone,
+}: {
+  item?: FocusItem;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const forms = useResource<LeadForm[]>(formPath);
+  const action = useAction();
+  const { values, field } = useFields({
+    name: item?.name ?? '',
+    description: item?.description ?? '',
+    headline: item?.headline ?? '',
+    tagline: item?.tagline ?? '',
+    linkText: item?.linkText ?? '',
+    linkUrl: item?.linkUrl ?? '',
+  });
+  const [type, setType] = useState<FocusType>(item && validFocusTypes.has(item.type) ? item.type as FocusType : 'notice');
+  const [style, setStyle] = useState<FocusStyle>(item && validFocusStyles.has(item.style) ? item.style as FocusStyle : 'bar');
+  const [when, setWhen] = useState<FocusWhen>(item && validFocusWhen.has(item.when) ? item.when as FocusWhen : 'immediately');
+  const [formId, setFormId] = useState<string | null>(item?.formId ? String(item.formId) : null);
+  const [primaryColor, setPrimaryColor] = useState(() => normalizeHex(item?.primaryColor, '#2457d6'));
+  const [textColor, setTextColor] = useState(() => normalizeHex(item?.textColor, '#111827'));
+  const [buttonColor, setButtonColor] = useState(() => normalizeHex(item?.buttonColor, '#2457d6'));
+  const [buttonTextColor, setButtonTextColor] = useState(() => normalizeHex(item?.buttonTextColor, '#ffffff'));
+  const [published, setPublished] = useState(item?.published ?? true);
+
+  const selectableForms = (forms.data ?? []).filter(entry => entry.published || (item?.formId && entry.id === item.formId));
+
+  return <Modal title={item ? 'Edit popup or bar' : 'Create popup or bar'} onClose={onClose} size="large">
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const cleanName = values.name.trim();
+        if (!cleanName) throw new Error('Enter a name for this popup or bar.');
+        const cleanLinkUrl = values.linkUrl.trim();
+        if (type === 'link' && cleanLinkUrl && !/^https?:\/\//i.test(cleanLinkUrl)) {
+          throw new Error('Enter a valid HTTP or HTTPS link URL.');
+        }
+
+        const payload: FocusItemInput = {
+          name: cleanName,
+          description: values.description.trim(),
+          type,
+          style,
+          when,
+          headline: values.headline.trim(),
+          tagline: values.tagline.trim(),
+          linkText: type === 'link' ? values.linkText.trim() : '',
+          linkUrl: type === 'link' ? cleanLinkUrl : '',
+          formId: type === 'form' && formId ? Number(formId) : null,
+          primaryColor: normalizeHex(primaryColor, '#2457d6'),
+          textColor: normalizeHex(textColor, '#111827'),
+          buttonColor: normalizeHex(buttonColor, '#2457d6'),
+          buttonTextColor: normalizeHex(buttonTextColor, '#ffffff'),
+          published,
+        };
+        await api(item ? `${focusItemPath}/${item.id}` : focusItemPath, item ? 'PATCH' : 'POST', payload);
+        onDone();
+      });
+    }}>
+      <TextInput label="Name" isRequired {...field('name')} />
+      <TextArea label="Description" rows={2} isOptional {...field('description')} />
+
+      <div className="ov-form-grid ov-form-grid--three">
+        <Selector label="Action type" value={type} options={focusTypes}
+          onChange={value => setType((value as FocusType) || 'notice')} />
+        <Selector label="Display style" value={style} options={focusStyles}
+          onChange={value => setStyle((value as FocusStyle) || 'bar')} />
+        <Selector label="Trigger timing" value={when} options={focusWhenOptions}
+          onChange={value => setWhen((value as FocusWhen) || 'immediately')} />
+      </div>
+
+      {type === 'form' ? (
+        <div className="ov-stack-sm">
+          <Selector
+            label="Embedded lead form"
+            description="Optional. Choose a published lead form to display inside this popup or bar."
+            placeholder="Select a lead form"
+            isOptional
+            isLoading={forms.loading}
+            value={formId}
+            hasClear
+            onChange={setFormId}
+            options={selectableForms.map(entry => ({ value: String(entry.id), label: entry.name }))}
+          />
+          {forms.error ? <Feedback error={forms.error} /> : null}
+          {forms.data && !selectableForms.length ? (
+            <Text type="supporting" color="secondary">Create and publish a lead form in the Lead forms tab first.</Text>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="ov-form-grid">
+        <TextInput label="Headline" placeholder="Stay up to date" isOptional {...field('headline')} />
+        <TextInput label="Tagline" placeholder="Get fresh product news every week." isOptional {...field('tagline')} />
+      </div>
+
+      {type === 'link' ? (
+        <div className="ov-form-grid">
+          <TextInput label="Button text" placeholder="Learn more" isOptional {...field('linkText')} />
+          <TextInput label="Link URL" type="url" placeholder="https://example.com/offer" isOptional {...field('linkUrl')} />
+        </div>
+      ) : null}
+
+      <div className="ov-form-grid">
+        <Field label="Primary colour" inputID="ov-focus-primary">
+          <div className="ov-actions">
+            <input id="ov-focus-primary" className="ov-color" type="color" value={primaryColor}
+              onChange={event => setPrimaryColor(event.target.value)} />
+            <Text type="supporting" color="secondary">{primaryColor.toUpperCase()}</Text>
+          </div>
+        </Field>
+        <Field label="Text colour" inputID="ov-focus-text">
+          <div className="ov-actions">
+            <input id="ov-focus-text" className="ov-color" type="color" value={textColor}
+              onChange={event => setTextColor(event.target.value)} />
+            <Text type="supporting" color="secondary">{textColor.toUpperCase()}</Text>
+          </div>
+        </Field>
+        <Field label="Button colour" inputID="ov-focus-button">
+          <div className="ov-actions">
+            <input id="ov-focus-button" className="ov-color" type="color" value={buttonColor}
+              onChange={event => setButtonColor(event.target.value)} />
+            <Text type="supporting" color="secondary">{buttonColor.toUpperCase()}</Text>
+          </div>
+        </Field>
+        <Field label="Button text colour" inputID="ov-focus-button-text">
+          <div className="ov-actions">
+            <input id="ov-focus-button-text" className="ov-color" type="color" value={buttonTextColor}
+              onChange={event => setButtonTextColor(event.target.value)} />
+            <Text type="supporting" color="secondary">{buttonTextColor.toUpperCase()}</Text>
+          </div>
+        </Field>
+      </div>
+
+      <Switch label="Published" description="Published popups and bars display wherever their embed script is installed."
+        value={published} onChange={setPublished} />
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label={item ? 'Save changes' : 'Create popup or bar'}
+          isLoading={action.busy} isDisabled={!values.name.trim()} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
+function FocusEmbedModal({ item, onClose }: { item: FocusItem; onClose: () => void }) {
+  const copy = useAction();
+  return <Modal title={`Embed ${item.name}`} onClose={onClose} size="large">
+    <div className="ov-stack-sm">
+      <Text type="supporting" color="secondary">
+        Add this script tag to your website where you want this {focusStyleLabels[item.style]?.toLowerCase() ?? 'item'} to appear.
+      </Text>
+      <div className="ov-actions ov-actions--between">
+        <Text weight="semibold">Embed script</Text>
+        <Button size="sm" label="Copy script" icon={<Copy size={14} />}
+          onClick={() => void copy.run(async () => navigator.clipboard.writeText(item.embedScript), 'Embed script copied.')} />
+      </div>
+      <Snippet code={item.embedScript} />
+      <Feedback notice={copy.notice} error={copy.error} />
+      <FormActions><Button label="Close" onClick={onClose} /></FormActions>
+    </div>
+  </Modal>;
+}
+
+function FocusItemsTab({
+  modal,
+  onModalChange,
+  onNotice,
+}: {
+  modal: 'new' | FocusItem | undefined;
+  onModalChange: (next: 'new' | FocusItem | undefined) => void;
+  onNotice: (message: string) => void;
+}) {
+  const items = useResource<FocusItem[]>(focusItemPath);
+  const action = useAction();
+  const [embedItem, setEmbedItem] = useState<FocusItem>();
+  const [deleteItem, setDeleteItem] = useState<FocusItem>();
+
+  return <>
+    <Panel title="Popups & bars" description="Display targeted notification bars, modals and lead capture overlays on your site.">
+      <Feedback error={action.error} />
+      {!items.data ? <AsyncState loading={items.loading} error={items.error} retry={items.refresh} />
+        : <Table data={items.data} idKey="id" hasHover
+          emptyState={<Empty title="No popups or bars yet" description="Create an announcement bar, click-through banner or form modal." />}
+          columns={[
+            {
+              key: 'name',
+              header: 'Name',
+              renderCell: item => <span className="ov-cell">
+                <Text weight="medium">{item.name}</Text>
+                {item.description || item.headline ? (
+                  <Text type="supporting" color="secondary">{item.description || item.headline}</Text>
+                ) : null}
+              </span>,
+            },
+            {
+              key: 'style',
+              header: 'Style',
+              renderCell: item => <StatusBadge label={focusStyleLabels[item.style] ?? prettifyTriggerKey(item.style)} tone="info" />,
+            },
+            {
+              key: 'type',
+              header: 'Type',
+              renderCell: item => <StatusBadge label={focusTypeLabels[item.type] ?? prettifyTriggerKey(item.type)} />,
+            },
+            {
+              key: 'when',
+              header: 'Trigger timing',
+              renderCell: item => focusWhenLabels[item.when] ?? prettifyTriggerKey(item.when),
+            },
+            {
+              key: 'published',
+              header: 'Status',
+              renderCell: item => <StatusBadge label={item.published ? 'Published' : 'Draft'} tone={item.published ? 'success' : 'neutral'} />,
+            },
+            {
+              key: 'id',
+              header: 'Actions',
+              align: 'end',
+              renderCell: item => <span className="ov-actions ov-actions--end">
+                <Button size="sm" label="Embed" icon={<Code2 size={14} />} onClick={() => setEmbedItem(item)} />
+                <Button size="sm" variant="ghost" label="Edit" icon={<Pencil size={14} />} onClick={() => onModalChange(item)} />
+                <IconButton size="sm" variant="ghost" label={`Delete ${item.name}`} icon={<Trash2 size={14} />}
+                  onClick={() => setDeleteItem(item)} />
+              </span>,
+            },
+          ]} />}
+    </Panel>
+
+    {modal ? <FocusItemForm
+      item={modal === 'new' ? undefined : modal}
+      onClose={() => onModalChange(undefined)}
+      onDone={() => {
+        onNotice(modal === 'new' ? 'Popup or bar created.' : 'Popup or bar updated.');
+        onModalChange(undefined);
+        items.refresh();
+      }}
+    /> : null}
+
+    {embedItem ? <FocusEmbedModal item={embedItem} onClose={() => setEmbedItem(undefined)} /> : null}
+
+    {deleteItem ? <ConfirmDialog
+      title={`Delete “${deleteItem.name}”`}
+      description="This permanently removes the popup or bar and disables its embedded script."
+      actionLabel="Delete item"
+      destructive
+      busy={action.busy}
+      onClose={() => setDeleteItem(undefined)}
+      onConfirm={() => {
+        const target = deleteItem;
+        void action.run(async () => {
+          try {
+            await api(`${focusItemPath}/${target.id}`, 'DELETE');
+            items.refresh();
+            onNotice('Popup or bar deleted.');
+          } finally {
+            setDeleteItem(undefined);
+          }
+        });
+      }}
+    /> : null}
+  </>;
+}
+
+/* ── Categories Tab & Modal ────────────────────────────────────────────────── */
+
+function CategoryForm({
+  category,
+  defaultBundle,
+  onClose,
+  onDone,
+}: {
+  category?: Category;
+  defaultBundle: CategoryBundle;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const action = useAction();
+  const { values, field } = useFields({
+    title: category?.title ?? '',
+    description: category?.description ?? '',
+  });
+  const [bundle, setBundle] = useState<CategoryBundle>(
+    category?.bundle && validCategoryBundles.has(category.bundle) ? category.bundle as CategoryBundle : defaultBundle,
+  );
+  const [color, setColor] = useState(() => normalizeHex(category?.color, '#2457d6'));
+  const [published, setPublished] = useState(category?.published ?? true);
+
+  return <Modal title={category ? 'Edit category' : 'Create category'} onClose={onClose}>
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const cleanTitle = values.title.trim();
+        if (!cleanTitle) throw new Error('Enter a category title.');
+        await api(category ? `${categoryPath}/${category.id}` : categoryPath, category ? 'PATCH' : 'POST', {
+          title: cleanTitle,
+          bundle,
+          description: values.description.trim(),
+          color: normalizeHex(color, '#2457d6'),
+          published,
+        });
+        onDone();
+      });
+    }}>
+      <TextInput label="Title" isRequired {...field('title')} />
+      <div className="ov-form-grid">
+        <Selector label="Bundle" value={bundle}
+          options={categoryBundles.map(item => ({ value: item.value, label: item.label }))}
+          onChange={value => setBundle((value as CategoryBundle) || 'global')} />
+        <Field label="Colour" inputID="ov-category-color" description="Swatch displayed next to this category.">
+          <div className="ov-actions">
+            <input id="ov-category-color" className="ov-color" type="color" value={color}
+              onChange={event => setColor(event.target.value)} />
+            <Text type="supporting" color="secondary">{color.toUpperCase()}</Text>
+          </div>
+        </Field>
+      </div>
+      <TextArea label="Description" rows={2} isOptional {...field('description')} />
+      <Switch label="Published" value={published} onChange={setPublished} />
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label={category ? 'Save category' : 'Create category'}
+          isLoading={action.busy} isDisabled={!values.title.trim()} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
+function CategoriesTab({
+  modal,
+  onModalChange,
+  onNotice,
+}: {
+  modal: 'new' | Category | undefined;
+  onModalChange: (next: 'new' | Category | undefined) => void;
+  onNotice: (message: string) => void;
+}) {
+  const [bundleFilter, setBundleFilter] = useState<CategoryFilter>('all');
+  const resourcePath = bundleFilter === 'all' ? categoryPath : `${categoryPath}?${new URLSearchParams({ bundle: bundleFilter })}`;
+  const categories = useResource<Category[]>(resourcePath);
+  const action = useAction();
+  const [deleteTarget, setDeleteTarget] = useState<Category>();
+
+  return <>
+    <Panel title="Categories" description="Organise workflows, emails, forms, assets, segments and overlays into colour-coded groups.">
+      <div className="ov-toolbar">
+        <Selector
+          label="Filter by bundle"
+          isLabelHidden
+          width={220}
+          value={bundleFilter}
+          options={[{ value: 'all', label: 'All bundles' }, ...categoryBundles.map(item => ({ value: item.value, label: item.label }))]}
+          onChange={value => setBundleFilter((value as CategoryFilter) || 'all')}
+        />
+      </div>
+      <Feedback error={action.error} />
+      {!categories.data ? <AsyncState loading={categories.loading} error={categories.error} retry={categories.refresh} />
+        : <Table data={categories.data} idKey="id" hasHover
+          emptyState={<Empty title={bundleFilter === 'all' ? 'No categories yet' : 'No categories in this bundle'}
+            description={bundleFilter === 'all'
+              ? 'Create categories to group marketing assets and automations.'
+              : 'Create a category for this bundle or switch the bundle filter.'}
+            action={bundleFilter !== 'all' ? <Button label="Show all bundles" onClick={() => setBundleFilter('all')} /> : undefined} />}
+          columns={[
+            {
+              key: 'title',
+              header: 'Category',
+              renderCell: item => {
+                const swatch = normalizeHex(item.color, '#2457d6');
+                return <span className="ov-actions">
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 12,
+                      height: 12,
+                      borderRadius: '50%',
+                      backgroundColor: swatch,
+                      border: '1px solid var(--color-border)',
+                      flexShrink: 0,
+                      display: 'inline-block',
+                    }}
+                  />
+                  <span className="ov-cell">
+                    <Text weight="medium">{item.title}</Text>
+                    {item.alias ? <Text type="supporting" color="secondary">{item.alias}</Text> : null}
+                  </span>
+                </span>;
+              },
+            },
+            {
+              key: 'bundle',
+              header: 'Bundle',
+              renderCell: item => <StatusBadge label={categoryBundleLabels[item.bundle] ?? prettifyTriggerKey(item.bundle)} tone="info" />,
+            },
+            {
+              key: 'description',
+              header: 'Description',
+              renderCell: item => item.description || <Text color="secondary">—</Text>,
+            },
+            {
+              key: 'published',
+              header: 'Status',
+              renderCell: item => <StatusBadge label={item.published ? 'Published' : 'Draft'} tone={item.published ? 'success' : 'neutral'} />,
+            },
+            {
+              key: 'id',
+              header: 'Actions',
+              align: 'end',
+              renderCell: item => <span className="ov-actions ov-actions--end">
+                <Button size="sm" variant="ghost" label="Edit" icon={<Pencil size={14} />} onClick={() => onModalChange(item)} />
+                <IconButton size="sm" variant="ghost" label={`Delete ${item.title}`} icon={<Trash2 size={14} />}
+                  onClick={() => setDeleteTarget(item)} />
+              </span>,
+            },
+          ]} />}
+    </Panel>
+
+    {modal ? <CategoryForm
+      category={modal === 'new' ? undefined : modal}
+      defaultBundle={bundleFilter === 'all' ? 'global' : bundleFilter}
+      onClose={() => onModalChange(undefined)}
+      onDone={() => {
+        onNotice(modal === 'new' ? 'Category created.' : 'Category updated.');
+        onModalChange(undefined);
+        categories.refresh();
+      }}
+    /> : null}
+
+    {deleteTarget ? <ConfirmDialog
+      title={`Delete category “${deleteTarget.title}”`}
+      description="Items assigned to this category will remain intact, with their category cleared."
+      actionLabel="Delete category"
+      destructive
+      busy={action.busy}
+      onClose={() => setDeleteTarget(undefined)}
+      onConfirm={() => {
+        const target = deleteTarget;
+        void action.run(async () => {
+          try {
+            await api(`${categoryPath}/${target.id}`, 'DELETE');
+            categories.refresh();
+            onNotice('Category deleted.');
+          } finally {
+            setDeleteTarget(undefined);
+          }
+        });
+      }}
+    /> : null}
+  </>;
+}
+
 /* ── Main Automations Component ────────────────────────────────────────────── */
 
 type ConfirmState = {
@@ -950,10 +1682,10 @@ type ConfirmState = {
 export function Automations({ initialTab }: { initialTab?: string }) {
   const user = useUser();
   const isAdmin = user.role === 'admin';
-  const visibleTabs = isAdmin ? allTabs : allTabs.filter((item): item is Exclude<AutomationTab, 'Webhooks'> => item !== 'Webhooks');
+  const visibleTabs = isAdmin ? tabs : tabs.filter((item): item is Exclude<AutomationsTab, 'Webhooks'> => item !== 'Webhooks');
   const blockedWebhooks = !isAdmin && initialTab?.trim().toLowerCase() === 'webhooks';
 
-  const [tab, setTab] = useState<AutomationTab>(() => resolveTab(initialTab, isAdmin));
+  const [tab, setTab] = useState<AutomationsTab>(() => resolveTab(initialTab, isAdmin));
   const [notice, setNotice] = useState('');
   const action = useAction();
 
@@ -966,6 +1698,9 @@ export function Automations({ initialTab }: { initialTab?: string }) {
   const [formEmbed, setFormEmbed] = useState<{ form: LeadForm; origin: string }>();
   const [assetModal, setAssetModal] = useState<'new' | Asset>();
   const [pageModal, setPageModal] = useState<'new' | LandingPage>();
+  const [dynamicModal, setDynamicModal] = useState<'new' | DynamicContent>();
+  const [focusModal, setFocusModal] = useState<'new' | FocusItem>();
+  const [categoryModal, setCategoryModal] = useState<'new' | Category>();
   const [webhookModal, setWebhookModal] = useState<'new' | Webhook>();
   const [preview, setPreview] = useState<{ title: string; html: string }>();
   const [confirmState, setConfirmState] = useState<ConfirmState>();
@@ -1025,17 +1760,20 @@ export function Automations({ initialTab }: { initialTab?: string }) {
     return 'Managed trigger';
   }
 
-  const createAction: Record<AutomationTab, [string, () => void]> = {
+  const createAction: Record<AutomationsTab, [string, () => void]> = {
     'Workflows': ['Create automation', () => setWorkflowEditor('new')],
     'Journey emails': ['Create journey email', () => setEmailModal('new')],
     'Lead forms': ['Create lead form', () => setFormModal('new')],
     'Assets': ['Add asset', () => setAssetModal('new')],
     'Landing pages': ['Create landing page', () => setPageModal('new')],
+    'Dynamic content': ['Create dynamic slot', () => setDynamicModal('new')],
+    'Popups & bars': ['Create popup or bar', () => setFocusModal('new')],
+    'Categories': ['Create category', () => setCategoryModal('new')],
     'Webhooks': ['Create webhook', () => setWebhookModal('new')],
   };
 
   return <>
-    <PageHeader title="Automations" description="Orchestrate multi-step journeys, capture leads, publish assets and connect webhooks."
+    <PageHeader title="Automations" description="Orchestrate multi-step journeys, capture leads, personalise pages and manage categories."
       actions={<Button variant="primary" icon={<Plus size={16} />} label={createAction[tab][0]} onClick={createAction[tab][1]} />} />
     <Tabs label="Automation view" items={visibleTabs} value={tab} onChange={value => { setTab(value); setNotice(''); }} />
     <Feedback
@@ -1273,6 +2011,31 @@ export function Automations({ initialTab }: { initialTab?: string }) {
             },
           ]} />}
     </Panel> : null}
+
+    {tab === 'Dynamic content' ? (
+      <DynamicContentTab
+        modal={dynamicModal}
+        onModalChange={setDynamicModal}
+        onPreview={setPreview}
+        onNotice={setNotice}
+      />
+    ) : null}
+
+    {tab === 'Popups & bars' ? (
+      <FocusItemsTab
+        modal={focusModal}
+        onModalChange={setFocusModal}
+        onNotice={setNotice}
+      />
+    ) : null}
+
+    {tab === 'Categories' ? (
+      <CategoriesTab
+        modal={categoryModal}
+        onModalChange={setCategoryModal}
+        onNotice={setNotice}
+      />
+    ) : null}
 
     {tab === 'Webhooks' && isAdmin ? <Panel title="Outbound webhooks" description="Send real-time HTTP notifications to external tools when audience events occur.">
       {!webhooks.data ? <AsyncState loading={webhooks.loading} error={webhooks.error} retry={webhooks.refresh} />

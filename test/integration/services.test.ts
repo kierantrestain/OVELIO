@@ -301,12 +301,46 @@ test('extended audience, delivery, automation and analytics capabilities across 
   });
   assert.equal((await api.response('/webhooks/' + hook.id, 'DELETE')).status, 204);
 
+  // Phase 2 Mautic: custom fields, categories, dynamic content, focus items, reports, contact companies/devices
+  const customField = await api.get<{ id: number }>('/fields/contact', 'POST', {
+    label: 'Tier ' + tag, alias: 'tier_' + tag.slice(-6), type: 'select', group: 'core', options: ['Free', 'Pro'], published: true,
+  });
+  await api.get('/fields/contact/' + customField.id, 'PATCH', { label: 'Tier v2 ' + tag });
+  assert.ok((await api.get<Array<{ id: number }>>('/fields/contact')).some(item => item.id === customField.id));
+  assert.equal((await api.response('/fields/contact/' + customField.id, 'DELETE')).status, 204);
+
+  const cat = await api.get<{ id: number }>('/categories', 'POST', {
+    title: 'Launch ' + tag, bundle: 'global', color: '#2457d6', published: true,
+  });
+  await api.get('/categories/' + cat.id, 'PATCH', { title: 'Launch v2 ' + tag });
+  assert.ok((await api.get<Array<{ id: number }>>('/categories?bundle=global')).some(item => item.id === cat.id));
+  assert.equal((await api.response('/categories/' + cat.id, 'DELETE')).status, 204);
+
+  const dwc = await api.get<{ id: number }>('/dynamic-content', 'POST', {
+    name: 'Banner ' + tag, slotName: 'banner-' + tag, content: '<p>Offer</p>', isCampaignBased: true, published: true,
+  });
+  await api.get('/dynamic-content/' + dwc.id, 'PATCH', { name: 'Banner v2 ' + tag });
+  assert.equal((await api.response('/dynamic-content/' + dwc.id, 'DELETE')).status, 204);
+
+  const focus = await api.get<{ id: number; embedScript: string }>('/focus-items', 'POST', {
+    name: 'Promo Bar ' + tag, type: 'notice', style: 'bar', headline: 'Hello', tagline: 'Update', when: 'immediately', published: true,
+  });
+  assert.ok(focus.embedScript.includes('/focus/' + focus.id + '.js'));
+  await api.get('/focus-items/' + focus.id, 'PATCH', { headline: 'Hello v2' });
+  assert.equal((await api.response('/focus-items/' + focus.id, 'DELETE')).status, 204);
+
+  const reports = await api.get<Array<{ id: number }>>('/reports');
+  assert.ok(reports.length > 0);
+  const firstReport = await api.get<{ report: { id: number }; rows: unknown[] }>('/reports/' + reports[0].id + '?limit=5');
+  assert.equal(firstReport.report.id, reports[0].id);
+  assert.ok(Array.isArray(firstReport.rows));
+
   await api.get('/suppressions', 'POST', {
     email: 'manual-' + tag + '@example.test', reason: 'unsubscribe', evidence: 'Automated suppression fixture',
   });
   assert.ok((await api.get<unknown[]>('/suppressions')).length >= 1);
 
-  // Listmonk extended: list edit/delete, template CRUD/preview/tx, transactional send, campaign clone/analytics/delete, media upload/delete, bounces, SMTP diagnostic, maintenance GC
+  // Listmonk extended: list edit/delete, template CRUD/preview/tx, transactional send, campaign clone/archive/analytics/delete, media upload/delete, bounces, SMTP diagnostic, maintenance GC
   const list = await api.get<MailingList>('/lists', 'POST', { name: 'Ext List ' + tag, description: 'Test', type: 'private', optin: 'double' });
   await api.get('/lists/' + list.id, 'PATCH', { name: 'Ext List v2 ' + tag, description: 'Updated' });
 
@@ -323,6 +357,9 @@ test('extended audience, delivery, automation and analytics capabilities across 
     name: 'Ext Camp ' + tag, subject: 'Ext Subj ' + tag, body: '<p>Content</p>',
     listIds: [list.id], templateId: tpl.id, tags: ['ext'], altBody: 'Plain copy',
   });
+  const archived = await api.get<Campaign>('/campaigns/' + camp.id + '/archive', 'PATCH', { archive: true, archiveSlug: 'ext-' + tag });
+  assert.equal(archived.archive, true);
+  assert.equal(archived.archiveSlug, 'ext-' + tag);
   const cloned = await api.get<Campaign>('/campaigns/' + camp.id + '/clone', 'POST', { name: 'Ext Clone ' + tag });
   assert.notEqual(cloned.id, camp.id);
   assert.ok(Array.isArray((await api.get<{ links: unknown[] }>('/campaigns/' + camp.id + '/analytics')).links));
@@ -332,6 +369,7 @@ test('extended audience, delivery, automation and analytics capabilities across 
 
   await api.get('/settings/smtp/test', 'POST', { email: contactEmail });
   assert.equal(typeof (await api.get<{ count: number }>('/settings/maintenance', 'POST', { action: 'gc_unconfirmed' })).count, 'number');
+  assert.equal(typeof (await api.get<{ count: number }>('/settings/maintenance', 'POST', { action: 'gc_blocklisted' })).count, 'number');
 
   assert.equal((await api.response('/campaigns/' + cloned.id, 'DELETE')).status, 204);
   assert.equal((await api.response('/campaigns/' + camp.id, 'DELETE')).status, 204);
@@ -339,13 +377,19 @@ test('extended audience, delivery, automation and analytics capabilities across 
   assert.equal((await api.response('/templates/' + txTpl.id, 'DELETE')).status, 204);
   assert.equal((await api.response('/lists/' + list.id, 'DELETE')).status, 204);
 
-  // Umami extended: website CRUD, realtime, sessions, weekly, funnels CRUD, goals CRUD, annotations, shares, retention, journeys, attribution, breakdown, links & pixels
+  // Umami extended: website CRUD, realtime, sessions/stats/properties, weekly, segments, revenue, performance, expanded metrics, events feed, funnels CRUD, goals CRUD, annotations, shares, retention, journeys, attribution, breakdown, links & pixels CRUD + charts
   const site = await api.get<{ id: string }>('/websites', 'POST', { name: 'Ext Site ' + tag, domain: 'ext-' + tag + '.example.test' });
   await api.get('/websites/' + site.id, 'PATCH', { name: 'Ext Site v2 ' + tag, domain: 'ext-' + tag + '.example.test' });
   const rangeQ = 'startAt=' + (Date.now() - 86_400_000) + '&endAt=' + Date.now();
   assert.equal(typeof (await api.get<{ visitors: number }>('/websites/' + site.id + '/realtime')).visitors, 'number');
   assert.equal((await api.get<number[][]>('/websites/' + site.id + '/sessions/weekly?' + rangeQ)).length, 7);
   assert.ok(Array.isArray((await api.get<Page<unknown>>('/websites/' + site.id + '/sessions?' + rangeQ + '&page=1')).items));
+  assert.equal(typeof (await api.get<{ pageviews: number }>('/websites/' + site.id + '/sessions/stats?' + rangeQ)).pageviews, 'number');
+  assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/sessions/properties?' + rangeQ)));
+  assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/metrics/expanded?' + rangeQ + '&type=path')));
+  assert.ok(Array.isArray((await api.get<Page<unknown>>('/websites/' + site.id + '/events?' + rangeQ + '&page=1')).items));
+  assert.equal((await api.get<{ currency: string }>('/websites/' + site.id + '/revenue?' + rangeQ + '&currency=GBP&type=country')).currency, 'GBP');
+  assert.equal((await api.get<{ metric: string }>('/websites/' + site.id + '/performance?' + rangeQ + '&metric=lcp&type=path')).metric, 'lcp');
   assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/events/properties?' + rangeQ)));
   assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/retention?' + rangeQ)));
   assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/journeys?' + rangeQ + '&steps=3')));
@@ -353,6 +397,12 @@ test('extended audience, delivery, automation and analytics capabilities across 
   assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/breakdown', 'POST', {
     startAt: Date.now() - 86_400_000, endAt: Date.now(), fields: ['path', 'browser'],
   })));
+
+  const webSeg = await api.get<{ id: string }>('/websites/' + site.id + '/segments', 'POST', {
+    name: 'UK Mobile ' + tag, type: 'segment', filters: [{ name: 'country', operator: 'eq', value: 'GB' }], match: 'all',
+  });
+  assert.ok((await api.get<Array<{ id: string }>>('/websites/' + site.id + '/segments?type=segment')).some(item => item.id === webSeg.id));
+  assert.equal((await api.response('/websites/' + site.id + '/segments/' + webSeg.id, 'DELETE')).status, 204);
 
   const savedFunnel = await api.get<{ id: string }>('/websites/' + site.id + '/funnels', 'POST', {
     name: 'Funnel ' + tag, steps: [{ type: 'path', value: '/' }, { type: 'event', value: 'signup' }], windowMinutes: 60,
@@ -369,13 +419,17 @@ test('extended audience, delivery, automation and analytics capabilities across 
   assert.equal((await api.response('/websites/' + site.id + '/shares/' + share.id, 'DELETE')).status, 204);
 
   const link = await api.get<{ id: string }>('/links', 'POST', { name: 'Link ' + tag, url: 'https://example.test/promo' });
+  await api.get('/links/' + link.id, 'PATCH', { name: 'Link v2 ' + tag });
+  assert.equal(typeof await api.get<Record<string, unknown>>('/links/charts?ids=' + link.id), 'object');
   assert.equal((await api.response('/links/' + link.id, 'DELETE')).status, 204);
 
   const pixel = await api.get<{ id: string }>('/pixels', 'POST', { name: 'Pixel ' + tag });
+  await api.get('/pixels/' + pixel.id, 'PATCH', { name: 'Pixel v2 ' + tag });
+  assert.equal(typeof await api.get<Record<string, unknown>>('/pixels/charts?ids=' + pixel.id), 'object');
   assert.equal((await api.response('/pixels/' + pixel.id, 'DELETE')).status, 204);
 
   assert.ok((await api.response('/websites/' + site.id + '/export?' + rangeQ)).ok);
   assert.equal((await api.response('/websites/' + site.id, 'DELETE')).status, 204);
 
-  context.diagnostic('Verified extended Mautic, Listmonk, and Umami APIs end-to-end against live services.');
+  context.diagnostic('Verified full Mautic 7.2.2, Listmonk v6.2.0, and Umami v3.5.0 Phase 1 & Phase 2 APIs end-to-end against live services.');
 });

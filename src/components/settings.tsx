@@ -28,7 +28,7 @@ const roles = [
 ] satisfies { value: Role; label: string; description: string }[];
 
 type DomainResult = { domain: string; selector: string; spf: boolean | null; dkim: boolean | null; dmarc: boolean | null };
-type MaintenanceActionKey = 'gc_unconfirmed' | 'gc_orphan' | 'gc_analytics';
+type MaintenanceActionKey = 'gc_unconfirmed' | 'gc_orphan' | 'gc_blocklisted' | 'gc_analytics';
 
 const maintenanceTasks: readonly {
   action: MaintenanceActionKey;
@@ -56,6 +56,15 @@ const maintenanceTasks: readonly {
     confirmDescription: 'Delete delivery subscriber entries that have no list memberships? Active contacts in Audience remain untouched.',
     buttonLabel: 'Clean up',
     confirmLabel: 'Clean orphans',
+  },
+  {
+    action: 'gc_blocklisted',
+    title: 'Clean blocklisted subscribers',
+    description: 'Remove permanently blocklisted delivery subscriber records. Suppressions remain recorded in OVELIO to block future sends.',
+    confirmTitle: 'Clean blocklisted subscribers',
+    confirmDescription: 'Remove permanently blocklisted delivery subscriber records? Suppressions remain recorded in OVELIO to block future sends.',
+    buttonLabel: 'Clean up',
+    confirmLabel: 'Clean blocklisted',
   },
   {
     action: 'gc_analytics',
@@ -142,31 +151,76 @@ function TeamDialog({ member, onClose, onDone }: { member?: User; onClose: () =>
   const current = useUser();
   const action = useAction();
   const [disable, setDisable] = useState(false);
+  const [pending, setPending] = useState<'submit' | 'reenable'>();
   const [role, setRole] = useState<Role>(member?.role ?? 'analyst');
   const { values, field } = useFields({ name: '', email: '', password: '' });
+  const isDisabledMember = Boolean(member?.disabled);
+
   return <Modal title={member ? 'Edit team member' : 'Add team member'} onClose={onClose}>
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
+      setPending('submit');
       void action.run(async () => {
         if (member) await api(`${path}/team/${member.id}`, 'PATCH', disable ? { disabled: true } : { role, ...(values.password ? { password: values.password } : {}) });
         else await api(`${path}/team`, 'POST', { name: values.name.trim(), email: values.email.trim(), role, password: values.password });
         onDone(disable ? 'Team member disabled.' : member ? 'Team member updated.' : 'Team member added.');
       });
     }}>
-      {member ? <Text color="secondary">{member.name} · {member.email}</Text> : <>
+      {member ? <div className="ov-actions ov-actions--between">
+        <Text color="secondary">{member.name} · {member.email}</Text>
+        <StatusBadge label={isDisabledMember ? 'Disabled' : 'Active'} tone={isDisabledMember ? 'warning' : 'success'} />
+      </div> : <>
         <TextInput label="Name" isRequired {...field('name')} />
         <TextInput label="Email address" type="email" autoComplete="off" isRequired {...field('email')} />
       </>}
       {disable ? <Text>This revokes the member’s workspace access and signs them out.</Text> : <>
+        {isDisabledMember ? <Text type="supporting" color="secondary">This account is disabled and cannot sign in. Re-enable access to restore workspace login.</Text> : null}
         <Selector label="Role" value={role} onChange={value => setRole((value as Role) || 'analyst')} options={roles} />
         <TextInput label={member ? 'New password' : 'Initial password'} type="password" autoComplete="new-password" isRequired={!member} isOptional={!!member}
           description={member ? 'Leave blank to keep the current password.' : 'Use 14 or more characters and share it securely.'} {...field('password')} />
       </>}
       <Feedback error={action.error} />
       <FormActions>
-        {member && member.id !== current.id && !disable ? <Button variant="destructive" label="Disable access…" onClick={() => setDisable(true)} /> : null}
-        {disable ? <Button label="Back" onClick={() => setDisable(false)} /> : <Button label="Cancel" onClick={onClose} />}
-        <Button type="submit" variant={disable ? 'destructive' : 'primary'} label={disable ? 'Disable account' : member ? 'Save member' : 'Add team member'} isLoading={action.busy} />
+        {member && !isDisabledMember && member.id !== current.id && !disable ? (
+          <Button variant="destructive" label="Disable access…" isDisabled={action.busy} onClick={() => setDisable(true)} />
+        ) : null}
+        {disable ? (
+          <Button label="Back" isDisabled={action.busy} onClick={() => setDisable(false)} />
+        ) : (
+          <Button label="Cancel" isDisabled={action.busy} onClick={onClose} />
+        )}
+        {member && isDisabledMember ? <>
+          <Button
+            type="submit"
+            label="Save member"
+            isLoading={action.busy && pending === 'submit'}
+            isDisabled={action.busy && pending !== 'submit'}
+          />
+          <Button
+            variant="primary"
+            label="Re-enable access"
+            isLoading={action.busy && pending === 'reenable'}
+            isDisabled={action.busy && pending !== 'reenable'}
+            onClick={() => {
+              setPending('reenable');
+              void action.run(async () => {
+                await api(`${path}/team/${member.id}`, 'PATCH', {
+                  disabled: false,
+                  ...(role !== member.role ? { role } : {}),
+                  ...(values.password ? { password: values.password } : {}),
+                });
+                onDone('Team member access re-enabled.');
+              });
+            }}
+          />
+        </> : (
+          <Button
+            type="submit"
+            variant={disable ? 'destructive' : 'primary'}
+            label={disable ? 'Disable account' : member ? 'Save member' : 'Add team member'}
+            isLoading={action.busy && pending === 'submit'}
+          />
+        )}
       </FormActions>
     </form>
   </Modal>;
@@ -183,6 +237,7 @@ function Team({ members, onSaved }: { members: User[]; onSaved: () => void }) {
         { key: 'name', header: 'Name' },
         { key: 'email', header: 'Email' },
         { key: 'role', header: 'Role', renderCell: member => <StatusBadge label={member.role[0].toUpperCase() + member.role.slice(1)} tone={member.role === 'admin' ? 'info' : 'neutral'} /> },
+        { key: 'disabled', header: 'Status', renderCell: member => <StatusBadge label={member.disabled ? 'Disabled' : 'Active'} tone={member.disabled ? 'warning' : 'success'} /> },
         { key: 'id', header: 'Access', align: 'end', renderCell: member => <Button size="sm" label={`Edit ${member.name}`} onClick={() => setEdit(member)}>Edit</Button> },
       ]} />
     </Panel>
@@ -359,7 +414,12 @@ function DataPrivacy({ company }: { company: CompanySettings }) {
           if (task.action === 'gc_analytics') {
             setMaintenanceNotice('Pruned email analytics logs older than 90 days.');
           } else {
-            const kind = task.action === 'gc_unconfirmed' ? 'unconfirmed subscription' : 'orphaned subscriber';
+            const labelByAction: Record<Exclude<MaintenanceActionKey, 'gc_analytics'>, string> = {
+              gc_unconfirmed: 'unconfirmed subscription',
+              gc_orphan: 'orphaned subscriber',
+              gc_blocklisted: 'blocklisted subscriber',
+            };
+            const kind = labelByAction[task.action];
             setMaintenanceNotice(`Removed ${number(result.count)} ${kind}${result.count === 1 ? '' : 's'}.`);
           }
         });

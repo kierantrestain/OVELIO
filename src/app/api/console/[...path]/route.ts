@@ -1,10 +1,14 @@
 import { z } from 'zod';
-import type { ReportDimension, ReportFilters, Role, User } from '@/contracts';
+import type {
+  CustomFieldObject, PerformanceBreakdownType, PerformanceMetricKey, ReportDimension, ReportFilters,
+  RevenueMetricType, Role, User,
+} from '@/contracts';
 import { recordActivity } from '@/server/activity';
 import {
-  bulkUpdateContacts, contactDetail, contactDirectory, contactFields, deleteListSafely, deleteSegmentSafely,
-  enqueueSegmentSync, exportContact, exportContacts, importContacts, listSuppressions, manualSuppress,
-  requestErasure, resendContactOptin, saveContact, setConsent, updateMailingList, updateMembership,
+  bulkUpdateContacts, clearContactBounces, contactDetail, contactDirectory, contactFields, deleteListSafely,
+  deleteSegmentSafely, enqueueSegmentSync, exportContact, exportContacts, importContacts, listSuppressions,
+  manualSuppress, requestErasure, resendContactOptin, saveContact, sendContactEmail, setConsent,
+  updateMailingList, updateMembership,
 } from '@/server/audience';
 import { addUser, changeUser, rateLimit, requireUser } from '@/server/auth';
 import { assertOrigin, emailKey } from '@/server/config';
@@ -212,6 +216,75 @@ const endpoints: Entry[] = [
     await mautic.deleteContactNote(id(context));
     return new Response(null, { status: 204 });
   }, 'marketer'),
+  route('POST', /^contacts\/(\d+)\/send-email$/, async context => {
+    const { emailId } = await readBody(context.request, z.object({ emailId: numberId }));
+    await rateLimit('direct-email:' + context.user.id, 20, 60);
+    await assertDeliveryReady();
+    return sendContactEmail(id(context), emailId);
+  }, 'marketer'),
+  route('DELETE', /^contacts\/(\d+)\/bounces$/, async context => clearContactBounces(id(context)), 'marketer'),
+  route('GET', /^fields\/(contact|company)$/, async context => mautic.fields(context.params[0] as CustomFieldObject), 'marketer'),
+  route('POST', /^fields\/(contact|company)$/, async context => {
+    const object = context.params[0] as CustomFieldObject;
+    const input = await readBody(context.request, z.object({
+      label: name,
+      alias: z.string().trim().regex(/^[a-z][a-z0-9_]{0,59}$/, 'Use lowercase letters, numbers and underscores.').optional(),
+      type: z.enum([
+        'text', 'textarea', 'number', 'boolean', 'date', 'datetime', 'email', 'url', 'tel', 'select', 'multiselect',
+        'country', 'region', 'timezone', 'locale',
+      ]),
+      group: z.enum(['core', 'social', 'personal', 'professional']).optional(),
+      defaultValue: z.string().max(300).optional(),
+      isRequired: z.boolean().optional(),
+      isPubliclyUpdatable: z.boolean().optional(),
+      published: z.boolean().optional(),
+      options: z.array(z.string().trim().min(1).max(120)).max(50).optional(),
+    }));
+    return json(await mautic.createField(object, input), 201);
+  }, 'marketer'),
+  route('PATCH', /^fields\/(contact|company)\/(\d+)$/, async context => {
+    const object = context.params[0] as CustomFieldObject;
+    const fieldId = numberId.parse(context.params[1]);
+    const input = await readBody(context.request, z.object({
+      label: name.optional(),
+      group: z.enum(['core', 'social', 'personal', 'professional']).optional(),
+      defaultValue: z.string().max(300).optional(),
+      isRequired: z.boolean().optional(),
+      isPubliclyUpdatable: z.boolean().optional(),
+      published: z.boolean().optional(),
+      options: z.array(z.string().trim().min(1).max(120)).max(50).optional(),
+    }));
+    return mautic.updateField(object, fieldId, input);
+  }, 'marketer'),
+  route('DELETE', /^fields\/(contact|company)\/(\d+)$/, async context => {
+    await mautic.deleteField(context.params[0] as CustomFieldObject, numberId.parse(context.params[1]));
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
+  route('GET', /^categories$/, async ({ query }) => mautic.categories(query.get('bundle')?.trim() || undefined), 'marketer'),
+  route('POST', /^categories$/, async ({ request }) => {
+    const input = await readBody(request, z.object({
+      title: name,
+      bundle: z.enum(['global', 'asset', 'campaign', 'email', 'form', 'page', 'point', 'segment', 'stage', 'dynamicContent', 'focus']),
+      description,
+      color: z.string().trim().regex(/^#?[0-9a-f]{6}$/i, 'Enter a six-digit hex colour.').optional(),
+      published: z.boolean().optional(),
+    }));
+    return json(await mautic.createCategory(input), 201);
+  }, 'marketer'),
+  route('PATCH', /^categories\/(\d+)$/, async context => {
+    const input = await readBody(context.request, z.object({
+      title: name.optional(),
+      bundle: z.enum(['global', 'asset', 'campaign', 'email', 'form', 'page', 'point', 'segment', 'stage', 'dynamicContent', 'focus']).optional(),
+      description,
+      color: z.string().trim().regex(/^#?[0-9a-f]{6}$/i, 'Enter a six-digit hex colour.').optional(),
+      published: z.boolean().optional(),
+    }));
+    return mautic.updateCategory(id(context), input);
+  }, 'marketer'),
+  route('DELETE', /^categories\/(\d+)$/, async context => {
+    await mautic.deleteCategory(id(context));
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
 
   /* ── Audience: Suppressions, Segments, Lists, Tags, Stages, Companies, Scoring */
   route('GET', /^suppressions$/, async () => listSuppressions(), 'marketer'),
@@ -346,6 +419,15 @@ const endpoints: Entry[] = [
     const cancelled = await listmonk.cancelCampaign(id(context));
     await recordActivity('Newsletter cancelled', `/campaigns/${cancelled.id}`);
     return cancelled;
+  }, 'marketer'),
+  route('PATCH', /^campaigns\/(\d+)\/archive$/, async context => {
+    const input = await readBody(context.request, z.object({
+      archive: z.boolean(),
+      archiveSlug: z.string().trim().regex(/^[a-z0-9-]*$/i, 'Use letters, numbers and dashes for archive slugs.').max(120).optional(),
+    }));
+    const updated = await listmonk.updateCampaignArchive(id(context), input);
+    await recordActivity(input.archive ? 'Newsletter published to public archive' : 'Newsletter removed from public archive', `/campaigns/${updated.id}`);
+    return updated;
   }, 'marketer'),
   route('GET', /^campaigns\/(\d+)\/preview$/, async context => new Response(await listmonk.previewCampaign(id(context)), {
     headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
@@ -560,6 +642,79 @@ const endpoints: Entry[] = [
     await mautic.deleteWebhook(id(context));
     return new Response(null, { status: 204 });
   }, 'admin'),
+  route('GET', /^dynamic-content$/, async () => mautic.dynamicContents(), 'marketer'),
+  route('POST', /^dynamic-content$/, async ({ request }) => {
+    const input = await readBody(request, z.object({
+      name,
+      slotName: z.string().trim().regex(/^[a-z0-9_-]{1,80}$/i, 'Use letters, numbers, underscores or dashes for slot names.'),
+      content: html,
+      isCampaignBased: z.boolean().optional(),
+      published: z.boolean().optional(),
+    }));
+    return json(await mautic.createDynamicContent(input), 201);
+  }, 'marketer'),
+  route('PATCH', /^dynamic-content\/(\d+)$/, async context => {
+    const input = await readBody(context.request, z.object({
+      name: name.optional(),
+      slotName: z.string().trim().regex(/^[a-z0-9_-]{1,80}$/i, 'Use letters, numbers, underscores or dashes for slot names.').optional(),
+      content: html.optional(),
+      isCampaignBased: z.boolean().optional(),
+      published: z.boolean().optional(),
+    }));
+    return mautic.updateDynamicContent(id(context), input);
+  }, 'marketer'),
+  route('DELETE', /^dynamic-content\/(\d+)$/, async context => {
+    await mautic.deleteDynamicContent(id(context));
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
+  route('GET', /^focus-items$/, async () => mautic.focusItems(), 'marketer'),
+  route('POST', /^focus-items$/, async ({ request }) => {
+    const input = await readBody(request, z.object({
+      name, description,
+      type: z.enum(['form', 'notice', 'link']),
+      style: z.enum(['bar', 'modal', 'notification', 'page']),
+      headline: z.string().trim().max(200).optional(),
+      tagline: z.string().trim().max(400).optional(),
+      linkText: z.string().trim().max(120).optional(),
+      linkUrl: url.optional(),
+      formId: numberId.nullable().optional(),
+      primaryColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      textColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      buttonColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      buttonTextColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      when: z.enum(['immediately', 'scroll_slight', 'scroll_middle', 'scroll_bottom', 'leave']).optional(),
+      published: z.boolean().optional(),
+    }));
+    return json(await mautic.createFocusItem(input), 201);
+  }, 'marketer'),
+  route('PATCH', /^focus-items\/(\d+)$/, async context => {
+    const input = await readBody(context.request, z.object({
+      name: name.optional(), description,
+      type: z.enum(['form', 'notice', 'link']).optional(),
+      style: z.enum(['bar', 'modal', 'notification', 'page']).optional(),
+      headline: z.string().trim().max(200).optional(),
+      tagline: z.string().trim().max(400).optional(),
+      linkText: z.string().trim().max(120).optional(),
+      linkUrl: url.optional(),
+      formId: numberId.nullable().optional(),
+      primaryColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      textColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      buttonColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      buttonTextColor: z.string().trim().regex(/^#?[0-9a-f]{6}$/i).optional(),
+      when: z.enum(['immediately', 'scroll_slight', 'scroll_middle', 'scroll_bottom', 'leave']).optional(),
+      published: z.boolean().optional(),
+    }));
+    return mautic.updateFocusItem(id(context), input);
+  }, 'marketer'),
+  route('DELETE', /^focus-items\/(\d+)$/, async context => {
+    await mautic.deleteFocusItem(id(context));
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
+  route('GET', /^reports$/, async () => mautic.reports()),
+  route('GET', /^reports\/(\d+)$/, async context => {
+    const limit = context.query.has('limit') ? z.coerce.number().int().min(1).max(200).parse(context.query.get('limit')) : 50;
+    return mautic.report(id(context), limit);
+  }),
 
   /* ── Analytics: Websites, Realtime, Sessions, Goals, Funnels, Insights ──── */
   route('GET', /^websites$/, async () => umami.websites()),
@@ -602,6 +757,54 @@ const endpoints: Entry[] = [
   }, 'marketer'),
   route('GET', /^websites\/([0-9a-f-]+)\/report$/i, async context =>
     umami.report(site(context), date(context.query), undefined, reportFilters(context.query))),
+  route('GET', /^websites\/([0-9a-f-]+)\/metrics\/expanded$/i, async context => {
+    const dim = z.enum([
+      'path', 'entry', 'exit', 'title', 'query', 'hostname', 'referrer', 'channel',
+      'device', 'browser', 'os', 'screen', 'country', 'region', 'city', 'language', 'event',
+      'utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm',
+    ]).parse(context.query.get('type') ?? 'path') as ReportDimension;
+    const limit = context.query.has('limit') ? z.coerce.number().int().min(1).max(100).parse(context.query.get('limit')) : 25;
+    return umami.expandedMetrics(site(context), date(context.query), dim, reportFilters(context.query), limit);
+  }),
+  route('GET', /^websites\/([0-9a-f-]+)\/events$/i, async context => umami.eventsFeed(site(context), date(context.query), {
+    page: page(context.query),
+    pageSize: 25,
+    search: z.string().trim().max(120).optional().parse(context.query.get('q') ?? undefined),
+    filters: reportFilters(context.query),
+  })),
+  route('GET', /^websites\/([0-9a-f-]+)\/segments$/i, async context => {
+    const type = z.enum(['segment', 'cohort']).parse(context.query.get('type') ?? 'segment');
+    return umami.segments(site(context), type);
+  }),
+  route('POST', /^websites\/([0-9a-f-]+)\/segments$/i, async context => {
+    const input = await readBody(context.request, z.object({
+      name,
+      type: z.enum(['segment', 'cohort']),
+      filters: z.array(z.object({
+        name: z.string().trim().min(1).max(40),
+        operator: z.enum(['eq', 'neq', 'c', 'nc', 's', 'ns']),
+        value: z.string().trim().min(1).max(300),
+      })).max(20).optional(),
+      match: z.enum(['all', 'any']).optional(),
+      dateRange: z.string().trim().max(40).optional(),
+      action: z.object({ type: z.enum(['path', 'event']), value: z.string().trim().min(1).max(200) }).optional(),
+    }));
+    return json(await umami.createSegment(site(context), input), 201);
+  }, 'marketer'),
+  route('DELETE', /^websites\/([0-9a-f-]+)\/segments\/([0-9a-f-]+)$/i, async context => {
+    await umami.deleteSegment(site(context), siteId.parse(context.params[1]));
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
+  route('GET', /^websites\/([0-9a-f-]+)\/revenue$/i, async context => {
+    const currency = z.string().trim().regex(/^[A-Z]{3}$/).parse((context.query.get('currency') ?? 'USD').toUpperCase());
+    const metricType = z.enum(['country', 'region', 'referrer', 'channel']).parse(context.query.get('type') ?? 'country') as RevenueMetricType;
+    return umami.revenueReport(site(context), date(context.query), currency, metricType, reportFilters(context.query));
+  }),
+  route('GET', /^websites\/([0-9a-f-]+)\/performance$/i, async context => {
+    const metric = z.enum(['lcp', 'inp', 'cls', 'fcp', 'ttfb']).parse(context.query.get('metric') ?? 'lcp') as PerformanceMetricKey;
+    const breakdownType = z.enum(['path', 'title', 'device', 'browser']).parse(context.query.get('type') ?? 'path') as PerformanceBreakdownType;
+    return umami.performanceReport(site(context), date(context.query), metric, breakdownType, reportFilters(context.query));
+  }),
   route('GET', /^websites\/([0-9a-f-]+)\/realtime$/i, async context => umami.realtime(site(context))),
   route('GET', /^websites\/([0-9a-f-]+)\/sessions$/i, async context => umami.sessions(site(context), date(context.query), {
     page: page(context.query),
@@ -609,10 +812,20 @@ const endpoints: Entry[] = [
     search: z.string().trim().max(120).optional().parse(context.query.get('q') ?? undefined),
     filters: reportFilters(context.query),
   })),
+  route('GET', /^websites\/([0-9a-f-]+)\/sessions\/stats$/i, async context =>
+    umami.sessionStats(site(context), date(context.query), reportFilters(context.query))),
+  route('GET', /^websites\/([0-9a-f-]+)\/sessions\/properties$/i, async context =>
+    umami.sessionProperties(site(context), date(context.query))),
+  route('GET', /^websites\/([0-9a-f-]+)\/sessions\/properties\/values$/i, async context => {
+    const propertyName = z.string().trim().min(1).max(200).parse(context.query.get('propertyName'));
+    return umami.sessionPropertyValues(site(context), date(context.query), propertyName);
+  }),
   route('GET', /^websites\/([0-9a-f-]+)\/sessions\/weekly$/i, async context =>
     umami.weeklyTraffic(site(context), date(context.query), reportFilters(context.query))),
   route('GET', /^websites\/([0-9a-f-]+)\/sessions\/([0-9a-f-]+)\/activity$/i, async context =>
     umami.sessionActivity(site(context), siteId.parse(context.params[1]), date(context.query))),
+  route('GET', /^websites\/([0-9a-f-]+)\/sessions\/([0-9a-f-]+)\/properties$/i, async context =>
+    umami.singleSessionProperties(site(context), siteId.parse(context.params[1]))),
   route('GET', /^websites\/([0-9a-f-]+)\/events\/properties$/i, async context =>
     umami.eventProperties(site(context), date(context.query), reportFilters(context.query))),
   route('GET', /^websites\/([0-9a-f-]+)\/events\/values$/i, async context => {
@@ -695,17 +908,31 @@ const endpoints: Entry[] = [
     return new Response(null, { status: 204 });
   }, 'marketer'),
   route('GET', /^links$/, async () => umami.links()),
+  route('GET', /^links\/charts$/, async ({ query }) => {
+    const ids = (query.get('ids') ?? '').split(',').map(v => v.trim()).filter(Boolean).slice(0, 20).map(v => siteId.parse(v));
+    return umami.linkCharts(ids, query.has('startAt') ? date(query) : undefined);
+  }),
   route('POST', /^links$/, async ({ request }) => json(await umami.createLink(await readBody(request, z.object({
     name, url: requiredUrl, slug: z.string().trim().min(8).max(100).optional(),
   }))), 201), 'marketer'),
+  route('PATCH', /^links\/([0-9a-f-]+)$/i, async context => umami.updateLink(site(context), await readBody(context.request, z.object({
+    name: name.optional(), url: requiredUrl.optional(), slug: z.string().trim().min(8).max(100).optional(),
+  }))), 'marketer'),
   route('DELETE', /^links\/([0-9a-f-]+)$/i, async context => {
     await umami.deleteLink(site(context));
     return new Response(null, { status: 204 });
   }, 'marketer'),
   route('GET', /^pixels$/, async () => umami.pixels()),
+  route('GET', /^pixels\/charts$/, async ({ query }) => {
+    const ids = (query.get('ids') ?? '').split(',').map(v => v.trim()).filter(Boolean).slice(0, 20).map(v => siteId.parse(v));
+    return umami.pixelCharts(ids, query.has('startAt') ? date(query) : undefined);
+  }),
   route('POST', /^pixels$/, async ({ request }) => json(await umami.createPixel(await readBody(request, z.object({
     name, slug: z.string().trim().min(8).max(100).optional(),
   }))), 201), 'marketer'),
+  route('PATCH', /^pixels\/([0-9a-f-]+)$/i, async context => umami.updatePixel(site(context), await readBody(context.request, z.object({
+    name: name.optional(), slug: z.string().trim().min(8).max(100).optional(),
+  }))), 'marketer'),
   route('DELETE', /^pixels\/([0-9a-f-]+)$/i, async context => {
     await umami.deletePixel(site(context));
     return new Response(null, { status: 204 });

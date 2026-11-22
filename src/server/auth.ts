@@ -75,14 +75,16 @@ export async function signOut() {
 }
 
 export async function team() {
-  return (await db.query<User>(`SELECT ${columns} FROM users WHERE disabled_at IS NULL ORDER BY created_at`)).rows;
+  return (await db.query<User>(
+    `SELECT ${columns}, (disabled_at IS NOT NULL) AS disabled FROM users ORDER BY (disabled_at IS NOT NULL), created_at`,
+  )).rows;
 }
 
 export async function addUser(input: { email: string; name: string; role: Role; password: string }) {
   const passwordHash = await hashPassword(input.password);
   const result = await db.query<User>(
     `INSERT INTO users (email, name, role, password_hash) VALUES ($1, $2, $3, $4)
-     ON CONFLICT (email) DO NOTHING RETURNING ${columns}`,
+     ON CONFLICT (email) DO NOTHING RETURNING ${columns}, (disabled_at IS NOT NULL) AS disabled`,
     [input.email.trim().toLowerCase(), input.name, input.role, passwordHash],
   );
   if (!result.rows[0]) throw new AppError(409, 'There is already a team account with that email.');
@@ -93,18 +95,23 @@ export async function changeUser(id: string, input: { role?: Role; disabled?: bo
   const password = input.password ? await hashPassword(input.password) : null;
   return transaction(async client => {
     await client.query('SELECT pg_advisory_xact_lock(64337001)');
-    const existing = (await client.query<User>('SELECT id, email, name, role FROM users WHERE id = $1 AND disabled_at IS NULL', [id])).rows[0];
+    const existing = (await client.query<User & { disabled: boolean }>(
+      'SELECT id, email, name, role, (disabled_at IS NOT NULL) AS disabled FROM users WHERE id = $1',
+      [id],
+    )).rows[0];
     if (!existing) throw new AppError(404, 'Team account not found.');
-    if (existing.role === 'admin' && (input.disabled || (input.role && input.role !== 'admin'))) {
+    if (!existing.disabled && existing.role === 'admin' && (input.disabled === true || (input.role && input.role !== 'admin'))) {
       const admins = await client.query<{ count: string }>(`SELECT count(*) FROM users WHERE role = 'admin' AND disabled_at IS NULL`);
       if (Number(admins.rows[0].count) < 2) throw new AppError(409, 'Keep at least one active administrator.');
     }
+    const disabledOp = input.disabled === true ? 'disable' : input.disabled === false ? 'enable' : 'keep';
     const result = await client.query<User>(
       `UPDATE users SET role = COALESCE($2, role), password_hash = COALESCE($3, password_hash),
-       disabled_at = CASE WHEN $4 THEN now() ELSE disabled_at END WHERE id = $1 RETURNING ${columns}`,
-      [id, input.role ?? null, password, Boolean(input.disabled)],
+       disabled_at = CASE WHEN $4 = 'disable' THEN now() WHEN $4 = 'enable' THEN NULL ELSE disabled_at END
+       WHERE id = $1 RETURNING ${columns}, (disabled_at IS NOT NULL) AS disabled`,
+      [id, input.role ?? null, password, disabledOp],
     );
-    if (password || input.disabled) await client.query('DELETE FROM sessions WHERE user_id = $1', [id]);
+    if (password || input.disabled === true) await client.query('DELETE FROM sessions WHERE user_id = $1', [id]);
     return result.rows[0];
   });
 }

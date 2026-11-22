@@ -766,3 +766,690 @@ test('manages annotations, tracked links, and tracking pixels CRUD', async () =>
   assert.deepEqual(await api.pixels(), [customPixel]);
   await api.deletePixel(pixelId);
 });
+
+test('manages saved website segments and cohorts with parameter normalization and 404-tolerant delete', async () => {
+  const segmentId = 'e11a66f0-9b17-49ac-aa34-5b1d4f96e267';
+  const cohortId = 'f22b77a1-0c28-4abd-bb45-6c2e5a07f378';
+  let deleteStatus = 204;
+
+  const fetcher: typeof fetch = async (input, options) => {
+    const url = new URL(String(input));
+    const method = options?.method ?? 'GET';
+
+    if (url.pathname === `${path}/segments` && method === 'GET') {
+      const type = url.searchParams.get('type');
+      if (type === 'segment') {
+        return Response.json({
+          data: [{
+            id: segmentId,
+            name: 'US Mobile',
+            type: 'segment',
+            parameters: {
+              filters: [{ name: 'country', operator: 'eq', value: 'US' }, { name: 'views', operator: 'gt', value: 2 }],
+              match: 'all',
+            },
+            createdAt: '2026-01-01T00:00:00Z',
+          }],
+        });
+      }
+      if (type === 'cohort') {
+        return Response.json([
+          {
+            id: cohortId,
+            name: 'Recent Signups',
+            type: 'cohort',
+            parameters: {
+              dateRange: { value: '30day' },
+              action: { type: 'event', value: 'signup' },
+            },
+            createdAt: null,
+          },
+        ]);
+      }
+      assert.fail(`Unexpected segment type ${type}`);
+    }
+
+    if (url.pathname === `${path}/segments` && method === 'POST') {
+      const body = JSON.parse(String(options?.body)) as Record<string, unknown>;
+      if (body.type === 'segment') {
+        assert.deepEqual(body, {
+          type: 'segment',
+          name: 'US Mobile',
+          parameters: {
+            filters: [{ name: 'country', operator: 'eq', value: 'US' }],
+            match: 'any',
+          },
+        });
+        return Response.json({
+          id: segmentId,
+          name: 'US Mobile',
+          type: 'segment',
+          parameters: body.parameters,
+          createdAt: '2026-01-01T00:00:00Z',
+        });
+      }
+      assert.deepEqual(body, {
+        type: 'cohort',
+        name: 'Recent Signups',
+        parameters: {
+          dateRange: '30day',
+          action: { type: 'event', value: 'signup' },
+        },
+      });
+      return Response.json({
+        id: cohortId,
+        name: 'Recent Signups',
+        type: 'cohort',
+        parameters: body.parameters,
+        createdAt: null,
+      });
+    }
+
+    if (url.pathname === `${path}/segments/${segmentId}` && method === 'DELETE') {
+      return new Response(null, { status: deleteStatus });
+    }
+
+    assert.fail(`Unexpected request ${method} ${url.pathname}`);
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  assert.deepEqual(await api.segments(website.id), [{
+    id: segmentId,
+    name: 'US Mobile',
+    type: 'segment',
+    filters: [
+      { name: 'country', operator: 'eq', value: 'US' },
+      { name: 'views', operator: 'gt', value: '2' },
+    ],
+    match: 'all',
+    createdAt: '2026-01-01T00:00:00Z',
+  }]);
+
+  assert.deepEqual(await api.segments(website.id, 'cohort'), [{
+    id: cohortId,
+    name: 'Recent Signups',
+    type: 'cohort',
+    filters: [],
+    dateRange: '30day',
+    action: { type: 'event', value: 'signup' },
+    createdAt: null,
+  }]);
+
+  const createdSegment = await api.createSegment(website.id, {
+    name: ' US Mobile ',
+    type: 'segment',
+    filters: [{ name: ' country ', operator: 'eq', value: 'US' }],
+    match: 'any',
+  });
+  assert.deepEqual(createdSegment, {
+    id: segmentId,
+    name: 'US Mobile',
+    type: 'segment',
+    filters: [{ name: 'country', operator: 'eq', value: 'US' }],
+    match: 'any',
+    createdAt: '2026-01-01T00:00:00Z',
+  });
+
+  const createdCohort = await api.createSegment(website.id, {
+    name: 'Recent Signups',
+    type: 'cohort',
+    filters: [],
+    dateRange: '30day',
+    action: { type: 'event', value: 'signup' },
+  });
+  assert.deepEqual(createdCohort, {
+    id: cohortId,
+    name: 'Recent Signups',
+    type: 'cohort',
+    filters: [],
+    dateRange: '30day',
+    action: { type: 'event', value: 'signup' },
+    createdAt: null,
+  });
+
+  await api.deleteSegment(website.id, segmentId);
+  deleteStatus = 404;
+  await api.deleteSegment(website.id, segmentId);
+  deleteStatus = 500;
+  await assert.rejects(() => api.deleteSegment(website.id, segmentId), (error: unknown) =>
+    error instanceof UpstreamError && error.status === 500);
+});
+
+test('reads revenue report in parallel across stats, chart, and metrics', async () => {
+  const multiDayRange = { startAt: 1767225600000, endAt: 1767225600000 + 5 * 24 * 60 * 60 * 1000 };
+  let chartStyle: 'wrapped' | 'array' = 'wrapped';
+
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.searchParams.get('timezone'), 'UTC');
+
+    if (url.pathname === `${path}/revenue/stats`) {
+      if (url.searchParams.get('currency') === 'EUR') {
+        assert.equal(url.searchParams.get('country'), 'DE');
+        return Response.json({
+          sum: null,
+          count: 0,
+          unique_count: 0,
+          total_sessions: 10,
+          average: null,
+          arpu: null,
+          comparison: null,
+        });
+      }
+      assert.equal(url.searchParams.get('currency'), 'USD');
+      return Response.json({
+        sum: '1249.50',
+        count: '5',
+        unique_count: '4',
+        total_sessions: '25',
+        average: '249.9',
+        arpu: '49.98',
+        comparison: {
+          sum: 1000,
+          count: 4,
+          unique_count: 3,
+          total_sessions: 20,
+          average: 250,
+          arpu: 50,
+        },
+      });
+    }
+
+    if (url.pathname === `${path}/revenue/chart`) {
+      if (chartStyle === 'wrapped') {
+        assert.equal(url.searchParams.get('unit'), 'hour');
+        return Response.json({
+          chart: [
+            { x: '2026-01-01T10:00:00Z', y: '499.5' },
+            { x: '2026-01-01T11:00:00Z', y: 750 },
+          ],
+        });
+      }
+      assert.equal(url.searchParams.get('unit'), 'day');
+      return Response.json([
+        { x: 'EUR', t: '2026-01-01T00:00:00Z', y: 120 },
+      ]);
+    }
+
+    if (url.pathname === `${path}/revenue/metrics`) {
+      const type = url.searchParams.get('type');
+      if (type === 'country') {
+        return Response.json([
+          { name: 'US', sum: '849.5', count: '3' },
+          { x: 'GB', sum: 400, count: 2 },
+        ]);
+      }
+      if (type === 'referrer') {
+        return Response.json([
+          { x: null, y: 120, count: 1 },
+        ]);
+      }
+      assert.fail(`Unexpected revenue metric type ${type}`);
+    }
+
+    assert.fail(`Unexpected endpoint ${url.pathname}`);
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  const usd = await api.revenueReport(website.id, range);
+  assert.deepEqual(usd, {
+    currency: 'USD',
+    stats: {
+      sum: 1249.5,
+      count: 5,
+      uniqueCount: 4,
+      totalSessions: 25,
+      average: 249.9,
+      arpu: 49.98,
+    },
+    comparison: {
+      sum: 1000,
+      count: 4,
+      uniqueCount: 3,
+      totalSessions: 20,
+      average: 250,
+      arpu: 50,
+    },
+    chart: [
+      { label: '2026-01-01T10:00:00Z', value: 499.5 },
+      { label: '2026-01-01T11:00:00Z', value: 750 },
+    ],
+    metrics: [
+      { name: 'US', sum: 849.5, count: 3 },
+      { name: 'GB', sum: 400, count: 2 },
+    ],
+  });
+
+  chartStyle = 'array';
+  const eur = await api.revenueReport(website.id, multiDayRange, ' eur ', 'referrer', { country: 'DE' });
+  assert.deepEqual(eur, {
+    currency: 'EUR',
+    stats: {
+      sum: 0,
+      count: 0,
+      uniqueCount: 0,
+      totalSessions: 10,
+      average: 0,
+      arpu: 0,
+    },
+    comparison: null,
+    chart: [{ label: '2026-01-01T00:00:00Z', value: 120 }],
+    metrics: [{ name: 'Direct', sum: 120, count: 1 }],
+  });
+
+  await assert.rejects(() => api.revenueReport(website.id, range, 'US'));
+  await assert.rejects(() => api.revenueReport(website.id, range, 'USD', 'path' as never));
+});
+
+test('reads web performance report in parallel for Core Web Vitals', async () => {
+  let chartMode: 'xy' | 'percentiles' = 'xy';
+
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.searchParams.get('startAt'), String(range.startAt));
+    assert.equal(url.searchParams.get('endAt'), String(range.endAt));
+    assert.equal(url.searchParams.get('timezone'), 'UTC');
+
+    if (url.pathname === `${path}/performance/stats`) {
+      return Response.json({
+        lcp: { p50: 1200, p75: '1850.5', p95: 2900 },
+        inp: null,
+        cls: { p50: 0.02, p75: '4.5e-2', p95: 0.12 },
+        fcp: { p50: 800, p75: 1100, p95: 1800 },
+        ttfb: { p50: 180, p75: 260, p95: 520 },
+        count: '42',
+      });
+    }
+
+    if (url.pathname === `${path}/performance/chart`) {
+      assert.equal(url.searchParams.get('unit'), 'hour');
+      if (chartMode === 'xy') {
+        assert.equal(url.searchParams.get('metric'), 'lcp');
+        return Response.json({
+          chart: [
+            { x: '2026-01-01T10:00:00Z', y: 1600 },
+            { x: '2026-01-01T11:00:00Z', y: 1850.5 },
+          ],
+        });
+      }
+      assert.equal(url.searchParams.get('metric'), 'cls');
+      assert.equal(url.searchParams.get('device'), 'mobile');
+      return Response.json([
+        { t: '2026-01-01T10:00:00Z', p50: 0.02, p75: 0.045, p95: 0.11 },
+      ]);
+    }
+
+    if (url.pathname === `${path}/performance/metrics`) {
+      if (chartMode === 'xy') {
+        assert.equal(url.searchParams.get('metric'), 'lcp');
+        assert.equal(url.searchParams.get('type'), 'path');
+        return Response.json([
+          { name: '/pricing', count: '18', p50: 1100, p75: 1700, p95: 2600 },
+        ]);
+      }
+      assert.equal(url.searchParams.get('metric'), 'cls');
+      assert.equal(url.searchParams.get('type'), 'browser');
+      return Response.json({
+        data: [
+          { x: 'chrome', count: 20, p50: 0.02, p75: 0.045, p95: 0.1 },
+        ],
+      });
+    }
+
+    assert.fail(`Unexpected endpoint ${url.pathname}`);
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  const lcp = await api.performanceReport(website.id, range);
+  assert.deepEqual(lcp, {
+    metric: 'lcp',
+    stats: {
+      lcp: { p50: 1200, p75: 1850.5, p95: 2900 },
+      inp: { p50: 0, p75: 0, p95: 0 },
+      cls: { p50: 0.02, p75: 0.045, p95: 0.12 },
+      fcp: { p50: 800, p75: 1100, p95: 1800 },
+      ttfb: { p50: 180, p75: 260, p95: 520 },
+      count: 42,
+    },
+    chart: [
+      { label: '2026-01-01T10:00:00Z', value: 1600 },
+      { label: '2026-01-01T11:00:00Z', value: 1850.5 },
+    ],
+    metrics: [
+      { name: '/pricing', count: 18, p50: 1100, p75: 1700, p95: 2600 },
+    ],
+  });
+
+  chartMode = 'percentiles';
+  const cls = await api.performanceReport(website.id, range, 'cls', 'browser', { device: 'mobile' });
+  assert.equal(cls.metric, 'cls');
+  assert.deepEqual(cls.chart, [{ label: '2026-01-01T10:00:00Z', value: 0.045 }]);
+  assert.deepEqual(cls.metrics, [{ name: 'chrome', count: 20, p50: 0.02, p75: 0.045, p95: 0.1 }]);
+
+  await assert.rejects(() => api.performanceReport(website.id, range, 'fid' as never));
+  await assert.rejects(() => api.performanceReport(website.id, range, 'lcp', 'country' as never));
+});
+
+test('reads expanded metrics and coerces numeric strings to numbers', async () => {
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.pathname, `${path}/metrics/expanded`);
+    assert.equal(url.searchParams.get('startAt'), String(range.startAt));
+    assert.equal(url.searchParams.get('endAt'), String(range.endAt));
+
+    if (url.searchParams.get('type') === 'path') {
+      assert.equal(url.searchParams.get('limit'), '25');
+      return Response.json([
+        { name: '/pricing', pageviews: '1', visitors: '1', visits: '1', bounces: '0', totaltime: '45' },
+        { name: '/docs', pageviews: 12, visitors: '8', visits: 9, bounces: null, totaltime: 'not-a-num' },
+      ]);
+    }
+    assert.equal(url.searchParams.get('type'), 'referrer');
+    assert.equal(url.searchParams.get('limit'), '10');
+    assert.equal(url.searchParams.get('country'), 'US');
+    return Response.json([
+      { name: null, pageviews: '5', visitors: '3', visits: '4', bounces: '1', totaltime: '90' },
+    ]);
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  assert.deepEqual(await api.expandedMetrics(website.id, range, 'path'), [
+    { name: '/pricing', pageviews: 1, visitors: 1, visits: 1, bounces: 0, totaltime: 45 },
+    { name: '/docs', pageviews: 12, visitors: 8, visits: 9, bounces: 0, totaltime: 0 },
+  ]);
+
+  assert.deepEqual(await api.expandedMetrics(website.id, range, 'referrer', { country: 'US' }, 10), [
+    { name: 'Direct', pageviews: 5, visitors: 3, visits: 4, bounces: 1, totaltime: 90 },
+  ]);
+
+  await assert.rejects(() => api.expandedMetrics(website.id, range, 'path', undefined, 0));
+});
+
+test('reads paginated raw events feed with search and filters', async () => {
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.pathname, `${path}/events`);
+    assert.equal(url.searchParams.get('startAt'), String(range.startAt));
+    assert.equal(url.searchParams.get('endAt'), String(range.endAt));
+    assert.equal(url.searchParams.get('page'), '2');
+    assert.equal(url.searchParams.get('pageSize'), '15');
+    assert.equal(url.searchParams.get('search'), 'checkout');
+    assert.equal(url.searchParams.get('country'), 'GB');
+
+    return Response.json({
+      data: [
+        {
+          id: 'evt-101',
+          sessionId,
+          urlPath: '/checkout',
+          pageTitle: 'Checkout',
+          eventName: 'purchase',
+          eventType: '2',
+          referrerDomain: 'google.com',
+          country: 'GB',
+          device: 'desktop',
+          browser: 'chrome',
+          createdAt: '2026-01-01T12:00:00Z',
+        },
+        {
+          id: 'evt-102',
+          sessionId,
+          urlPath: null,
+          eventType: 1,
+          createdAt: '2026-01-01T12:01:00Z',
+        },
+      ],
+      count: 42,
+      page: 2,
+      pageSize: 15,
+    });
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  const feed = await api.eventsFeed(website.id, range, {
+    page: 2,
+    pageSize: 15,
+    search: ' checkout ',
+    filters: { country: 'GB' },
+  });
+
+  assert.deepEqual(feed, {
+    items: [
+      {
+        id: 'evt-101',
+        sessionId,
+        urlPath: '/checkout',
+        pageTitle: 'Checkout',
+        eventName: 'purchase',
+        eventType: 2,
+        referrerDomain: 'google.com',
+        country: 'GB',
+        device: 'desktop',
+        browser: 'chrome',
+        createdAt: '2026-01-01T12:00:00Z',
+      },
+      {
+        id: 'evt-102',
+        sessionId,
+        urlPath: '',
+        pageTitle: null,
+        eventName: null,
+        eventType: 1,
+        referrerDomain: null,
+        country: null,
+        device: null,
+        browser: null,
+        createdAt: '2026-01-01T12:01:00Z',
+      },
+    ],
+    total: 42,
+    page: 2,
+    limit: 15,
+  });
+});
+
+test('reads session stats and session data properties', async () => {
+  let wrappedStats = false;
+
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+
+    if (url.pathname === `${path}/sessions/stats`) {
+      assert.equal(url.searchParams.get('device'), 'desktop');
+      if (wrappedStats) {
+        return Response.json({
+          pageviews: { value: '120' },
+          visitors: { value: 45 },
+          visits: { value: 52 },
+          countries: { value: 8 },
+          events: { value: null },
+        });
+      }
+      return Response.json({
+        pageviews: 120,
+        visitors: 45,
+        visits: 52,
+        countries: 8,
+        events: 15,
+      });
+    }
+
+    if (url.pathname === `${path}/session-data/properties`) {
+      return Response.json([
+        { propertyName: 'plan', total: '24' },
+        { propertyName: 'role', total: 10 },
+      ]);
+    }
+
+    if (url.pathname === `${path}/session-data/values`) {
+      assert.equal(url.searchParams.get('propertyName'), 'plan');
+      return Response.json([
+        { value: 'pro', total: 18 },
+        { value: true, total: 6 },
+      ]);
+    }
+
+    if (url.pathname === `${path}/sessions/${sessionId}/properties`) {
+      return Response.json([
+        { propertyName: 'plan', value: 'pro', dataType: 1 },
+        { dataKey: 'seats', stringValue: '', numberValue: 12, dateValue: null, dataType: 2 },
+        { dataKey: 'joinedAt', stringValue: null, numberValue: null, dateValue: '2026-01-01T00:00:00Z', dataType: 4 },
+      ]);
+    }
+
+    assert.fail(`Unexpected endpoint ${url.pathname}`);
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  assert.deepEqual(await api.sessionStats(website.id, range, { device: 'desktop' }), {
+    pageviews: 120,
+    visitors: 45,
+    visits: 52,
+    countries: 8,
+    events: 15,
+  });
+
+  wrappedStats = true;
+  assert.deepEqual(await api.sessionStats(website.id, range, { device: 'desktop' }), {
+    pageviews: 120,
+    visitors: 45,
+    visits: 52,
+    countries: 8,
+    events: 0,
+  });
+
+  assert.deepEqual(await api.sessionProperties(website.id, range), [
+    { propertyName: 'plan', total: 24 },
+    { propertyName: 'role', total: 10 },
+  ]);
+
+  assert.deepEqual(await api.sessionPropertyValues(website.id, range, ' plan '), [
+    { value: 'pro', total: 18 },
+    { value: 'true', total: 6 },
+  ]);
+
+  assert.deepEqual(await api.singleSessionProperties(website.id, sessionId), [
+    { propertyName: 'plan', value: 'pro', dataType: 1 },
+    { propertyName: 'seats', value: '12', dataType: 2 },
+    { propertyName: 'joinedAt', value: '2026-01-01T00:00:00Z', dataType: 4 },
+  ]);
+});
+
+test('updates tracked links and pixels and fetches entity chart series', async () => {
+  const linkId2 = 'c91a44de-7f95-47ea-8812-3f9b2e74c099';
+  let calls = 0;
+
+  const fetcher: typeof fetch = async (input, options) => {
+    calls++;
+    const url = new URL(String(input));
+    const method = options?.method ?? 'GET';
+
+    if (url.pathname === `/api/links/${linkId}` && method === 'POST') {
+      assert.deepEqual(JSON.parse(String(options?.body)), {
+        name: 'Updated Promo',
+        url: 'https://example.test/updated',
+      });
+      return Response.json({
+        id: linkId,
+        name: 'Updated Promo',
+        url: 'https://example.test/updated',
+        slug: 'promo-2026',
+        createdAt: '2026-01-01T00:00:00Z',
+      });
+    }
+
+    if (url.pathname === '/api/links/charts' && method === 'GET') {
+      if (url.searchParams.has('startAt')) {
+        assert.equal(url.searchParams.get('ids'), `${linkId},${linkId2}`);
+        assert.equal(url.searchParams.get('startAt'), String(range.startAt));
+        assert.equal(url.searchParams.get('endAt'), String(range.endAt));
+        assert.equal(url.searchParams.get('timezone'), 'UTC');
+        return Response.json({
+          data: {
+            [linkId]: [{ x: '2026-01-01', y: 12 }],
+            [linkId2]: [{ x: '2026-01-01', y: '3' }],
+          },
+        });
+      }
+      assert.equal(url.searchParams.get('ids'), linkId);
+      assert.equal(url.searchParams.get('timezone'), null);
+      return Response.json({
+        data: {
+          [linkId]: { values: [0, 3, 4], total: 7 },
+        },
+      });
+    }
+
+    if (url.pathname === `/api/pixels/${pixelId}` && method === 'POST') {
+      assert.deepEqual(JSON.parse(String(options?.body)), {
+        name: 'Updated Pixel',
+        slug: 'pixel-updated-1',
+      });
+      return Response.json({
+        id: pixelId,
+        name: 'Updated Pixel',
+        slug: 'pixel-updated-1',
+        createdAt: null,
+      });
+    }
+
+    if (url.pathname === '/api/pixels/charts' && method === 'GET') {
+      assert.equal(url.searchParams.get('ids'), pixelId);
+      assert.equal(url.searchParams.get('startAt'), String(range.startAt));
+      assert.equal(url.searchParams.get('endAt'), String(range.endAt));
+      assert.equal(url.searchParams.get('timezone'), 'UTC');
+      return Response.json({
+        [pixelId]: [{ x: '2026-01-01', y: 22 }],
+      });
+    }
+
+    assert.fail(`Unexpected request ${method} ${url.pathname}`);
+  };
+
+  const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
+
+  assert.deepEqual(await api.updateLink(linkId, { name: ' Updated Promo ', url: 'https://example.test/updated' }), {
+    id: linkId,
+    name: 'Updated Promo',
+    url: 'https://example.test/updated',
+    slug: 'promo-2026',
+    createdAt: '2026-01-01T00:00:00Z',
+  });
+  await assert.rejects(() => api.updateLink(linkId, {}));
+  await assert.rejects(() => api.updateLink(linkId, { url: 'javascript:alert(1)' }));
+
+  assert.deepEqual(await api.linkCharts([linkId, linkId2, linkId], range), {
+    [linkId]: [{ label: '2026-01-01', value: 12 }],
+    [linkId2]: [{ label: '2026-01-01', value: 3 }],
+  });
+  assert.deepEqual(await api.linkCharts([linkId]), {
+    [linkId]: [
+      { label: '#1', value: 0 },
+      { label: '#2', value: 3 },
+      { label: '#3', value: 4 },
+    ],
+  });
+  const callsBeforeEmpty = calls;
+  assert.deepEqual(await api.linkCharts([]), {});
+  assert.equal(calls, callsBeforeEmpty);
+
+  assert.deepEqual(await api.updatePixel(pixelId, { name: ' Updated Pixel ', slug: 'pixel-updated-1' }), {
+    id: pixelId,
+    name: 'Updated Pixel',
+    slug: 'pixel-updated-1',
+    createdAt: null,
+  });
+  await assert.rejects(() => api.updatePixel(pixelId, {}));
+  await assert.rejects(() => api.updatePixel(pixelId, { slug: 'short' }));
+
+  assert.deepEqual(await api.pixelCharts([pixelId], range), {
+    [pixelId]: [{ label: '2026-01-01', value: 22 }],
+  });
+});
+

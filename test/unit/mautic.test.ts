@@ -935,3 +935,431 @@ test('manages assets, landing pages, and webhooks CRUD', async () => {
   assert.equal((await api.updateWebhook(2, { published: false })).published, false);
   await api.deleteWebhook(2);
 });
+
+test('manages contact and company custom fields CRUD and option list normalization', async () => {
+  const api = client(async request => {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/api/fields/contact') {
+      assert.equal(url.searchParams.get('limit'), '100');
+      return Response.json({
+        fields: {
+          11: {
+            id: 11, label: 'Plan Tier', alias: 'plan_tier', type: 'select', group: 'core',
+            object: 'lead', defaultValue: 'Starter', isRequired: true, isPubliclyUpdatable: true,
+            isFixed: false, isPublished: true,
+            properties: { list: [{ label: 'Starter', value: 'starter' }, { label: 'Growth', value: 'growth' }] },
+          },
+          12: {
+            id: 12, label: 'Account Region', alias: 'account_region', type: 'select', group: 'core',
+            object: 'lead', defaultValue: null, isRequired: false, isPubliclyUpdatable: false,
+            isFixed: true, isPublished: true,
+            properties: { list: ['NA', 'EMEA', 'APAC'] },
+          },
+        },
+      });
+    }
+    if (request.method === 'GET' && url.pathname === '/api/fields/company') {
+      assert.equal(url.searchParams.get('limit'), '100');
+      return Response.json({
+        fields: [{
+          id: 21, label: 'ARR Band', alias: 'arr_band', type: 'text', group: 'professional',
+          object: 'company', defaultValue: '', isRequired: false, isPubliclyUpdatable: false,
+          isFixed: false, isPublished: true, properties: [],
+        }],
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/fields/contact/new') {
+      const body = await request.json() as Record<string, unknown>;
+      assert.deepEqual(body, {
+        label: 'Lifecycle Track',
+        alias: 'lifecycle_track',
+        type: 'select',
+        group: 'core',
+        defaultValue: 'PLG',
+        isRequired: true,
+        isPubliclyUpdatable: true,
+        isPublished: true,
+        properties: { list: [{ label: 'PLG', value: 'PLG' }, { label: 'Sales', value: 'Sales' }] },
+      });
+      return Response.json({
+        field: { id: 13, object: 'lead', isFixed: false, ...body },
+      }, { status: 201 });
+    }
+    if (request.method === 'PATCH' && url.pathname === '/api/fields/company/21/edit') {
+      const body = await request.json() as Record<string, unknown>;
+      assert.deepEqual(body, { label: 'Annual Revenue Band', isRequired: true, isPublished: false });
+      return Response.json({
+        field: {
+          id: 21, label: 'Annual Revenue Band', alias: 'arr_band', type: 'text', group: 'professional',
+          object: 'company', defaultValue: '', isRequired: true, isPubliclyUpdatable: false,
+          isFixed: false, isPublished: false, properties: {},
+        },
+      });
+    }
+    if (request.method === 'DELETE' && url.pathname === '/api/fields/contact/13/delete') {
+      return new Response(null, { status: 404 });
+    }
+    throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+  });
+
+  const contactFields = await api.fields();
+  assert.equal(contactFields.length, 2);
+  assert.deepEqual(contactFields[0], {
+    id: 12, label: 'Account Region', alias: 'account_region', type: 'select', group: 'core',
+    object: 'contact', defaultValue: '', isRequired: false, isPubliclyUpdatable: false,
+    isFixed: true, published: true, options: ['NA', 'EMEA', 'APAC'],
+  });
+  assert.deepEqual(contactFields[1].options, ['Starter', 'Growth']);
+  assert.equal(contactFields[1].object, 'contact');
+  assert.equal(contactFields[1].defaultValue, 'Starter');
+
+  const companyFields = await api.fields('company');
+  assert.equal(companyFields[0].object, 'company');
+  assert.deepEqual(companyFields[0].options, []);
+
+  const created = await api.createField('contact', {
+    label: 'Lifecycle Track', alias: 'lifecycle_track', type: 'select',
+    defaultValue: 'PLG', isRequired: true, isPubliclyUpdatable: true, options: ['PLG', 'Sales'],
+  });
+  assert.equal(created.id, 13);
+  assert.deepEqual(created.options, ['PLG', 'Sales']);
+
+  const updated = await api.updateField('company', 21, { label: 'Annual Revenue Band', isRequired: true, published: false });
+  assert.equal(updated.label, 'Annual Revenue Band');
+  assert.equal(updated.isRequired, true);
+  assert.equal(updated.published, false);
+
+  await api.deleteField('contact', 13);
+});
+
+test('manages categories CRUD with client-side bundle filter and hex color normalization', async () => {
+  const api = client(async request => {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/api/categories') {
+      assert.equal(url.searchParams.get('limit'), '100');
+      return Response.json({
+        categories: {
+          1: { id: 1, title: 'Onboarding', alias: 'onboarding', description: 'Welcome flows', color: '2457d6', bundle: 'email', isPublished: true },
+          2: { id: 2, title: 'Events', alias: 'events', description: '', color: '#0ea5e9', bundle: 'campaign', isPublished: true },
+          3: { id: 3, title: 'Legacy', alias: 'legacy', description: '', color: 'invalid', bundle: 'email', isPublished: false },
+        },
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/categories/new') {
+      const body = await request.json() as Record<string, unknown>;
+      if (body.title === 'Default Color') {
+        assert.equal(body.color, '2457d6');
+        return Response.json({ category: { id: 4, alias: 'default-color', ...body } }, { status: 201 });
+      }
+      assert.equal(body.color, 'ff5500');
+      return Response.json({ category: { id: 5, alias: 'promos', ...body } }, { status: 201 });
+    }
+    if (request.method === 'PATCH' && url.pathname === '/api/categories/5/edit') {
+      const body = await request.json() as Record<string, unknown>;
+      assert.deepEqual(body, { title: 'Seasonal Promos', color: '10b981', isPublished: false });
+      return Response.json({
+        category: { id: 5, title: 'Seasonal Promos', alias: 'promos', description: '', color: '10b981', bundle: 'email', isPublished: false },
+      });
+    }
+    if (request.method === 'DELETE' && url.pathname === '/api/categories/5/delete') {
+      return new Response(null, { status: 404 });
+    }
+    throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+  });
+
+  const all = await api.categories();
+  assert.deepEqual(all.map(c => [c.title, c.color]), [
+    ['Events', '#0ea5e9'],
+    ['Legacy', ''],
+    ['Onboarding', '#2457d6'],
+  ]);
+
+  const emailOnly = await api.categories('email');
+  assert.deepEqual(emailOnly.map(c => c.title), ['Legacy', 'Onboarding']);
+
+  const defaultCat = await api.createCategory({ title: 'Default Color', bundle: 'global' });
+  assert.equal(defaultCat.color, '#2457d6');
+
+  const customCat = await api.createCategory({ title: 'Promos', bundle: 'email', color: '#ff5500' });
+  assert.equal(customCat.color, '#ff5500');
+
+  const updated = await api.updateCategory(5, { title: 'Seasonal Promos', color: '#10b981', published: false });
+  assert.equal(updated.color, '#10b981');
+  assert.equal(updated.published, false);
+
+  await api.deleteCategory(5);
+});
+
+test('manages dynamic web content CRUD', async () => {
+  const api = client(async request => {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/api/dynamiccontents') {
+      assert.equal(url.searchParams.get('limit'), '100');
+      return Response.json({
+        dynamicContents: {
+          2: {
+            id: 2, name: 'VIP Banner', slotName: 'hero_slot', content: '<p>Welcome back!</p>',
+            isCampaignBased: true, isPublished: true, sentCount: 42, dateAdded: '2026-10-20 08:30:00',
+          },
+        },
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/dynamiccontents/new') {
+      const body = await request.json() as Record<string, unknown>;
+      assert.deepEqual(body, {
+        name: 'Pricing CTA',
+        slotName: 'pricing_banner',
+        content: '<div>Save 20%</div>',
+        isCampaignBased: true,
+        isPublished: true,
+      });
+      return Response.json({
+        dynamicContent: { id: 3, sentCount: 0, dateAdded: '2026-10-24T10:00:00+00:00', ...body },
+      }, { status: 201 });
+    }
+    if (request.method === 'PATCH' && url.pathname === '/api/dynamiccontents/3/edit') {
+      const body = await request.json() as Record<string, unknown>;
+      assert.deepEqual(body, { content: '<div>Save 30%</div>', isCampaignBased: false, isPublished: false });
+      return Response.json({
+        dynamicContent: {
+          id: 3, name: 'Pricing CTA', slotName: 'pricing_banner', content: '<div>Save 30%</div>',
+          isCampaignBased: false, isPublished: false, sentCount: 5, dateAdded: '2026-10-24T10:00:00+00:00',
+        },
+      });
+    }
+    if (request.method === 'DELETE' && url.pathname === '/api/dynamiccontents/3/delete') {
+      return new Response(null, { status: 404 });
+    }
+    throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+  });
+
+  const list = await api.dynamicContents();
+  assert.deepEqual(list, [{
+    id: 2, name: 'VIP Banner', slotName: 'hero_slot', content: '<p>Welcome back!</p>',
+    isCampaignBased: true, published: true, sentCount: 42, dateAdded: '2026-10-20T08:30:00.000Z',
+  }]);
+
+  const created = await api.createDynamicContent({
+    name: 'Pricing CTA', slotName: 'pricing_banner', content: '<div>Save 20%</div>',
+  });
+  assert.equal(created.id, 3);
+  assert.equal(created.isCampaignBased, true);
+
+  const updated = await api.updateDynamicContent(3, { content: '<div>Save 30%</div>', isCampaignBased: false, published: false });
+  assert.equal(updated.content, '<div>Save 30%</div>');
+  assert.equal(updated.isCampaignBased, false);
+  assert.equal(updated.published, false);
+
+  await api.deleteDynamicContent(3);
+});
+
+test('manages focus items CRUD with bar/modal payloads and appOrigin embedScript', async () => {
+  const previousOrigin = process.env.APP_ORIGIN;
+  process.env.APP_ORIGIN = 'https://app.ovelio.test/';
+  try {
+    const api = client(async request => {
+      const url = new URL(request.url);
+      if (request.method === 'GET' && url.pathname === '/api/focus') {
+        assert.equal(url.searchParams.get('limit'), '100');
+        return Response.json({
+          focus: {
+            7: {
+              id: 7, name: 'Announcement Bar', description: 'Top notice', type: 'link', style: 'bar',
+              isPublished: true, form: null,
+              properties: {
+                when: 'scroll_slight',
+                content: { headline: 'New release', tagline: 'Try v2', link_text: 'Read more', link_url: 'https://ovelio.test/v2' },
+                colors: { primary: '2457d6', text: '111827', button: '0ea5e9', button_text: 'ffffff' },
+              },
+            },
+          },
+        });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/focus/new') {
+        const body = await request.json() as {
+          name: string; type: string; style: string; htmlMode: string; form?: number;
+          properties: Record<string, unknown>;
+        };
+        assert.equal(body.htmlMode, 'basic');
+        if (body.style === 'bar') {
+          assert.equal(body.form, undefined);
+          assert.deepEqual(body.properties.bar, {
+            allow_hide: 1, push_page: 1, sticky: 1, size: 'large', placement: 'top',
+          });
+          assert.deepEqual(body.properties.colors, {
+            primary: '1d4ed8', text: '111827', button: '2457d6', button_text: 'ffffff',
+          });
+          return Response.json({ focus: { id: 8, ...body } }, { status: 201 });
+        }
+        assert.equal(body.type, 'form');
+        assert.equal(body.form, 22);
+        assert.deepEqual(body.properties.modal, { placement: 'top_right' });
+        return Response.json({ focus: { id: 9, ...body } }, { status: 201 });
+      }
+      if (request.method === 'PATCH' && url.pathname === '/api/focus/9/edit') {
+        const body = await request.json() as Record<string, unknown>;
+        assert.deepEqual(body, {
+          isPublished: false,
+          properties: {
+            when: 'leave',
+            content: { headline: 'Before you go' },
+            colors: { primary: '000000' },
+          },
+        });
+        return Response.json({
+          focus: {
+            id: 9, name: 'Lead Popup', description: '', type: 'form', style: 'modal',
+            form: { id: 22 }, isPublished: false,
+            properties: {
+              when: 'leave',
+              content: { headline: 'Before you go', tagline: '', link_text: '', link_url: '' },
+              colors: { primary: '000000', text: '111827', button: '2457d6', button_text: 'ffffff' },
+            },
+          },
+        });
+      }
+      if (request.method === 'DELETE' && url.pathname === '/api/focus/9/delete') {
+        return new Response(null, { status: 404 });
+      }
+      throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+    });
+
+    const items = await api.focusItems();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].primaryColor, '#2457d6');
+    assert.equal(items[0].buttonColor, '#0ea5e9');
+    assert.equal(items[0].when, 'scroll_slight');
+    assert.equal(
+      items[0].embedScript,
+      '<script src="https://app.ovelio.test/focus/7.js" type="text/javascript" charset="utf-8" async="async"></script>',
+    );
+
+    const bar = await api.createFocusItem({
+      name: 'Launch Bar', type: 'notice', style: 'bar', primaryColor: '#1d4ed8',
+    });
+    assert.equal(bar.id, 8);
+    assert.equal(bar.headline, 'Launch Bar');
+    assert.equal(bar.primaryColor, '#1d4ed8');
+
+    const modal = await api.createFocusItem({
+      name: 'Lead Popup', type: 'form', style: 'modal', formId: 22, when: 'scroll_middle',
+    });
+    assert.equal(modal.id, 9);
+    assert.equal(modal.formId, 22);
+    assert.equal(
+      modal.embedScript,
+      '<script src="https://app.ovelio.test/focus/9.js" type="text/javascript" charset="utf-8" async="async"></script>',
+    );
+
+    const updated = await api.updateFocusItem(9, {
+      published: false, when: 'leave', headline: 'Before you go', primaryColor: '#000000',
+    });
+    assert.equal(updated.published, false);
+    assert.equal(updated.headline, 'Before you go');
+    assert.equal(updated.primaryColor, '#000000');
+    assert.equal(updated.formId, 22);
+
+    await api.deleteFocusItem(9);
+  } finally {
+    if (previousOrigin === undefined) delete process.env.APP_ORIGIN;
+    else process.env.APP_ORIGIN = previousOrigin;
+  }
+});
+
+test('fetches marketing reports list and normalizes report rows with metadata and fallback', async () => {
+  const api = client(request => {
+    const url = new URL(request.url);
+    if (url.pathname === '/api/reports') {
+      assert.equal(url.searchParams.get('limit'), '100');
+      return Response.json({
+        reports: {
+          1: { id: 1, name: 'Email Performance', description: 'Opens and sends', source: 'emails', columns: ['e.id', 'e.name', 'e.sent_count'], system: true },
+          2: { id: 2, name: 'Active Contacts', description: '', source: 'leads', columns: { 0: 'l.email', 1: 'l.points' }, system: false },
+        },
+      });
+    }
+    if (url.pathname === '/api/reports/1') {
+      assert.equal(url.searchParams.get('limit'), '25');
+      return Response.json({
+        totalResults: '2',
+        data: [
+          { id: 10, name: 'Welcome', sent_count: 120, notes: null },
+          { id: 11, name: 'Newsletter', sent_count: 85, notes: 'Q4' },
+        ],
+      });
+    }
+    if (url.pathname === '/api/reports/99') {
+      assert.equal(url.searchParams.get('limit'), '50');
+      return Response.json({
+        totalResults: 1,
+        data: [{ email: 'ada@example.test', verified: true }],
+      });
+    }
+    throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+  });
+
+  const list = await api.reports();
+  assert.deepEqual(list.map(r => [r.id, r.name, r.system]), [
+    [2, 'Active Contacts', false],
+    [1, 'Email Performance', true],
+  ]);
+  assert.deepEqual(list[0].columns, ['l.email', 'l.points']);
+
+  const data = await api.report(1, 25);
+  assert.equal(data.report.name, 'Email Performance');
+  assert.equal(data.report.system, true);
+  assert.equal(data.totalResults, 2);
+  assert.deepEqual(data.columns, ['id', 'name', 'sent_count', 'notes']);
+  assert.deepEqual(data.rows[0], { id: 10, name: 'Welcome', sent_count: 120, notes: null });
+
+  const fallback = await api.report(99);
+  assert.deepEqual(fallback.report, {
+    id: 99, name: 'Report #99', description: '', source: '', columns: ['email', 'verified'], system: false,
+  });
+  assert.deepEqual(fallback.rows, [{ email: 'ada@example.test', verified: 'true' }]);
+
+  await assert.rejects(() => api.report(1, 0), { name: 'UpstreamError', status: 400 });
+});
+
+test('reads contact linked companies, contact devices, and sends direct email to contact', async () => {
+  let failSend = false;
+  const api = client(request => {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/api/contacts/17/companies') {
+      return Response.json({
+        companies: [
+          { id: '12', companyname: 'Beta LLC', is_primary: '0' },
+          { id: '10', companyname: 'Acme Corp', is_primary: '1' },
+        ],
+      });
+    }
+    if (request.method === 'GET' && url.pathname === '/api/contacts/17/devices') {
+      return Response.json({
+        devices: {
+          1: { id: 1, device: 'desktop', deviceOsName: 'Mac', deviceOsVersion: '14.5', deviceBrand: 'Apple', dateAdded: '2026-10-20 09:00:00' },
+          2: { id: 2, device: 'smartphone', deviceOsName: 'iOS', deviceOsVersion: '', deviceBrand: 'Apple', dateAdded: '2026-10-24T15:30:00+00:00' },
+        },
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/emails/4/contact/17/send') {
+      return Response.json({ success: !failSend });
+    }
+    throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+  });
+
+  const companies = await api.contactCompanies(17);
+  assert.deepEqual(companies, [
+    { id: 10, name: 'Acme Corp', isPrimary: true },
+    { id: 12, name: 'Beta LLC', isPrimary: false },
+  ]);
+
+  const devices = await api.contactDevices(17);
+  assert.deepEqual(devices, [
+    { id: 2, device: 'smartphone', os: 'iOS', brand: 'Apple', dateAdded: '2026-10-24T15:30:00.000Z' },
+    { id: 1, device: 'desktop', os: 'Mac 14.5', brand: 'Apple', dateAdded: '2026-10-20T09:00:00.000Z' },
+  ]);
+
+  await api.sendEmailToContact(4, 17);
+  failSend = true;
+  await assert.rejects(() => api.sendEmailToContact(4, 17), { name: 'UpstreamError', status: 502 });
+});

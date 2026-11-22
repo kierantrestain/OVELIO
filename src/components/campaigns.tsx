@@ -24,8 +24,8 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  Campaign, CampaignInput, CampaignLinkStat, MailingList, MediaItem, Page, Point, RunningCampaignStat, Template,
-  TemplateInput, TransactionalEmailInput,
+  Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, MailingList, MediaItem, Page, Point,
+  RunningCampaignStat, Template, TemplateInput, TransactionalEmailInput,
 } from '@/contracts';
 import { api, date, number, saveFile, upload, useAction, useFields, useResource } from './client';
 import { EmailMetrics } from './overview';
@@ -1036,13 +1036,11 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
   const action = useAction();
   const [email, setEmail] = useState('');
   const [sendAt, setSendAt] = useState<ISODateTimeString>();
-  const scheduled = campaign.status === 'scheduled';
   const copy = {
     test: { title: 'Send test email', endpoint: 'test', notice: 'Test email submitted to delivery.' },
     schedule: { title: 'Schedule newsletter', endpoint: 'schedule', notice: 'Newsletter scheduled.' },
     send: { title: campaign.status === 'paused' ? 'Resume sending' : 'Send newsletter', endpoint: 'start', notice: 'Delivery started.' },
-    pause: scheduled ? { title: 'Cancel schedule', endpoint: 'pause', notice: 'Schedule cancelled. The newsletter is now a draft.' }
-      : { title: 'Pause sending', endpoint: 'pause', notice: 'Delivery paused.' },
+    pause: { title: 'Pause sending', endpoint: 'pause', notice: 'Delivery paused.' },
   }[mode];
   return <Modal title={copy.title} onClose={onClose}>
     <form className="ov-stack-sm" onSubmit={event => {
@@ -1057,8 +1055,7 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
       {mode === 'test' ? <TextInput label="Recipient email" type="email" description="Use an audience contact with recorded marketing consent." isRequired value={email} onChange={setEmail} /> : null}
       {mode === 'schedule' ? <DateTimeInput label="Send date and time" description="Uses your device's local timezone." isRequired value={sendAt} onChange={setSendAt} /> : null}
       {mode === 'send' ? <Text>Start sending <strong>{campaign.name}</strong> to eligible subscribers on its selected lists? Suppressed and unsubscribed addresses are excluded.</Text> : null}
-      {mode === 'pause' ? <Text>{scheduled ? <>Return <strong>{campaign.name}</strong> to draft and cancel its scheduled send?</>
-        : <>Pause delivery of <strong>{campaign.name}</strong>? Emails already submitted for delivery may still arrive.</>}</Text> : null}
+      {mode === 'pause' ? <Text>Pause delivery of <strong>{campaign.name}</strong>? Emails already submitted for delivery may still arrive.</Text> : null}
       <Feedback error={action.error} />
       <FormActions>
         <Button label="Cancel" onClick={onClose} />
@@ -1068,6 +1065,71 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
   </Modal>;
 }
 
+function CampaignArchivePanel({ campaign, onSaved }: { campaign: Campaign; onSaved: () => void }) {
+  const action = useAction();
+  const baseArchive = Boolean(campaign.archive);
+  const baseSlug = campaign.archiveSlug ?? '';
+  const [draft, setDraft] = useState<{ baseArchive: boolean; baseSlug: string; archive: boolean; archiveSlug: string }>();
+
+  const isCurrentDraft = draft && draft.baseArchive === baseArchive && draft.baseSlug === baseSlug;
+  const archive = isCurrentDraft ? draft.archive : baseArchive;
+  const archiveSlug = isCurrentDraft ? draft.archiveSlug : baseSlug;
+  const archiveHref = campaign.archiveSlug ? `/archive/${encodeURIComponent(campaign.archiveSlug)}` : '/archive';
+  const archiveLabel = campaign.archiveSlug ? `/archive/${campaign.archiveSlug}` : '/archive';
+
+  return <Panel
+    title="Public web archive"
+    description="Publish a web-readable copy of this newsletter and optionally configure a custom archive URL slug."
+  >
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const trimmedSlug = archiveSlug.trim();
+        if (trimmedSlug && !/^[a-z0-9-]+$/i.test(trimmedSlug)) {
+          throw new Error('Use letters, numbers and dashes for archive slugs.');
+        }
+        const payload: CampaignArchiveInput = {
+          archive,
+          archiveSlug: trimmedSlug,
+        };
+        const updated = await api<Campaign>(`${path}/${campaign.id}/archive`, 'PATCH', payload);
+        setDraft({
+          baseArchive,
+          baseSlug,
+          archive: Boolean(updated.archive),
+          archiveSlug: updated.archiveSlug ?? '',
+        });
+        onSaved();
+      }, 'Public archive settings saved.');
+    }}>
+      <Switch
+        label="Publish to public web archive"
+        description="Make this newsletter available on the public web archive page."
+        value={archive}
+        onChange={next => setDraft({ baseArchive, baseSlug, archive: next, archiveSlug })}
+      />
+      <TextInput
+        label="Custom archive slug"
+        placeholder="spring-update-2026"
+        description="Optional URL path using letters, numbers and dashes. Leave blank to use the default archive listing."
+        isOptional
+        value={archiveSlug}
+        onChange={next => setDraft({ baseArchive, baseSlug, archive, archiveSlug: next })}
+      />
+      {campaign.archive ? (
+        <div className="ov-actions">
+          <Text type="label" color="secondary">Public link:</Text>
+          <Link as="a" href={archiveHref} isExternalLink>{archiveLabel}</Link>
+        </div>
+      ) : null}
+      <Feedback error={action.error} notice={action.notice} />
+      <FormActions>
+        <Button type="submit" variant="primary" label="Save archive settings" isLoading={action.busy} />
+      </FormActions>
+    </form>
+  </Panel>;
+}
+
 export function CampaignView({ id }: { id: string }) {
   const router = useRouter();
   const user = useUser();
@@ -1075,7 +1137,7 @@ export function CampaignView({ id }: { id: string }) {
   const resource = useResource<Campaign>(`${path}/${id}`);
   const lists = useResource<MailingList[]>('/lists');
   const analytics = useResource<CampaignAnalytics>(`${path}/${id}/analytics`);
-  const [modal, setModal] = useState<DeliveryMode | 'edit' | 'preview' | 'cancel' | 'delete'>();
+  const [modal, setModal] = useState<DeliveryMode | 'edit' | 'preview' | 'unschedule' | 'cancel' | 'delete'>();
   const [analyticsMetric, setAnalyticsMetric] = useState('views');
   const [exportingType, setExportingType] = useState<string>();
   const [notice, setNotice] = useState('');
@@ -1106,6 +1168,35 @@ export function CampaignView({ id }: { id: string }) {
       : analytics.data?.views;
   const seriesLabel = analyticsMetric === 'clicks' ? 'clicks' : analyticsMetric === 'bounces' ? 'bounces' : 'opens';
   const clickedLinks = (analytics.data?.links ?? []).map(item => ({ label: item.url, value: item.count }));
+  const archiveHref = campaign?.archiveSlug ? `/archive/${encodeURIComponent(campaign.archiveSlug)}` : '/archive';
+  const archiveLabel = campaign?.archiveSlug ? `/archive/${campaign.archiveSlug}` : '/archive';
+
+  const detailsPanel = campaign ? (
+    <Panel title="Newsletter details" action={canEdit && campaign.status === 'draft' ? <Button size="sm" label="Edit newsletter" onClick={() => setModal('edit')} /> : undefined}>
+      <MetadataList>
+        <MetadataListItem label="Status"><Status status={campaign.status} /></MetadataListItem>
+        <MetadataListItem label="From">{campaign.fromEmail || 'Configured sender'}</MetadataListItem>
+        <MetadataListItem label="Format">{formatLabel(campaign.contentType)}</MetadataListItem>
+        <MetadataListItem label="Mailing lists">{campaign.listIds.map(listId => lists.data?.find(list => list.id === listId)?.name || `List ${listId}`).join(', ') || '—'}</MetadataListItem>
+        <MetadataListItem label="Tags">
+          {campaign.tags?.length
+            ? <span className="ov-tags">{campaign.tags.map(tag => <Token key={tag} label={tag} size="sm" />)}</span>
+            : '—'}
+        </MetadataListItem>
+        <MetadataListItem label="Created">{date(campaign.createdAt)}</MetadataListItem>
+        <MetadataListItem label="Send time">{date(campaign.sendAt)}</MetadataListItem>
+        <MetadataListItem label="Total recipients">{number(campaign.toSend)}</MetadataListItem>
+        <MetadataListItem label="Public archive">
+          {campaign.archive ? (
+            <span className="ov-actions">
+              <StatusBadge label="Enabled" tone="success" />
+              <Link as="a" href={archiveHref} isExternalLink>{archiveLabel}</Link>
+            </span>
+          ) : 'Disabled'}
+        </MetadataListItem>
+      </MetadataList>
+    </Panel>
+  ) : null;
 
   return <>
     <PageHeader
@@ -1121,8 +1212,11 @@ export function CampaignView({ id }: { id: string }) {
         {['draft', 'paused'].includes(campaign.status) ? (
           <Button variant="primary" icon={<Send size={15} />} label={campaign.status === 'paused' ? 'Resume' : 'Send newsletter'} onClick={() => setModal('send')} />
         ) : null}
-        {campaign.status === 'running' || campaign.status === 'scheduled' ? (
-          <Button icon={<Pause size={15} />} label={campaign.status === 'scheduled' ? 'Cancel schedule' : 'Pause'} onClick={() => setModal('pause')} />
+        {campaign.status === 'running' ? (
+          <Button icon={<Pause size={15} />} label="Pause" onClick={() => setModal('pause')} />
+        ) : null}
+        {campaign.status === 'scheduled' ? (
+          <Button icon={<X size={15} />} label="Cancel schedule" onClick={() => setModal('unschedule')} />
         ) : null}
         {campaign.status === 'paused' || campaign.status === 'scheduled' ? (
           <Button icon={<Ban size={15} />} label="Cancel send" onClick={() => setModal('cancel')} />
@@ -1210,27 +1304,28 @@ export function CampaignView({ id }: { id: string }) {
         </Panel>
       </div>
 
-      <Panel title="Newsletter details" action={canEdit && campaign.status === 'draft' ? <Button size="sm" label="Edit newsletter" onClick={() => setModal('edit')} /> : undefined}>
-        <MetadataList>
-          <MetadataListItem label="Status"><Status status={campaign.status} /></MetadataListItem>
-          <MetadataListItem label="From">{campaign.fromEmail || 'Configured sender'}</MetadataListItem>
-          <MetadataListItem label="Format">{formatLabel(campaign.contentType)}</MetadataListItem>
-          <MetadataListItem label="Mailing lists">{campaign.listIds.map(listId => lists.data?.find(list => list.id === listId)?.name || `List ${listId}`).join(', ') || '—'}</MetadataListItem>
-          <MetadataListItem label="Tags">
-            {campaign.tags?.length
-              ? <span className="ov-tags">{campaign.tags.map(tag => <Token key={tag} label={tag} size="sm" />)}</span>
-              : '—'}
-          </MetadataListItem>
-          <MetadataListItem label="Created">{date(campaign.createdAt)}</MetadataListItem>
-          <MetadataListItem label="Send time">{date(campaign.sendAt)}</MetadataListItem>
-          <MetadataListItem label="Total recipients">{number(campaign.toSend)}</MetadataListItem>
-          <MetadataListItem label="Public archive">{campaign.archive ? 'Enabled' : 'Disabled'}</MetadataListItem>
-        </MetadataList>
-      </Panel>
+      {canEdit ? (
+        <div className="ov-grid">
+          {detailsPanel}
+          <CampaignArchivePanel key={campaign.id} campaign={campaign} onSaved={resource.refresh} />
+        </div>
+      ) : detailsPanel}
     </div>}
 
     {campaign && modal === 'edit' ? <CampaignForm campaign={campaign} onClose={() => setModal(undefined)} onDone={() => finish('Changes saved.')} /> : null}
     {campaign && modal === 'preview' ? <Preview id={campaign.id} onClose={() => setModal(undefined)} /> : null}
+    {campaign && modal === 'unschedule' ? <ConfirmDialog
+      title="Cancel schedule"
+      description={`Cancel the scheduled send for "${campaign.name}" and return it to draft?`}
+      actionLabel="Cancel schedule"
+      destructive={false}
+      busy={action.busy}
+      onClose={() => setModal(undefined)}
+      onConfirm={() => void action.run(async () => {
+        await api(`${path}/${campaign.id}/pause`, 'POST');
+        finish('Schedule cancelled. The newsletter is now a draft.');
+      })}
+    /> : null}
     {campaign && modal === 'cancel' ? <ConfirmDialog
       title="Cancel newsletter delivery"
       description={`Permanently cancel "${campaign.name}"? Once cancelled, delivery cannot be resumed (you can still clone it into a new draft).`}
@@ -1253,7 +1348,7 @@ export function CampaignView({ id }: { id: string }) {
         router.push('/campaigns');
       }, 'Newsletter deleted.')}
     /> : null}
-    {campaign && modal && modal !== 'preview' && modal !== 'edit' && modal !== 'cancel' && modal !== 'delete'
+    {campaign && (modal === 'test' || modal === 'schedule' || modal === 'send' || modal === 'pause')
       ? <DeliveryDialog mode={modal} campaign={campaign} onClose={() => setModal(undefined)} onDone={finish} /> : null}
   </>;
 }

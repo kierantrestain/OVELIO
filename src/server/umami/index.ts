@@ -6,8 +6,10 @@ import type {
   AttributionResult,
   BreakdownRow,
   DateRange,
+  EntityChartSeries,
   EventPropertyStat,
   EventPropertyValue,
+  ExpandedMetricRow,
   FunnelResult,
   FunnelStep,
   Goal,
@@ -16,22 +18,40 @@ import type {
   Health,
   JourneyPath,
   Page,
+  PerformanceBreakdownType,
+  PerformanceMetricKey,
+  PerformanceMetricRow,
+  PerformancePercentiles,
+  PerformanceReport,
+  PerformanceStats,
   Point,
   RealtimeEvent,
   RealtimeReport,
   ReportDimension,
   ReportFilters,
   RetentionRow,
+  RevenueMetricRow,
+  RevenueMetricType,
+  RevenueReport,
+  RevenueStats,
   SavedFunnel,
   SavedFunnelInput,
   SessionActivityItem,
+  SessionPropertyEntry,
+  SessionPropertyStat,
+  SessionStats,
   TrackedLink,
   TrackedLinkInput,
+  TrackedLinkUpdateInput,
   TrackingPixel,
   TrackingPixelInput,
+  TrackingPixelUpdateInput,
   Traffic,
   Website,
+  WebsiteEventRow,
   WebsiteReport,
+  WebsiteSegment,
+  WebsiteSegmentInput,
   WebsiteSession,
   WebsiteShare,
   WeeklyTraffic,
@@ -42,8 +62,15 @@ const uid = z.uuid();
 const count = z.number().int().nonnegative();
 const intCount = z.union([count, z.string().regex(/^\d+$/).transform(Number)]).pipe(count);
 const finiteNumber = z
-  .union([z.number().finite(), z.string().regex(/^-?\d+(?:\.\d+)?$/).transform(Number)])
+  .union([z.number().finite(), z.string().regex(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/).transform(Number)])
   .pipe(z.number().finite());
+const nullableFinite = z.union([finiteNumber, z.null()]).transform(value => value ?? 0);
+const coercedNumber = z
+  .union([z.number(), z.string(), z.null(), z.undefined()])
+  .transform(value => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+  });
 const nullableText = z.string().nullable().optional().transform(value => value ?? null);
 
 const websiteSchema = z.object({ id: uid, name: z.string(), domain: z.string() });
@@ -294,6 +321,347 @@ const trackingPixelSchema = z.object({
   createdAt: nullableText,
 });
 
+const floatChartRow = z.union([
+  z.object({ x: z.string().nullable(), t: z.string(), y: nullableFinite }).transform(({ t, y }): Point => ({
+    label: t,
+    value: y,
+  })),
+  z.object({ x: z.string(), y: nullableFinite }).transform(({ x, y }): Point => ({
+    label: x,
+    value: y,
+  })),
+  z.object({ label: z.string(), value: nullableFinite }),
+]);
+
+const revenueChartSchema = z.union([
+  z.object({ chart: floatChartRow.array() }).transform(({ chart }) => chart),
+  floatChartRow.array(),
+]);
+
+const performanceChartRow = z.union([
+  floatChartRow,
+  z
+    .object({
+      x: z.string().optional(),
+      t: z.string().optional(),
+      p50: nullableFinite.optional(),
+      p75: nullableFinite.optional(),
+      p95: nullableFinite.optional(),
+    })
+    .refine(
+      row => Boolean(row.t || row.x) && (row.p75 !== undefined || row.p50 !== undefined || row.p95 !== undefined),
+      'Invalid performance chart row',
+    )
+    .transform((row): Point => ({
+      label: row.t ?? row.x ?? '',
+      value: row.p75 ?? row.p50 ?? row.p95 ?? 0,
+    })),
+]);
+
+const performanceChartSchema = z.union([
+  z.object({ chart: performanceChartRow.array() }).transform(({ chart }) => chart),
+  performanceChartRow.array(),
+]);
+
+const entityChartBucketSchema = z
+  .object({
+    values: nullableFinite.array(),
+    total: nullableFinite.optional(),
+  })
+  .transform(({ values }): Point[] => values.map((value, index) => ({ label: `#${index + 1}`, value })));
+
+const entityChartMapSchema = z.record(z.string(), z.union([floatChartRow.array(), entityChartBucketSchema]));
+const entityChartSeriesSchema = z.union([
+  z.object({ data: entityChartMapSchema }).transform(({ data }) => data),
+  entityChartMapSchema,
+]);
+
+const websiteSegmentTypeSchema = z.enum(['segment', 'cohort']);
+const websiteSegmentMatchSchema = z.enum(['all', 'any']);
+const websiteSegmentFilterSchema = z.object({
+  name: z.string(),
+  operator: z.string(),
+  value: z
+    .union([z.string(), z.number(), z.boolean()])
+    .nullable()
+    .optional()
+    .transform(value => (value == null ? '' : String(value))),
+});
+const websiteSegmentDateRangeSchema = z
+  .union([
+    z.string(),
+    z.object({ value: z.string() }).transform(({ value }) => value),
+    z.object({ type: z.string() }).transform(({ type }) => type),
+  ])
+  .nullable()
+  .optional();
+const websiteSegmentActionSchema = z
+  .object({
+    type: z.enum(['path', 'event']),
+    value: z.string(),
+  })
+  .nullable()
+  .optional();
+
+const websiteSegmentSchema = z
+  .object({
+    id: uid,
+    name: z.string(),
+    type: websiteSegmentTypeSchema,
+    parameters: z
+      .object({
+        filters: websiteSegmentFilterSchema.array().nullable().optional(),
+        match: websiteSegmentMatchSchema.nullable().optional(),
+        dateRange: websiteSegmentDateRangeSchema,
+        action: websiteSegmentActionSchema,
+      })
+      .nullable()
+      .optional(),
+    createdAt: nullableText,
+  })
+  .transform((segment): WebsiteSegment => ({
+    id: segment.id,
+    name: segment.name,
+    type: segment.type,
+    filters: segment.parameters?.filters ?? [],
+    ...(segment.parameters?.match ? { match: segment.parameters.match } : {}),
+    ...(segment.parameters?.dateRange ? { dateRange: segment.parameters.dateRange } : {}),
+    ...(segment.parameters?.action ? { action: segment.parameters.action } : {}),
+    createdAt: segment.createdAt,
+  }));
+
+const revenueStatsFields = {
+  sum: nullableFinite,
+  count: nullableFinite,
+  unique_count: nullableFinite.optional(),
+  uniqueCount: nullableFinite.optional(),
+  total_sessions: nullableFinite.optional(),
+  totalSessions: nullableFinite.optional(),
+  average: nullableFinite.optional(),
+  arpu: nullableFinite.optional(),
+};
+
+function mapRevenueStats(row: {
+  sum: number;
+  count: number;
+  unique_count?: number;
+  uniqueCount?: number;
+  total_sessions?: number;
+  totalSessions?: number;
+  average?: number;
+  arpu?: number;
+}): RevenueStats {
+  return {
+    sum: row.sum,
+    count: row.count,
+    uniqueCount: row.uniqueCount ?? row.unique_count ?? 0,
+    totalSessions: row.totalSessions ?? row.total_sessions ?? 0,
+    average: row.average ?? 0,
+    arpu: row.arpu ?? 0,
+  };
+}
+
+const revenueComparisonSchema = z.object(revenueStatsFields).transform(mapRevenueStats);
+const revenueStatsResponseSchema = z
+  .object({
+    ...revenueStatsFields,
+    comparison: revenueComparisonSchema.nullable().optional(),
+  })
+  .transform(row => ({
+    stats: mapRevenueStats(row),
+    comparison: row.comparison ?? null,
+  }));
+
+function revenueMetricRowsSchema(emptyLabel: string) {
+  const rowSchema = z.union([
+    z
+      .object({
+        name: z.string().nullable(),
+        sum: nullableFinite,
+        count: nullableFinite.optional().default(0),
+      })
+      .transform((row): RevenueMetricRow => ({
+        name: row.name || emptyLabel,
+        sum: row.sum,
+        count: row.count,
+      })),
+    z
+      .object({
+        x: z.string().nullable(),
+        sum: nullableFinite.optional(),
+        y: nullableFinite.optional(),
+        count: nullableFinite.optional().default(0),
+      })
+      .refine(row => row.sum !== undefined || row.y !== undefined, 'Missing revenue metric sum')
+      .transform((row): RevenueMetricRow => ({
+        name: row.x || emptyLabel,
+        sum: row.sum ?? row.y ?? 0,
+        count: row.count,
+      })),
+  ]);
+  return z.union([rowSchema.array(), z.object({ data: rowSchema.array() }).transform(({ data }) => data)]);
+}
+
+const zeroPercentiles: PerformancePercentiles = { p50: 0, p75: 0, p95: 0 };
+
+const performancePercentilesSchema = z
+  .object({
+    p50: nullableFinite.optional().default(0),
+    p75: nullableFinite.optional().default(0),
+    p95: nullableFinite.optional().default(0),
+  })
+  .nullable()
+  .optional()
+  .transform((value): PerformancePercentiles => value ?? { ...zeroPercentiles });
+
+const performanceStatsSchema: z.ZodType<PerformanceStats> = z.object({
+  lcp: performancePercentilesSchema,
+  inp: performancePercentilesSchema,
+  cls: performancePercentilesSchema,
+  fcp: performancePercentilesSchema,
+  ttfb: performancePercentilesSchema,
+  count: nullableFinite,
+});
+
+const performanceMetricRowSchema = z
+  .object({
+    name: z.string().nullable().optional(),
+    x: z.string().nullable().optional(),
+    count: nullableFinite,
+    p50: nullableFinite,
+    p75: nullableFinite,
+    p95: nullableFinite,
+  })
+  .refine(row => row.name !== undefined || row.x !== undefined, 'Missing performance metric label')
+  .transform((row): PerformanceMetricRow => ({
+    name: row.name || row.x || 'Unknown',
+    count: row.count,
+    p50: row.p50,
+    p75: row.p75,
+    p95: row.p95,
+  }));
+
+const performanceMetricsResponseSchema = z.union([
+  performanceMetricRowSchema.array(),
+  z.object({ data: performanceMetricRowSchema.array() }).transform(({ data }) => data),
+]);
+
+function expandedMetricRowsSchema(emptyLabel: string) {
+  const rowSchema = z
+    .object({
+      name: z.string().nullable().optional(),
+      x: z.string().nullable().optional(),
+      pageviews: coercedNumber,
+      visitors: coercedNumber,
+      visits: coercedNumber,
+      bounces: coercedNumber,
+      totaltime: coercedNumber,
+    })
+    .refine(row => row.name !== undefined || row.x !== undefined, 'Missing expanded metric label')
+    .transform((row): ExpandedMetricRow => ({
+      name: row.name || row.x || emptyLabel,
+      pageviews: row.pageviews,
+      visitors: row.visitors,
+      visits: row.visits,
+      bounces: row.bounces,
+      totaltime: row.totaltime,
+    }));
+  return z.union([rowSchema.array(), z.object({ data: rowSchema.array() }).transform(({ data }) => data)]);
+}
+
+const websiteEventRowSchema = z
+  .object({
+    id: z.string().min(1),
+    sessionId: z.string().min(1),
+    urlPath: z.string().nullable().optional().transform(value => value ?? ''),
+    pageTitle: nullableText,
+    eventName: nullableText,
+    eventType: intCount,
+    referrerDomain: nullableText,
+    country: nullableText,
+    device: nullableText,
+    browser: nullableText,
+    createdAt: z.string(),
+  })
+  .transform((row): WebsiteEventRow => ({
+    id: row.id,
+    sessionId: row.sessionId,
+    urlPath: row.urlPath,
+    pageTitle: row.pageTitle,
+    eventName: row.eventName,
+    eventType: row.eventType,
+    referrerDomain: row.referrerDomain,
+    country: row.country,
+    device: row.device,
+    browser: row.browser,
+    createdAt: row.createdAt,
+  }));
+
+const eventsPageSchema = z.object({
+  data: websiteEventRowSchema.array(),
+  count: intCount,
+  page: intCount.optional(),
+  pageSize: intCount.optional(),
+});
+
+const statCount = z.union([
+  intCount,
+  z.object({ value: z.union([intCount, z.null()]).transform(value => value ?? 0) }).transform(({ value }) => value),
+  z.null().transform(() => 0),
+]);
+
+const sessionStatsSchema: z.ZodType<SessionStats> = z.object({
+  pageviews: statCount,
+  visitors: statCount,
+  visits: statCount,
+  countries: statCount,
+  events: statCount,
+});
+
+const sessionPropertyStatSchema = z.object({
+  propertyName: z.string(),
+  total: intCount,
+});
+
+const sessionPropertiesResponseSchema = z.union([
+  sessionPropertyStatSchema.array(),
+  z.object({ data: sessionPropertyStatSchema.array() }).transform(({ data }) => data),
+]);
+
+const scalarValue = z.union([z.string(), z.number(), z.boolean()]).nullable().optional();
+
+const sessionPropertyEntrySchema = z
+  .object({
+    propertyName: z.string().optional(),
+    dataKey: z.string().optional(),
+    value: scalarValue,
+    stringValue: scalarValue,
+    numberValue: scalarValue,
+    dateValue: scalarValue,
+    dataType: intCount.optional().default(1),
+  })
+  .refine(row => Boolean(row.propertyName || row.dataKey), 'Missing session property name')
+  .transform((row): SessionPropertyEntry => {
+    const raw =
+      row.value !== undefined
+        ? row.value
+        : row.dataType === 2
+          ? (row.numberValue ?? row.stringValue ?? row.dateValue)
+          : row.dataType === 4
+            ? (row.dateValue ?? row.stringValue ?? row.numberValue)
+            : (row.stringValue ?? row.numberValue ?? row.dateValue);
+    return {
+      propertyName: row.propertyName ?? row.dataKey ?? '',
+      value: raw == null ? '' : String(raw),
+      dataType: row.dataType,
+    };
+  });
+
+const singleSessionPropertiesResponseSchema = z.union([
+  sessionPropertyEntrySchema.array(),
+  z.object({ data: sessionPropertyEntrySchema.array() }).transform(({ data }) => data),
+]);
+
 const service = 'tracking';
 const pageSize = 100;
 const hour = 60 * 60 * 1000;
@@ -420,6 +788,53 @@ const trackingPixelInputSchema = z.object({
   slug: slug ? slugSchema.parse(slug) : randomSlug(10),
 }));
 
+const trackedLinkUpdateInputSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    url: httpUrlSchema.optional(),
+    slug: slugSchema.optional(),
+  })
+  .refine(
+    value => value.name !== undefined || value.url !== undefined || value.slug !== undefined,
+    'Provide at least one link field to update.',
+  );
+
+const trackingPixelUpdateInputSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    slug: slugSchema.optional(),
+  })
+  .refine(
+    value => value.name !== undefined || value.slug !== undefined,
+    'Provide at least one pixel field to update.',
+  );
+
+const websiteSegmentFilterInputSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  operator: z.string().trim().min(1).max(50),
+  value: z.string().trim().max(500),
+});
+
+const websiteSegmentInputSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  type: websiteSegmentTypeSchema,
+  filters: websiteSegmentFilterInputSchema.array().max(25).optional(),
+  match: websiteSegmentMatchSchema.optional(),
+  dateRange: z.string().trim().min(1).max(100).optional(),
+  action: stepSchema.optional(),
+});
+
+const currencySchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^[A-Z]{3}$/, 'Use a 3-letter ISO currency code.');
+
+const revenueMetricTypeSchema = z.enum(['country', 'region', 'referrer', 'channel']);
+const performanceMetricKeySchema = z.enum(['lcp', 'inp', 'cls', 'fcp', 'ttfb']);
+const performanceBreakdownTypeSchema = z.enum(['path', 'title', 'device', 'browser']);
+const expandedLimitSchema = z.number().int().min(1).max(500);
+
 export type WebsiteInput = z.input<typeof websiteInput>;
 
 type UmamiConfig = {
@@ -439,6 +854,10 @@ function queryRange(range: DateRange) {
   }
 
   return { startAt: String(range.startAt), endAt: String(range.endAt), timezone: 'UTC' };
+}
+
+function rangeUnit(range: DateRange): 'hour' | 'day' {
+  return range.endAt - range.startAt <= 48 * hour ? 'hour' : 'day';
 }
 
 function queryFilters(filters?: ReportFilters): Record<string, string> {
@@ -590,7 +1009,7 @@ export function createUmami(config: UmamiConfig) {
   }
 
   async function allPages<T>(path: string, item: z.ZodType<T>, extraQuery?: Record<string, string>): Promise<T[]> {
-    const schema = z.union([z.object({ data: item.array(), count: intCount }), item.array()]);
+    const schema = z.union([z.object({ data: item.array(), count: intCount.optional() }), item.array()]);
     const items: T[] = [];
     for (let page = 1; ; page++) {
       const result = validated(
@@ -599,8 +1018,19 @@ export function createUmami(config: UmamiConfig) {
       );
       if (Array.isArray(result)) return result;
       items.push(...result.data);
-      if (!result.data.length || items.length >= result.count) return items;
+      if (!result.data.length || result.count === undefined || items.length >= result.count) return items;
     }
+  }
+
+  async function entityCharts(kind: 'links' | 'pixels', ids: string[], range?: DateRange): Promise<EntityChartSeries> {
+    const rangeQuery = range ? queryRange(range) : {};
+    const parsedIds = [...new Set(ids.map(id => uid.parse(id)))];
+    if (!parsedIds.length) return {};
+    const result = await authorized(`${kind}/charts`, {}, {
+      ids: parsedIds.join(','),
+      ...rangeQuery,
+    });
+    return validated(entityChartSeriesSchema, result);
   }
 
   async function dimensionData(path: string, dimension: ReportDimension, query: Record<string, string>) {
@@ -689,8 +1119,7 @@ export function createUmami(config: UmamiConfig) {
       const path = websitePath(id);
       const appliedFilters = queryFilters(filters);
       const query = { ...queryRange(range), ...appliedFilters };
-      const duration = range.endAt - range.startAt;
-      const unit = duration <= 48 * hour ? 'hour' : 'day';
+      const unit = rangeUnit(range);
       const selectedDimensions = [...new Set(dimensions.map(dimension => reportDimensionSchema.parse(dimension)))];
       const [website, stats, series, active, eventsSeries, dimensionEntries] = await Promise.all([
         authorized(path).then(data => validated(websiteSchema, data)),
@@ -966,6 +1395,192 @@ export function createUmami(config: UmamiConfig) {
       await authorized(`${websitePath(id)}/annotations/${uid.parse(annotationId)}`, { method: 'DELETE' });
     },
 
+    segments(websiteId: string, type: 'segment' | 'cohort' = 'segment'): Promise<WebsiteSegment[]> {
+      return allPages(`${websitePath(websiteId)}/segments`, websiteSegmentSchema, {
+        type: websiteSegmentTypeSchema.parse(type),
+      });
+    },
+
+    async createSegment(websiteId: string, input: WebsiteSegmentInput): Promise<WebsiteSegment> {
+      const parsed = websiteSegmentInputSchema.parse(input);
+      const result = await authorized(`${websitePath(websiteId)}/segments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          type: parsed.type,
+          name: parsed.name,
+          parameters: {
+            ...(parsed.filters?.length ? { filters: parsed.filters } : {}),
+            ...(parsed.match ? { match: parsed.match } : {}),
+            ...(parsed.dateRange ? { dateRange: parsed.dateRange } : {}),
+            ...(parsed.action ? { action: parsed.action } : {}),
+          },
+        }),
+      });
+      return validated(websiteSegmentSchema, result);
+    },
+
+    async deleteSegment(websiteId: string, segmentId: string): Promise<void> {
+      try {
+        await authorized(`${websitePath(websiteId)}/segments/${uid.parse(segmentId)}`, { method: 'DELETE' });
+      } catch (error) {
+        if (error instanceof UpstreamError && error.status === 404) return;
+        throw error;
+      }
+    },
+
+    async revenueReport(
+      websiteId: string,
+      range: DateRange,
+      currency = 'USD',
+      metricType: RevenueMetricType = 'country',
+      filters?: ReportFilters,
+    ): Promise<RevenueReport> {
+      const path = websitePath(websiteId);
+      const parsedCurrency = currencySchema.parse(currency);
+      const parsedMetricType = revenueMetricTypeSchema.parse(metricType);
+      const baseQuery = {
+        ...queryRange(range),
+        ...queryFilters(filters),
+        currency: parsedCurrency,
+      };
+      const unit = rangeUnit(range);
+      const [statsResult, chart, metrics] = await Promise.all([
+        authorized(`${path}/revenue/stats`, {}, baseQuery)
+          .then(data => validated(revenueStatsResponseSchema, data)),
+        authorized(`${path}/revenue/chart`, {}, { ...baseQuery, unit })
+          .then(data => validated(revenueChartSchema, data)),
+        authorized(`${path}/revenue/metrics`, {}, { ...baseQuery, type: parsedMetricType })
+          .then(data => validated(revenueMetricRowsSchema(parsedMetricType === 'referrer' ? 'Direct' : 'Unknown'), data)),
+      ]);
+      return {
+        currency: parsedCurrency,
+        stats: statsResult.stats,
+        comparison: statsResult.comparison,
+        chart,
+        metrics,
+      };
+    },
+
+    async performanceReport(
+      websiteId: string,
+      range: DateRange,
+      metric: PerformanceMetricKey = 'lcp',
+      breakdownType: PerformanceBreakdownType = 'path',
+      filters?: ReportFilters,
+    ): Promise<PerformanceReport> {
+      const path = websitePath(websiteId);
+      const parsedMetric = performanceMetricKeySchema.parse(metric);
+      const parsedBreakdownType = performanceBreakdownTypeSchema.parse(breakdownType);
+      const baseQuery = {
+        ...queryRange(range),
+        ...queryFilters(filters),
+      };
+      const unit = rangeUnit(range);
+      const [stats, chart, metrics] = await Promise.all([
+        authorized(`${path}/performance/stats`, {}, baseQuery)
+          .then(data => validated(performanceStatsSchema, data)),
+        authorized(`${path}/performance/chart`, {}, { ...baseQuery, unit, metric: parsedMetric })
+          .then(data => validated(performanceChartSchema, data)),
+        authorized(`${path}/performance/metrics`, {}, { ...baseQuery, metric: parsedMetric, type: parsedBreakdownType })
+          .then(data => validated(performanceMetricsResponseSchema, data)),
+      ]);
+      return {
+        metric: parsedMetric,
+        stats,
+        chart,
+        metrics,
+      };
+    },
+
+    async expandedMetrics(
+      websiteId: string,
+      range: DateRange,
+      type: ReportDimension,
+      filters?: ReportFilters,
+      limit = 25,
+    ): Promise<ExpandedMetricRow[]> {
+      const validatedType = reportDimensionSchema.parse(type);
+      const parsedLimit = expandedLimitSchema.parse(limit);
+      const result = await authorized(`${websitePath(websiteId)}/metrics/expanded`, {}, {
+        ...queryRange(range),
+        ...queryFilters(filters),
+        type: validatedType,
+        limit: String(parsedLimit),
+      });
+      return validated(expandedMetricRowsSchema(validatedType === 'referrer' ? 'Direct' : 'Unknown'), result);
+    },
+
+    async eventsFeed(
+      websiteId: string,
+      range: DateRange,
+      options?: { page?: number; pageSize?: number; search?: string; filters?: ReportFilters },
+    ): Promise<Page<WebsiteEventRow>> {
+      const parsedOptions = sessionOptionsSchema.parse({
+        page: options?.page,
+        pageSize: options?.pageSize,
+        search: options?.search,
+      });
+      const query: Record<string, string> = {
+        ...queryRange(range),
+        ...queryFilters(options?.filters),
+        page: String(parsedOptions.page),
+        pageSize: String(parsedOptions.pageSize),
+        ...(parsedOptions.search ? { search: parsedOptions.search } : {}),
+      };
+      const result = validated(eventsPageSchema, await authorized(`${websitePath(websiteId)}/events`, {}, query));
+      return {
+        items: result.data,
+        total: result.count,
+        page: result.page ?? parsedOptions.page,
+        limit: result.pageSize ?? parsedOptions.pageSize,
+      };
+    },
+
+    async sessionStats(websiteId: string, range: DateRange, filters?: ReportFilters): Promise<SessionStats> {
+      const result = await authorized(
+        `${websitePath(websiteId)}/sessions/stats`,
+        {},
+        { ...queryRange(range), ...queryFilters(filters) },
+      );
+      return validated(sessionStatsSchema, result);
+    },
+
+    async sessionProperties(websiteId: string, range: DateRange): Promise<SessionPropertyStat[]> {
+      const result = await authorized(
+        `${websitePath(websiteId)}/session-data/properties`,
+        {},
+        queryRange(range),
+      );
+      return validated(sessionPropertiesResponseSchema, result);
+    },
+
+    async sessionPropertyValues(
+      websiteId: string,
+      range: DateRange,
+      propertyName: string,
+    ): Promise<EventPropertyValue[]> {
+      const parsedProperty = filterValueSchema.parse(propertyName);
+      const result = await authorized(
+        `${websitePath(websiteId)}/session-data/values`,
+        {},
+        { ...queryRange(range), propertyName: parsedProperty },
+      );
+      return validated(
+        z.union([
+          eventPropertyValueSchema.array(),
+          z.object({ data: eventPropertyValueSchema.array() }).transform(({ data }) => data),
+        ]),
+        result,
+      );
+    },
+
+    async singleSessionProperties(websiteId: string, sessionId: string): Promise<SessionPropertyEntry[]> {
+      const result = await authorized(
+        `${websitePath(websiteId)}/sessions/${uid.parse(sessionId)}/properties`,
+      );
+      return validated(singleSessionPropertiesResponseSchema, result);
+    },
+
     links(): Promise<TrackedLink[]> {
       return allPages('links', trackedLinkSchema);
     },
@@ -979,8 +1594,21 @@ export function createUmami(config: UmamiConfig) {
       return validated(trackedLinkSchema, result);
     },
 
+    async updateLink(linkId: string, input: TrackedLinkUpdateInput): Promise<TrackedLink> {
+      const parsed = trackedLinkUpdateInputSchema.parse(input);
+      const result = await authorized(`links/${uid.parse(linkId)}`, {
+        method: 'POST',
+        body: JSON.stringify(parsed),
+      });
+      return validated(trackedLinkSchema, result);
+    },
+
     async deleteLink(linkId: string): Promise<void> {
       await authorized(`links/${uid.parse(linkId)}`, { method: 'DELETE' });
+    },
+
+    linkCharts(ids: string[], range?: DateRange): Promise<EntityChartSeries> {
+      return entityCharts('links', ids, range);
     },
 
     pixels(): Promise<TrackingPixel[]> {
@@ -996,8 +1624,21 @@ export function createUmami(config: UmamiConfig) {
       return validated(trackingPixelSchema, result);
     },
 
+    async updatePixel(pixelId: string, input: TrackingPixelUpdateInput): Promise<TrackingPixel> {
+      const parsed = trackingPixelUpdateInputSchema.parse(input);
+      const result = await authorized(`pixels/${uid.parse(pixelId)}`, {
+        method: 'POST',
+        body: JSON.stringify(parsed),
+      });
+      return validated(trackingPixelSchema, result);
+    },
+
     async deletePixel(pixelId: string): Promise<void> {
       await authorized(`pixels/${uid.parse(pixelId)}`, { method: 'DELETE' });
+    },
+
+    pixelCharts(ids: string[], range?: DateRange): Promise<EntityChartSeries> {
+      return entityCharts('pixels', ids, range);
     },
   };
 }

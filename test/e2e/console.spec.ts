@@ -135,18 +135,25 @@ test('deep-linked workspace tools, command palette, and dark theme render cleanl
   const routes: Array<[string, string]> = [
     ['/audience?tab=Segments', 'Audience'],
     ['/audience?tab=Lead+scoring', 'Audience'],
+    ['/audience?tab=Custom+fields', 'Audience'],
     ['/audience?tab=Suppressions', 'Audience'],
     ['/campaigns?tab=Templates', 'Campaigns'],
     ['/campaigns?tab=Media', 'Campaigns'],
     ['/automations?tab=Lead+forms', 'Automations'],
     ['/automations?tab=Assets', 'Automations'],
     ['/automations?tab=Landing+pages', 'Automations'],
+    ['/automations?tab=Dynamic+content', 'Automations'],
+    ['/automations?tab=Popups+%26+bars', 'Automations'],
+    ['/automations?tab=Categories', 'Automations'],
     ['/analytics?tab=Realtime', 'Analytics'],
     ['/analytics?tab=Sessions', 'Analytics'],
     ['/analytics?tab=Goals+%26+Funnels', 'Analytics'],
     ['/analytics?tab=Insights', 'Analytics'],
     ['/analytics?tab=Links+%26+Pixels', 'Analytics'],
+    ['/analytics?tab=Marketing+reports', 'Analytics'],
+    ['/settings?view=team', 'Settings'],
     ['/settings?view=connections', 'Settings'],
+    ['/settings?view=data+%26+privacy', 'Settings'],
   ];
   for (const [route, heading] of routes) {
     await page.goto(route, { waitUntil: 'networkidle' });

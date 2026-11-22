@@ -2,8 +2,8 @@
 
 import {
   Activity, ArrowRight, BookmarkPlus, CalendarDays, CodeXml, Copy, Download,
-  Eye, Link2, MousePointerClick, Pencil, Plus, RefreshCw, RotateCcw,
-  Save, Search, Settings2, Share2, Sparkles, Target, Trash2, Users,
+  Eye, Filter, Link2, MousePointerClick, Pencil, Plus, RefreshCw, RotateCcw,
+  Save, Search, Settings2, Share2, Sparkles, Target, Trash2, TrendingUp, Users,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from '@astryxdesign/core/Badge';
@@ -33,24 +33,40 @@ import type {
   Campaign,
   Dashboard,
   DateRange,
+  EntityChartSeries,
   EventPropertyStat,
   EventPropertyValue,
+  ExpandedMetricRow,
   FunnelResult,
   FunnelStep,
   Goal,
   GoalStats,
   JourneyPath,
+  MarketingReport,
+  MarketingReportData,
   Page,
+  PerformanceBreakdownType,
+  PerformanceMetricKey,
+  PerformanceReport,
+  Point,
   RealtimeReport,
   ReportDimension,
   ReportFilters,
   RetentionRow,
+  RevenueMetricType,
+  RevenueReport,
   SavedFunnel,
   SessionActivityItem,
+  SessionPropertyEntry,
+  SessionPropertyStat,
+  SessionStats,
   TrackedLink,
   TrackingPixel,
   Website,
+  WebsiteEventRow,
   WebsiteReport,
+  WebsiteSegment,
+  WebsiteSegmentFilter,
   WebsiteSession,
   WebsiteShare,
   WeeklyTraffic,
@@ -76,6 +92,7 @@ const viewTabs = [
   'Insights',
   'Links & Pixels',
   'Email reports',
+  'Marketing reports',
 ] as const;
 type AnalyticsTab = typeof viewTabs[number];
 
@@ -170,6 +187,102 @@ const stepTypes = [
   { value: 'event', label: 'Custom event' },
 ];
 
+const segmentFilterDimensionOptions: { value: ReportDimension; label: string }[] = [
+  { value: 'path', label: 'Path' },
+  { value: 'referrer', label: 'Referrer' },
+  { value: 'channel', label: 'Channel' },
+  { value: 'country', label: 'Country' },
+  { value: 'region', label: 'Region' },
+  { value: 'city', label: 'City' },
+  { value: 'device', label: 'Device' },
+  { value: 'browser', label: 'Browser' },
+  { value: 'os', label: 'OS' },
+  { value: 'event', label: 'Event' },
+  { value: 'utmSource', label: 'UTM source' },
+  { value: 'utmMedium', label: 'UTM medium' },
+  { value: 'utmCampaign', label: 'UTM campaign' },
+  { value: 'utmContent', label: 'UTM content' },
+  { value: 'utmTerm', label: 'UTM term' },
+  { value: 'title', label: 'Page title' },
+  { value: 'query', label: 'Query' },
+  { value: 'hostname', label: 'Hostname' },
+  { value: 'screen', label: 'Screen' },
+  { value: 'language', label: 'Language' },
+];
+
+const segmentOperatorOptions = [
+  { value: 'eq', label: 'Equals' },
+  { value: 'neq', label: 'Does not equal' },
+  { value: 'c', label: 'Contains' },
+  { value: 'nc', label: 'Does not contain' },
+  { value: 's', label: 'Starts with' },
+  { value: 'ns', label: 'Does not start with' },
+] as const;
+
+const segmentOperatorLabels: Record<string, string> = {
+  eq: '=',
+  neq: '≠',
+  c: 'contains',
+  nc: 'not contains',
+  s: 'starts with',
+  ns: 'not starts with',
+};
+
+const cohortDateRangeOptions = [
+  { value: '24hour', label: 'Last 24 hours' },
+  { value: '7day', label: 'Last 7 days' },
+  { value: '30day', label: 'Last 30 days' },
+  { value: '90day', label: 'Last 90 days' },
+  { value: '180day', label: 'Last 180 days' },
+  { value: '1year', label: 'Last 12 months' },
+] as const;
+
+const cohortDateRangeLabels: Record<string, string> = Object.fromEntries(
+  cohortDateRangeOptions.map(option => [option.value, option.label]),
+);
+
+const currencyOptions = [
+  { value: 'USD', label: 'USD — US Dollar' },
+  { value: 'GBP', label: 'GBP — British Pound' },
+  { value: 'EUR', label: 'EUR — Euro' },
+  { value: 'CAD', label: 'CAD — Canadian Dollar' },
+  { value: 'AUD', label: 'AUD — Australian Dollar' },
+] as const;
+
+const revenueBreakdownOptions: { value: RevenueMetricType; label: string }[] = [
+  { value: 'country', label: 'Country' },
+  { value: 'region', label: 'Region' },
+  { value: 'referrer', label: 'Referrer' },
+  { value: 'channel', label: 'Channel' },
+];
+
+const performanceMetricOptions: { value: PerformanceMetricKey; label: string }[] = [
+  { value: 'lcp', label: 'LCP — Largest Contentful Paint' },
+  { value: 'inp', label: 'INP — Interaction to Next Paint' },
+  { value: 'cls', label: 'CLS — Cumulative Layout Shift' },
+  { value: 'fcp', label: 'FCP — First Contentful Paint' },
+  { value: 'ttfb', label: 'TTFB — Time to First Byte' },
+];
+
+const performanceMetricInfo: Record<PerformanceMetricKey, { short: string; description: string }> = {
+  lcp: { short: 'LCP', description: 'Largest Contentful Paint at p75 (good target ≤ 2.5 s).' },
+  inp: { short: 'INP', description: 'Interaction to Next Paint at p75 (good target ≤ 200 ms).' },
+  cls: { short: 'CLS', description: 'Cumulative Layout Shift at p75 (good target ≤ 0.100).' },
+  fcp: { short: 'FCP', description: 'First Contentful Paint at p75 (good target ≤ 1.8 s).' },
+  ttfb: { short: 'TTFB', description: 'Time to First Byte at p75 (good target ≤ 800 ms).' },
+};
+
+const performanceBreakdownOptions: { value: PerformanceBreakdownType; label: string }[] = [
+  { value: 'path', label: 'Page path' },
+  { value: 'title', label: 'Page title' },
+  { value: 'device', label: 'Device' },
+  { value: 'browser', label: 'Browser' },
+];
+
+const validFilterDimensions = new Set<ReportDimension>(
+  Object.keys(dimensionLabels) as ReportDimension[],
+);
+
 const campaignStatusTone: Record<string, Tone> = {
   finished: 'success',
   running: 'success',
@@ -183,7 +296,7 @@ const isoDay = (value: number) => new Date(value).toISOString().slice(0, 10) as 
 
 function normalizeTab(value?: string): AnalyticsTab {
   if (!value) return 'Traffic';
-  const trimmed = value.trim();
+  const trimmed = value.trim().replace(/\+/g, ' ');
   const exact = viewTabs.find(item => item === trimmed);
   if (exact) return exact;
   const lower = trimmed.toLowerCase();
@@ -213,6 +326,26 @@ function rangeQuery(range: DateRange, filters?: ReportFilters, extra?: Record<st
 function formatPercent(ratio: number | null | undefined) {
   if (ratio == null || !Number.isFinite(ratio)) return '—';
   return Intl.NumberFormat('en-GB', { style: 'percent', maximumFractionDigits: 1 }).format(ratio);
+}
+
+function formatCurrency(value: number | null | undefined, currency: string) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  try {
+    return new Intl.NumberFormat('en-GB', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return `${currency} ${number(value)}`;
+  }
+}
+
+function formatVital(metric: PerformanceMetricKey, value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  if (metric === 'cls') {
+    return new Intl.NumberFormat('en-GB', { minimumFractionDigits: 3, maximumFractionDigits: 3 }).format(value);
+  }
+  if (value >= 1000) {
+    return `${new Intl.NumberFormat('en-GB', { maximumFractionDigits: 2 }).format(value / 1000)} s`;
+  }
+  return `${new Intl.NumberFormat('en-GB', { maximumFractionDigits: 0 }).format(value)} ms`;
 }
 
 function comparison(current: number | undefined, previous: number | undefined) {
@@ -258,6 +391,68 @@ function avgDurationInfo(current?: WebsiteReport['current'], previous?: WebsiteR
 function filterKeyForDimension(dimension: ReportDimension): ReportDimension {
   if (dimension === 'entry' || dimension === 'exit') return 'path';
   return dimension;
+}
+
+function segmentToReportFilters(segment: WebsiteSegment): ReportFilters {
+  const next: ReportFilters = {};
+  if (segment.action?.value?.trim()) {
+    next[segment.action.type] = segment.action.value.trim();
+  }
+  for (const item of segment.filters) {
+    const val = item.value.trim();
+    if (!val) continue;
+    if (validFilterDimensions.has(item.name as ReportDimension)) {
+      next[filterKeyForDimension(item.name as ReportDimension)] = val;
+    }
+  }
+  return next;
+}
+
+function filtersMatch(a: ReportFilters, b: ReportFilters) {
+  const aEntries = Object.entries(a).filter(([, val]) => Boolean(val?.trim()));
+  const bEntries = Object.entries(b).filter(([, val]) => Boolean(val?.trim()));
+  if (!aEntries.length || aEntries.length !== bEntries.length) return false;
+  return aEntries.every(([key, val]) => b[key as ReportDimension]?.trim() === val?.trim());
+}
+
+function sumPoints(points?: Point[] | null) {
+  if (!points) return null;
+  return points.reduce((total, point) => total + point.value, 0);
+}
+
+function formatColumnHeader(key: string) {
+  const clean = key.includes('.') ? key.split('.').slice(1).join(' ') : key;
+  if (clean.toLowerCase() === 'id') return 'ID';
+  return clean
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function formatReportSource(source: string) {
+  if (!source) return 'Marketing data';
+  return source
+    .replace(/\bleads?\b/gi, match => (match.toLowerCase().endsWith('s') ? 'contacts' : 'contact'))
+    .replace(/[._-]+/g, ' ')
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function csvCell(value: string | number | null | undefined) {
+  if (value == null) return '';
+  const raw = String(value);
+  const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
+}
+
+function buildCsv(columns: string[], rows: Record<string, string | number | null>[]) {
+  const header = columns.map(col => csvCell(col)).join(',');
+  const lines = rows.map(row => columns.map(col => csvCell(row[col])).join(','));
+  return [header, ...lines].join('\n') + '\n';
+}
+
+function slugifyFilename(value: string) {
+  const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  return slug || 'report';
 }
 
 /* ── Shared Modals ─────────────────────────────────────────────────────────── */
@@ -556,12 +751,428 @@ function EventPropertiesInspector({
   </section>;
 }
 
+type ExpandedMetricTableRow = ExpandedMetricRow & { _id: string };
+
+function WebsiteSegmentModal({
+  websiteId,
+  initialType,
+  activeFilters,
+  onClose,
+  onDone,
+}: {
+  websiteId: string;
+  initialType: 'segment' | 'cohort';
+  activeFilters: ReportFilters;
+  onClose: () => void;
+  onDone: (createdType: 'segment' | 'cohort') => void;
+}) {
+  const action = useAction();
+  const activeFilterRules = useMemo<WebsiteSegmentFilter[]>(
+    () => (Object.entries(activeFilters) as [ReportDimension, string][])
+      .filter(([, value]) => Boolean(value?.trim()))
+      .map(([name, value]) => ({ name, operator: 'eq', value: value.trim() })),
+    [activeFilters],
+  );
+
+  const [kind, setKind] = useState<'segment' | 'cohort'>(initialType);
+  const [name, setName] = useState('');
+  const [match, setMatch] = useState<'all' | 'any'>('all');
+  const [rules, setRules] = useState<WebsiteSegmentFilter[]>(() =>
+    activeFilterRules.length ? activeFilterRules : [{ name: 'country', operator: 'eq', value: '' }],
+  );
+  const [actionType, setActionType] = useState<'path' | 'event'>('event');
+  const [actionValue, setActionValue] = useState('');
+  const [dateRange, setDateRange] = useState('30day');
+  const [includeActiveFilters, setIncludeActiveFilters] = useState(activeFilterRules.length > 0);
+
+  function updateRule(index: number, patch: Partial<WebsiteSegmentFilter>) {
+    setRules(current => current.map((rule, pos) => pos === index ? { ...rule, ...patch } : rule));
+  }
+
+  return <Modal title={kind === 'cohort' ? 'Create visitor cohort' : 'Save traffic segment'} size="large" onClose={onClose}>
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const trimmedName = name.trim();
+        if (!trimmedName) throw new Error('Enter a name.');
+
+        if (kind === 'segment') {
+          const cleanRules = rules
+            .map(rule => ({ name: rule.name.trim(), operator: rule.operator, value: rule.value.trim() }))
+            .filter(rule => rule.name && rule.value);
+          if (!cleanRules.length) throw new Error('Add at least one traffic filter rule with a value.');
+          await api<WebsiteSegment>(`${websitesPath}/${websiteId}/segments`, 'POST', {
+            name: trimmedName,
+            type: 'segment',
+            match,
+            filters: cleanRules,
+          });
+          onDone('segment');
+          return;
+        }
+
+        const trimmedAction = actionValue.trim();
+        if (!trimmedAction) throw new Error('Enter a page path or custom event for this cohort.');
+        await api<WebsiteSegment>(`${websitesPath}/${websiteId}/segments`, 'POST', {
+          name: trimmedName,
+          type: 'cohort',
+          action: { type: actionType, value: trimmedAction },
+          dateRange,
+          ...(includeActiveFilters && activeFilterRules.length ? { filters: activeFilterRules, match: 'all' as const } : {}),
+        });
+        onDone('cohort');
+      }, kind === 'cohort' ? 'Cohort created.' : 'Traffic segment saved.');
+    }}>
+      <div className="ov-actions">
+        <SegmentedControl label="Saved filter type" size="sm" value={kind} onChange={v => setKind(v === 'cohort' ? 'cohort' : 'segment')}>
+          <SegmentedControlItem value="segment" label="Segment" />
+          <SegmentedControlItem value="cohort" label="Cohort" />
+        </SegmentedControl>
+      </div>
+
+      <TextInput
+        label={kind === 'cohort' ? 'Cohort name' : 'Segment name'}
+        placeholder={kind === 'cohort' ? 'Pricing visitors (30 days)' : 'UK mobile traffic'}
+        isRequired
+        value={name}
+        onChange={setName}
+      />
+
+      {kind === 'segment' ? <div className="ov-stack-sm">
+        <Selector
+          label="Rule matching"
+          value={match}
+          onChange={v => setMatch(v === 'any' ? 'any' : 'all')}
+          options={[
+            { value: 'all', label: 'Match all filters' },
+            { value: 'any', label: 'Match any filter' },
+          ]}
+        />
+        {rules.map((rule, index) => <div className="ov-step" key={index}>
+          <div className="ov-step-heading">
+            <Text weight="semibold">Filter {index + 1}</Text>
+            {rules.length > 1 ? <IconButton
+              size="sm"
+              variant="ghost"
+              label={`Remove filter ${index + 1}`}
+              icon={<Trash2 size={14} />}
+              onClick={() => setRules(current => current.filter((_, pos) => pos !== index))}
+            /> : null}
+          </div>
+          <div className="ov-form-grid ov-form-grid--three">
+            <Selector
+              label="Dimension"
+              value={rule.name}
+              options={segmentFilterDimensionOptions}
+              onChange={v => v && updateRule(index, { name: v })}
+            />
+            <Selector
+              label="Operator"
+              value={rule.operator}
+              options={[...segmentOperatorOptions]}
+              onChange={v => v && updateRule(index, { operator: v })}
+            />
+            <TextInput
+              label="Value"
+              placeholder={rule.name === 'path' ? '/pricing' : rule.name === 'country' ? 'GB' : 'Value'}
+              isRequired
+              value={rule.value}
+              onChange={value => updateRule(index, { value })}
+            />
+          </div>
+        </div>)}
+        {rules.length < 20 ? <div>
+          <Button
+            size="sm"
+            label="Add filter rule"
+            icon={<Plus size={14} />}
+            onClick={() => setRules(current => [...current, { name: 'path', operator: 'eq', value: '' }])}
+          />
+        </div> : null}
+      </div> : <div className="ov-stack-sm">
+        <div className="ov-form-grid ov-form-grid--three">
+          <Selector
+            label="Cohort action"
+            value={actionType}
+            options={stepTypes}
+            onChange={v => setActionType(v === 'path' ? 'path' : 'event')}
+          />
+          <TextInput
+            label="Matching value"
+            placeholder={actionType === 'path' ? '/pricing' : 'signed_up'}
+            isRequired
+            value={actionValue}
+            onChange={setActionValue}
+          />
+          <Selector
+            label="Cohort window"
+            value={dateRange}
+            options={[...cohortDateRangeOptions]}
+            onChange={v => v && setDateRange(v)}
+          />
+        </div>
+        {activeFilterRules.length ? <Switch
+          label={`Include ${activeFilterRules.length} active traffic ${activeFilterRules.length === 1 ? 'filter' : 'filters'}`}
+          value={includeActiveFilters}
+          onChange={setIncludeActiveFilters}
+        /> : null}
+      </div>}
+
+      <Text type="supporting" color="secondary">
+        Segments and cohorts group anonymous website traffic only and are separate from identified contacts.
+      </Text>
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label={kind === 'cohort' ? 'Create cohort' : 'Save segment'} isLoading={action.busy} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
+function SavedSegmentsPanel({
+  websiteId,
+  filters,
+  canEdit,
+  onApplyFilters,
+}: {
+  websiteId: string;
+  filters: ReportFilters;
+  canEdit: boolean;
+  onApplyFilters: (next: ReportFilters) => void;
+}) {
+  const segments = useResource<WebsiteSegment[]>(`${websitesPath}/${websiteId}/segments?type=segment`);
+  const cohorts = useResource<WebsiteSegment[]>(`${websitesPath}/${websiteId}/segments?type=cohort`);
+  const deleteAction = useAction();
+
+  const [view, setView] = useState<'segment' | 'cohort'>('segment');
+  const [createKind, setCreateKind] = useState<'segment' | 'cohort'>();
+  const [deleteTarget, setDeleteTarget] = useState<WebsiteSegment>();
+
+  const activeFilterCount = Object.values(filters).filter(v => Boolean(v?.trim())).length;
+  const activeResource = view === 'cohort' ? cohorts : segments;
+
+  function refreshAll() {
+    segments.refresh();
+    cohorts.refresh();
+  }
+
+  function describeSegment(item: WebsiteSegment) {
+    const parts: string[] = [];
+    if (item.action?.value) {
+      parts.push(`${item.action.type === 'event' ? 'Event' : 'Path'}: ${item.action.value}`);
+    }
+    for (const rule of item.filters) {
+      const dim = dimensionLabels[rule.name as ReportDimension] ?? rule.name;
+      const op = segmentOperatorLabels[rule.operator] ?? rule.operator;
+      parts.push(`${dim} ${op} ${rule.value}`);
+    }
+    return parts.join(' · ') || 'No filter rules recorded';
+  }
+
+  return <Panel
+    title="Saved segments & cohorts"
+    description="Reusable anonymous traffic filter presets and visitor cohorts — click any item to apply its filters"
+    action={<div className="ov-actions">
+      <SegmentedControl label="Saved segment view" size="sm" value={view} onChange={v => setView(v === 'cohort' ? 'cohort' : 'segment')}>
+        <SegmentedControlItem value="segment" label={`Segments${segments.data ? ` (${segments.data.length})` : ''}`} />
+        <SegmentedControlItem value="cohort" label={`Cohorts${cohorts.data ? ` (${cohorts.data.length})` : ''}`} />
+      </SegmentedControl>
+      <IconButton
+        size="sm"
+        label="Refresh saved segments and cohorts"
+        icon={<RefreshCw size={14} />}
+        onClick={refreshAll}
+        isLoading={segments.loading || cohorts.loading}
+      />
+      {canEdit ? <>
+        <Button
+          size="sm"
+          label={activeFilterCount ? `Save active filters (${activeFilterCount})` : 'New segment'}
+          icon={<Filter size={14} />}
+          onClick={() => setCreateKind('segment')}
+        />
+        <Button
+          size="sm"
+          label="New cohort"
+          icon={<Plus size={14} />}
+          onClick={() => setCreateKind('cohort')}
+        />
+      </> : null}
+    </div>}
+  >
+    <Feedback error={deleteAction.error} notice={deleteAction.notice} />
+    {!activeResource.data ? <AsyncState loading={activeResource.loading} error={activeResource.error} retry={activeResource.refresh} />
+      : activeResource.data.length ? <Rows>{activeResource.data.map(item => {
+        const mapped = segmentToReportFilters(item);
+        const applicable = Object.keys(mapped).length > 0;
+        const isApplied = filtersMatch(mapped, filters);
+        return <li key={item.id}>
+          <span>
+            <span className="ov-actions">
+              {applicable
+                ? <Link onClick={() => onApplyFilters(mapped)} weight={isApplied ? 'semibold' : 'medium'}>{item.name}</Link>
+                : <Text weight="medium">{item.name}</Text>}
+              {isApplied ? <StatusBadge label="Active" tone="info" /> : null}
+              {item.dateRange ? <Badge variant="neutral" label={cohortDateRangeLabels[item.dateRange] ?? item.dateRange} /> : null}
+              {item.type === 'segment' && item.match ? <Badge variant="neutral" label={item.match === 'any' ? 'Match any' : 'Match all'} /> : null}
+            </span>
+            <Text type="supporting" color="secondary">{describeSegment(item)}</Text>
+          </span>
+          <span className="ov-actions">
+            <Button
+              size="sm"
+              variant="ghost"
+              label={isApplied ? 'Applied' : 'Apply'}
+              isDisabled={!applicable || isApplied}
+              onClick={() => onApplyFilters(mapped)}
+            />
+            {canEdit ? <IconButton
+              size="sm"
+              variant="ghost"
+              label={`Delete ${item.type} ${item.name}`}
+              icon={<Trash2 size={14} />}
+              onClick={() => setDeleteTarget(item)}
+            /> : null}
+          </span>
+        </li>;
+      })}</Rows> : <Empty
+        title={view === 'cohort' ? 'No saved visitor cohorts yet' : 'No saved traffic segments yet'}
+        description={view === 'cohort'
+          ? 'Create a cohort based on a page path or custom event and rolling window.'
+          : 'Apply filters on the Traffic report and save them here for one-click reuse.'}
+      />}
+
+    {createKind && canEdit ? <WebsiteSegmentModal
+      websiteId={websiteId}
+      initialType={createKind}
+      activeFilters={filters}
+      onClose={() => setCreateKind(undefined)}
+      onDone={createdType => {
+        setCreateKind(undefined);
+        setView(createdType);
+        refreshAll();
+      }}
+    /> : null}
+
+    {deleteTarget && canEdit ? <ConfirmDialog
+      title={`Delete ${deleteTarget.type}`}
+      description={`Remove "${deleteTarget.name}" from this website? Recorded analytics events are not affected.`}
+      actionLabel={`Delete ${deleteTarget.type}`}
+      busy={deleteAction.busy}
+      onClose={() => setDeleteTarget(undefined)}
+      onConfirm={() => void deleteAction.run(async () => {
+        await api(`${websitesPath}/${websiteId}/segments/${deleteTarget.id}`, 'DELETE');
+        setDeleteTarget(undefined);
+        refreshAll();
+      }, deleteTarget.type === 'cohort' ? 'Cohort deleted.' : 'Traffic segment deleted.')}
+    /> : null}
+  </Panel>;
+}
+
+function RecentEventsPanel({
+  websiteId,
+  range,
+  filters,
+  onAddFilter,
+}: {
+  websiteId: string;
+  range: DateRange;
+  filters: ReportFilters;
+  onAddFilter: (dimension: ReportDimension, value: string) => void;
+}) {
+  const [queryInput, setQueryInput] = useState('');
+  const [search, setSearch] = useState('');
+
+  const filterSig = `${websiteId}:${range.startAt}:${range.endAt}:${JSON.stringify(filters)}:${search}`;
+  const [pageState, setPageState] = useState({ sig: filterSig, page: 1 });
+  const page = pageState.sig === filterSig ? pageState.page : 1;
+  const setPage = (next: number) => setPageState({ sig: filterSig, page: next });
+
+  const events = useResource<Page<WebsiteEventRow>>(
+    `${websitesPath}/${websiteId}/events?${rangeQuery(range, filters, {
+      page: String(page),
+      q: search || undefined,
+    })}`,
+  );
+
+  return <Panel
+    title="Recent events feed"
+    description={events.data ? `${number(events.data.total)} chronological anonymous page views and custom events` : 'Chronological page views and custom events recorded in this period'}
+    action={<IconButton size="sm" label="Refresh recent events" icon={<RefreshCw size={14} />} onClick={events.refresh} isLoading={events.loading} />}
+  >
+    <div className="ov-toolbar">
+      <form onSubmit={event => { event.preventDefault(); setSearch(queryInput.trim()); setPage(1); }}>
+        <TextInput
+          label="Search events"
+          isLabelHidden
+          type="search"
+          startIcon="search"
+          placeholder="Filter by path, event name, referrer, country…"
+          value={queryInput}
+          onChange={setQueryInput}
+          width={320}
+        />
+        <Button type="submit" label="Search" icon={<Search size={15} />} />
+        {search ? <Button variant="ghost" label="Clear" onClick={() => { setQueryInput(''); setSearch(''); setPage(1); }} /> : null}
+      </form>
+    </div>
+
+    {!events.data ? <AsyncState loading={events.loading} error={events.error} retry={events.refresh} /> : <>
+      <Table
+        data={events.data.items}
+        idKey="id"
+        hasHover
+        emptyState={<Empty title={search ? 'No events match your search' : 'No recorded events in this period'} />}
+        columns={[
+          {
+            key: 'eventType',
+            header: 'Type',
+            renderCell: row => {
+              const isEvent = Boolean(row.eventName) || row.eventType === 2;
+              return <Badge label={isEvent ? 'Event' : 'Page view'} variant={isEvent ? 'info' : 'neutral'} />;
+            },
+          },
+          {
+            key: 'urlPath',
+            header: 'Path / Event',
+            renderCell: row => row.eventName ? <span className="ov-cell">
+              <Link onClick={() => onAddFilter('event', row.eventName!)} weight="medium">{row.eventName}</Link>
+              {row.urlPath ? <Text type="supporting" color="secondary">{row.urlPath}</Text> : null}
+            </span> : <span className="ov-cell">
+              <Link onClick={() => onAddFilter('path', row.urlPath || '/')} weight="medium">{row.urlPath || '/'}</Link>
+              {row.pageTitle ? <Text type="supporting" color="secondary">{row.pageTitle}</Text> : null}
+            </span>,
+          },
+          {
+            key: 'referrerDomain',
+            header: 'Referrer',
+            renderCell: row => row.referrerDomain
+              ? <Link onClick={() => onAddFilter('referrer', row.referrerDomain!)}>{row.referrerDomain}</Link>
+              : <Text color="secondary">Direct</Text>,
+          },
+          { key: 'country', header: 'Country', renderCell: row => row.country || '—' },
+          { key: 'device', header: 'Device', renderCell: row => row.device || '—' },
+          { key: 'browser', header: 'Browser', renderCell: row => row.browser || '—' },
+          {
+            key: 'createdAt',
+            header: 'Time',
+            renderCell: row => <Timestamp value={row.createdAt} format="date_time" />,
+          },
+        ]}
+      />
+      <Pager {...events.data} onPage={setPage} />
+    </>}
+  </Panel>;
+}
+
 function TrafficTab({
   website,
   range,
   filters,
   canEdit,
   onAddFilter,
+  onApplyFilters,
   refreshRange,
 }: {
   website: Website;
@@ -569,6 +1180,7 @@ function TrafficTab({
   filters: ReportFilters;
   canEdit: boolean;
   onAddFilter: (dimension: ReportDimension, value: string) => void;
+  onApplyFilters: (next: ReportFilters) => void;
   refreshRange?: () => void;
 }) {
   const report = useResource<WebsiteReport>(`${websitesPath}/${website.id}/report?${rangeQuery(range, filters)}`);
@@ -576,8 +1188,32 @@ function TrafficTab({
   const deleteAction = useAction();
   const [chart, setChart] = useState('pageviews');
   const [breakdown, setBreakdown] = useState<BreakdownTab>('Pages');
+  const [breakdownMode, setBreakdownMode] = useState<'compact' | 'expanded'>('compact');
+  const [expandedDim, setExpandedDim] = useState<ReportDimension>('path');
   const [addNoteOpen, setAddNoteOpen] = useState(false);
   const [deleteNote, setDeleteNote] = useState<Annotation>();
+
+  const activeExpandedDim: ReportDimension = breakdown === 'Events'
+    ? 'event'
+    : breakdownGroups[breakdown].some(([key]) => key === expandedDim)
+      ? expandedDim
+      : breakdownGroups[breakdown][0][0];
+
+  const expanded = useResource<ExpandedMetricRow[]>(
+    breakdownMode === 'expanded'
+      ? `${websitesPath}/${website.id}/metrics/expanded?${rangeQuery(range, filters, { type: activeExpandedDim })}`
+      : null,
+  );
+
+  const expandedRows: ExpandedMetricTableRow[] = useMemo(
+    () => (expanded.data ?? []).map((row, idx) => ({ ...row, _id: `${row.name}-${idx}` })),
+    [expanded.data],
+  );
+
+  function handleBreakdownTabChange(next: BreakdownTab) {
+    setBreakdown(next);
+    setExpandedDim(next === 'Events' ? 'event' : breakdownGroups[next][0][0]);
+  }
 
   const current = report.data?.current;
   const previous = report.data?.previous;
@@ -616,6 +1252,13 @@ function TrafficTab({
         <Metric label="Avg. visit duration" formatted={avgDuration.formatted} hint={avgDuration.hint} />
       </div>
 
+      <SavedSegmentsPanel
+        websiteId={website.id}
+        filters={filters}
+        canEdit={canEdit}
+        onApplyFilters={onApplyFilters}
+      />
+
       <Panel
         title="Traffic"
         description="Website activity compared with the preceding period"
@@ -630,6 +1273,101 @@ function TrafficTab({
       >
         <Bars points={seriesPoints} label={seriesLabel} />
       </Panel>
+
+      <Panel
+        title="Traffic breakdown"
+        description="Click any row to add it as an active filter."
+        action={<div className="ov-actions">
+          <SegmentedControl
+            label="Breakdown mode"
+            size="sm"
+            value={breakdownMode}
+            onChange={v => setBreakdownMode(v === 'expanded' ? 'expanded' : 'compact')}
+          >
+            <SegmentedControlItem value="compact" label="Compact" />
+            <SegmentedControlItem value="expanded" label="Expanded" />
+          </SegmentedControl>
+          {breakdownMode === 'expanded' ? <IconButton
+            size="sm"
+            label="Refresh expanded metrics"
+            icon={<RefreshCw size={14} />}
+            onClick={expanded.refresh}
+            isLoading={expanded.loading}
+          /> : null}
+        </div>}
+      >
+        <Tabs label="Traffic breakdown" items={breakdownTabs} value={breakdown} onChange={handleBreakdownTabChange} />
+        {breakdownMode === 'expanded' ? <div className="ov-stack">
+          {breakdown !== 'Events' ? <div className="ov-actions">
+            <Selector
+              label="Dimension"
+              isLabelHidden
+              width={220}
+              value={activeExpandedDim}
+              onChange={value => value && setExpandedDim(value as ReportDimension)}
+              options={breakdownGroups[breakdown].map(([value, label]) => ({ value, label }))}
+            />
+          </div> : null}
+
+          {!expanded.data ? <AsyncState loading={expanded.loading} error={expanded.error} retry={expanded.refresh} />
+            : <Table
+              data={expandedRows}
+              idKey="_id"
+              hasHover
+              emptyState={<Empty title="No metrics recorded in this period" />}
+              columns={[
+                {
+                  key: 'name',
+                  header: dimensionLabels[activeExpandedDim] ?? 'Name',
+                  renderCell: row => <Link onClick={() => onAddFilter(activeExpandedDim, row.name)} weight="medium">
+                    {row.name || 'Unknown'}
+                  </Link>,
+                },
+                { key: 'visitors', header: 'Visitors', align: 'end', renderCell: row => number(row.visitors) },
+                { key: 'visits', header: 'Visits', align: 'end', renderCell: row => number(row.visits) },
+                { key: 'pageviews', header: 'Pageviews', align: 'end', renderCell: row => number(row.pageviews) },
+                {
+                  key: 'bounces',
+                  header: 'Bounce rate',
+                  align: 'end',
+                  renderCell: row => row.visits > 0 ? formatPercent(Math.min(1, row.bounces / row.visits)) : '0%',
+                },
+                {
+                  key: 'totaltime',
+                  header: 'Avg visit time',
+                  align: 'end',
+                  renderCell: row => row.visits > 0 ? duration(row.totaltime / row.visits) : '0s',
+                },
+              ]}
+            />}
+
+          {breakdown === 'Events' ? <EventPropertiesInspector websiteId={website.id} range={range} filters={filters} /> : null}
+        </div> : breakdown === 'Events' ? <div className="ov-stack">
+          <section className="ov-stack-sm">
+            <Heading level={3}>Custom events</Heading>
+            <Distribution
+              points={report.data.dimensions.event}
+              onSelect={value => onAddFilter('event', value)}
+            />
+          </section>
+          <EventPropertiesInspector websiteId={website.id} range={range} filters={filters} />
+        </div> : <div className="ov-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+          {breakdownGroups[breakdown].map(([key, title]) => <section key={key} className="ov-stack-sm">
+            <Heading level={3}>{title}</Heading>
+            <Distribution
+              points={report.data?.dimensions[key]}
+              onSelect={value => onAddFilter(key, value)}
+            />
+          </section>)}
+        </div>}
+      </Panel>
+
+      <RecentEventsPanel
+        websiteId={website.id}
+        range={range}
+        filters={filters}
+        onAddFilter={onAddFilter}
+      />
 
       <Panel
         title="Annotations"
@@ -651,28 +1389,6 @@ function TrafficTab({
               onClick={() => setDeleteNote(item)}
             /> : null}
           </li>)}</Rows> : <Text type="supporting" color="secondary">No milestones annotated in this date range.</Text>}
-      </Panel>
-
-      <Panel title="Traffic breakdown" description="Click any row to add it as an active filter.">
-        <Tabs label="Traffic breakdown" items={breakdownTabs} value={breakdown} onChange={setBreakdown} />
-        {breakdown === 'Events' ? <div className="ov-stack">
-          <section className="ov-stack-sm">
-            <Heading level={3}>Custom events</Heading>
-            <Distribution
-              points={report.data.dimensions.event}
-              onSelect={value => onAddFilter('event', value)}
-            />
-          </section>
-          <EventPropertiesInspector websiteId={website.id} range={range} filters={filters} />
-        </div> : <div className="ov-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-          {breakdownGroups[breakdown].map(([key, title]) => <section key={key} className="ov-stack-sm">
-            <Heading level={3}>{title}</Heading>
-            <Distribution
-              points={report.data?.dimensions[key]}
-              onSelect={value => onAddFilter(key, value)}
-            />
-          </section>)}
-        </div>}
       </Panel>
     </>}
 
@@ -778,6 +1494,9 @@ function SessionActivityDrawer({
   const activity = useResource<SessionActivityItem[]>(
     `${websitesPath}/${websiteId}/sessions/${session.id}/activity?${rangeQuery(range)}`,
   );
+  const properties = useResource<SessionPropertyEntry[]>(
+    `${websitesPath}/${websiteId}/sessions/${session.id}/properties`,
+  );
   const locationText = [session.city, session.region, session.country].filter(Boolean).join(', ') || 'Unknown';
   const subtitle = [session.browser, session.os, session.device].filter(Boolean).join(' · ') || 'Anonymous session';
 
@@ -791,6 +1510,18 @@ function SessionActivityDrawer({
       <MetadataListItem label="First seen"><Timestamp value={session.firstAt} format="date_time" /></MetadataListItem>
       <MetadataListItem label="Last seen"><Timestamp value={session.lastAt} format="date_time" /></MetadataListItem>
     </MetadataList>
+
+    <div className="ov-stack-sm">
+      <Heading level={3}>Session properties</Heading>
+      {!properties.data ? <AsyncState loading={properties.loading} error={properties.error} retry={properties.refresh} />
+        : properties.data.length ? <MetadataList>
+          {properties.data.map((entry, idx) => (
+            <MetadataListItem key={`${entry.propertyName}-${idx}`} label={entry.propertyName}>
+              {entry.value || '—'}
+            </MetadataListItem>
+          ))}
+        </MetadataList> : <Text type="supporting" color="secondary">No custom properties recorded for this anonymous session.</Text>}
+    </div>
 
     <div className="ov-stack-sm">
       <Heading level={3}>Chronological activity</Heading>
@@ -817,6 +1548,56 @@ function SessionActivityDrawer({
   </SlideDrawer>;
 }
 
+function SessionPropertiesPanel({ websiteId, range }: { websiteId: string; range: DateRange }) {
+  const properties = useResource<SessionPropertyStat[]>(
+    `${websitesPath}/${websiteId}/sessions/properties?${rangeQuery(range)}`,
+  );
+  const [selectedProperty, setSelectedProperty] = useState<string>();
+  const values = useResource<EventPropertyValue[]>(
+    selectedProperty
+      ? `${websitesPath}/${websiteId}/sessions/properties/values?${rangeQuery(range, undefined, { propertyName: selectedProperty })}`
+      : null,
+  );
+
+  return <Panel
+    title="Session properties"
+    description="Custom key-value attributes recorded across anonymous website sessions"
+    action={<IconButton size="sm" label="Refresh session properties" icon={<RefreshCw size={14} />} onClick={properties.refresh} isLoading={properties.loading} />}
+  >
+    {!properties.data ? <AsyncState loading={properties.loading} error={properties.error} retry={properties.refresh} />
+      : !properties.data.length ? <Empty title="No session properties recorded" description="Custom session attributes recorded by the tracking script will appear here." />
+        : <div className="ov-split">
+          <div className="ov-stack-sm">
+            <Text type="supporting" color="secondary">Select a property to inspect its top recorded values.</Text>
+            <Rows>{properties.data.slice(0, 25).map(item => {
+              const active = selectedProperty === item.propertyName;
+              return <li key={item.propertyName}>
+                <span>
+                  <Link
+                    onClick={() => setSelectedProperty(current => current === item.propertyName ? undefined : item.propertyName)}
+                    weight={active ? 'semibold' : 'medium'}
+                  >
+                    {item.propertyName}
+                  </Link>
+                </span>
+                <Badge variant={active ? 'info' : 'neutral'} label={number(item.total)} />
+              </li>;
+            })}</Rows>
+          </div>
+          <div className="ov-stack-sm">
+            {selectedProperty ? <>
+              <div className="ov-actions ov-actions--between">
+                <Text weight="semibold">{selectedProperty}</Text>
+                <Button size="sm" variant="ghost" label="Clear" onClick={() => setSelectedProperty(undefined)} />
+              </div>
+              {!values.data ? <AsyncState loading={values.loading} error={values.error} retry={values.refresh} />
+                : <Distribution points={values.data.map(entry => ({ label: entry.value || 'Empty', value: entry.total }))} />}
+            </> : <Empty title="Select a property" description="Choose a session property on the left to inspect its top values." />}
+          </div>
+        </div>}
+  </Panel>;
+}
+
 function SessionsTab({
   website,
   range,
@@ -835,6 +1616,7 @@ function SessionsTab({
   const page = pageState.sig === filterSig ? pageState.page : 1;
   const setPage = (next: number) => setPageState({ sig: filterSig, page: next });
 
+  const stats = useResource<SessionStats>(`${websitesPath}/${website.id}/sessions/stats?${rangeQuery(range, filters)}`);
   const weekly = useResource<WeeklyTraffic>(`${websitesPath}/${website.id}/sessions/weekly?${rangeQuery(range, filters)}`);
   const sessions = useResource<Page<WebsiteSession>>(
     `${websitesPath}/${website.id}/sessions?${rangeQuery(range, filters, {
@@ -850,6 +1632,15 @@ function SessionsTab({
       description="Website sessions remain anonymous and are never linked to individual contacts without established attribution."
     />
 
+    {!stats.data ? <Panel><AsyncState loading={stats.loading} error={stats.error} retry={stats.refresh} /></Panel>
+      : <div className="ov-metrics">
+        <Metric label="Pageviews" value={stats.data.pageviews} />
+        <Metric label="Visitors" value={stats.data.visitors} />
+        <Metric label="Visits" value={stats.data.visits} />
+        <Metric label="Countries" value={stats.data.countries} />
+        <Metric label="Events" value={stats.data.events} />
+      </div>}
+
     <Panel
       title="Weekly traffic heatmap"
       description="Recorded views by day of week and hour (UTC)"
@@ -858,6 +1649,8 @@ function SessionsTab({
       {!weekly.data ? <AsyncState loading={weekly.loading} error={weekly.error} retry={weekly.refresh} />
         : <WeeklyHeatmap matrix={weekly.data} />}
     </Panel>
+
+    <SessionPropertiesPanel websiteId={website.id} range={range} />
 
     <Panel
       title="Anonymous sessions"
@@ -1618,6 +2411,241 @@ function BreakdownView({ website, range, filters }: { website: Website; range: D
   </Panel>;
 }
 
+type RevenueTableRow = RevenueReport['metrics'][number] & { _id: string };
+
+function RevenueView({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
+  const [currency, setCurrency] = useState('USD');
+  const [breakdownType, setBreakdownType] = useState<RevenueMetricType>('country');
+
+  const revenue = useResource<RevenueReport>(
+    `${websitesPath}/${website.id}/revenue?${rangeQuery(range, filters, { currency, type: breakdownType })}`,
+  );
+
+  const tableRows: RevenueTableRow[] = useMemo(
+    () => (revenue.data?.metrics ?? []).map((row, idx) => ({ ...row, _id: `${row.name}-${idx}` })),
+    [revenue.data?.metrics],
+  );
+
+  const breakdownLabel = revenueBreakdownOptions.find(option => option.value === breakdownType)?.label ?? 'Dimension';
+  const stats = revenue.data?.stats;
+  const prev = revenue.data?.comparison;
+  const activeCurrency = revenue.data?.currency ?? currency;
+
+  return <div className="ov-stack">
+    <Panel
+      title="Revenue overview"
+      description="Anonymous website revenue events by currency and acquisition dimension"
+      action={<IconButton size="sm" label="Refresh revenue" icon={<RefreshCw size={14} />} onClick={revenue.refresh} isLoading={revenue.loading} />}
+    >
+      <div className="ov-form-grid">
+        <Selector
+          label="Currency"
+          value={currency}
+          options={[...currencyOptions]}
+          onChange={value => value && setCurrency(value)}
+        />
+        <Selector
+          label="Breakdown"
+          value={breakdownType}
+          options={revenueBreakdownOptions}
+          onChange={value => value && setBreakdownType(value as RevenueMetricType)}
+        />
+      </div>
+    </Panel>
+
+    {!revenue.data || !stats ? <Panel>
+      <AsyncState loading={revenue.loading} error={revenue.error} retry={revenue.refresh} />
+    </Panel> : <>
+      <div className="ov-metrics">
+        <Metric
+          label="Total revenue"
+          formatted={formatCurrency(stats.sum, activeCurrency)}
+          hint={comparison(stats.sum, prev?.sum)}
+        />
+        <Metric
+          label="Transactions"
+          value={stats.count}
+          hint={comparison(stats.count, prev?.count)}
+        />
+        <Metric
+          label="Unique buyers"
+          value={stats.uniqueCount}
+          hint={comparison(stats.uniqueCount, prev?.uniqueCount)}
+          info="Unique anonymous sessions with at least one recorded revenue event."
+        />
+        <Metric
+          label="Average value"
+          formatted={formatCurrency(stats.average, activeCurrency)}
+          hint={comparison(stats.average, prev?.average)}
+        />
+        <Metric
+          label="ARPU"
+          formatted={formatCurrency(stats.arpu, activeCurrency)}
+          hint={comparison(stats.arpu, prev?.arpu)}
+          info="Average revenue per anonymous session across this period."
+        />
+      </div>
+
+      <Panel
+        title="Revenue over time"
+        description={`Recorded revenue (${activeCurrency}) across the selected period`}
+      >
+        <Bars points={revenue.data.chart} label={`Revenue (${activeCurrency}) over time`} />
+      </Panel>
+
+      <Panel
+        title={`Top revenue by ${breakdownLabel.toLowerCase()}`}
+        description="Revenue totals and transaction counts grouped by the selected breakdown"
+      >
+        <Table
+          data={tableRows}
+          idKey="_id"
+          hasHover
+          emptyState={<Empty title="No revenue recorded in this period" description="Send currency and amount data on revenue events to populate this breakdown." />}
+          columns={[
+            {
+              key: 'name',
+              header: breakdownLabel,
+              renderCell: row => <Text weight="medium">{row.name || 'Unknown'}</Text>,
+            },
+            {
+              key: 'count',
+              header: 'Transactions',
+              align: 'end',
+              renderCell: row => number(row.count),
+            },
+            {
+              key: 'sum',
+              header: 'Revenue',
+              align: 'end',
+              renderCell: row => formatCurrency(row.sum, activeCurrency),
+            },
+            {
+              key: 'average',
+              header: 'Average value',
+              align: 'end',
+              renderCell: row => row.count > 0 ? formatCurrency(row.sum / row.count, activeCurrency) : '—',
+            },
+          ]}
+        />
+      </Panel>
+    </>}
+  </div>;
+}
+
+type PerformanceTableRow = PerformanceReport['metrics'][number] & { _id: string };
+const vitalMetricKeys: readonly PerformanceMetricKey[] = ['lcp', 'inp', 'cls', 'fcp', 'ttfb'];
+
+function PerformanceView({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
+  const [metric, setMetric] = useState<PerformanceMetricKey>('lcp');
+  const [breakdownType, setBreakdownType] = useState<PerformanceBreakdownType>('path');
+
+  const perf = useResource<PerformanceReport>(
+    `${websitesPath}/${website.id}/performance?${rangeQuery(range, filters, { metric, type: breakdownType })}`,
+  );
+
+  const tableRows: PerformanceTableRow[] = useMemo(
+    () => (perf.data?.metrics ?? []).map((row, idx) => ({ ...row, _id: `${row.name}-${idx}` })),
+    [perf.data?.metrics],
+  );
+
+  const breakdownLabel = performanceBreakdownOptions.find(option => option.value === breakdownType)?.label ?? 'Dimension';
+  const activeMetric = perf.data?.metric ?? metric;
+  const stats = perf.data?.stats;
+
+  return <div className="ov-stack">
+    <Panel
+      title="Core Web Vitals"
+      description="Real-user loading, interactivity, and visual stability metrics across anonymous page views"
+      action={<IconButton size="sm" label="Refresh performance" icon={<RefreshCw size={14} />} onClick={perf.refresh} isLoading={perf.loading} />}
+    >
+      <div className="ov-form-grid">
+        <Selector
+          label="Vital metric"
+          value={metric}
+          options={performanceMetricOptions}
+          onChange={value => value && setMetric(value as PerformanceMetricKey)}
+        />
+        <Selector
+          label="Breakdown"
+          value={breakdownType}
+          options={performanceBreakdownOptions}
+          onChange={value => value && setBreakdownType(value as PerformanceBreakdownType)}
+        />
+      </div>
+    </Panel>
+
+    {!perf.data || !stats ? <Panel>
+      <AsyncState loading={perf.loading} error={perf.error} retry={perf.refresh} />
+    </Panel> : <>
+      <div className="ov-metrics">
+        {vitalMetricKeys.map(key => {
+          const percentiles = stats[key];
+          const hasData = stats.count > 0 || percentiles.p50 > 0 || percentiles.p75 > 0 || percentiles.p95 > 0;
+          const info = performanceMetricInfo[key];
+          return <Metric
+            key={key}
+            label={`${info.short} (p75)`}
+            formatted={hasData ? formatVital(key, percentiles.p75) : '—'}
+            hint={hasData ? `p50 ${formatVital(key, percentiles.p50)} · p95 ${formatVital(key, percentiles.p95)}` : 'No samples'}
+            info={info.description}
+          />;
+        })}
+      </div>
+
+      <Panel
+        title={`${performanceMetricInfo[activeMetric].short} trend`}
+        description={`${number(stats.count)} real-user performance ${stats.count === 1 ? 'sample' : 'samples'} recorded in this period`}
+      >
+        <Bars points={perf.data.chart} label={`${performanceMetricInfo[activeMetric].short} trend over time`} />
+      </Panel>
+
+      <Panel
+        title={`${performanceMetricInfo[activeMetric].short} by ${breakdownLabel.toLowerCase()}`}
+        description="Percentile distribution (p50, p75, p95) for the selected breakdown"
+      >
+        <Table
+          data={tableRows}
+          idKey="_id"
+          hasHover
+          emptyState={<Empty title="No performance samples recorded" description="Enable Core Web Vitals reporting on your site to view page and device timings." />}
+          columns={[
+            {
+              key: 'name',
+              header: breakdownLabel,
+              renderCell: row => <Text weight="medium">{row.name || 'Unknown'}</Text>,
+            },
+            {
+              key: 'count',
+              header: 'Samples',
+              align: 'end',
+              renderCell: row => number(row.count),
+            },
+            {
+              key: 'p50',
+              header: 'p50',
+              align: 'end',
+              renderCell: row => formatVital(activeMetric, row.p50),
+            },
+            {
+              key: 'p75',
+              header: 'p75',
+              align: 'end',
+              renderCell: row => <Text weight="semibold">{formatVital(activeMetric, row.p75)}</Text>,
+            },
+            {
+              key: 'p95',
+              header: 'p95',
+              align: 'end',
+              renderCell: row => formatVital(activeMetric, row.p95),
+            },
+          ]}
+        />
+      </Panel>
+    </>}
+  </div>;
+}
+
 function InsightsTab({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
   const [subview, setSubview] = useState('journeys');
   return <div className="ov-stack">
@@ -1627,81 +2655,193 @@ function InsightsTab({ website, range, filters }: { website: Website; range: Dat
         <SegmentedControlItem value="retention" label="Retention cohorts" />
         <SegmentedControlItem value="attribution" label="Attribution" />
         <SegmentedControlItem value="breakdown" label="Breakdown" />
+        <SegmentedControlItem value="revenue" label="Revenue" />
+        <SegmentedControlItem value="performance" label="Performance" />
       </SegmentedControl>
     </div>
     {subview === 'journeys' ? <JourneysView website={website} range={range} filters={filters} /> : null}
     {subview === 'retention' ? <RetentionView website={website} range={range} filters={filters} /> : null}
     {subview === 'attribution' ? <AttributionView website={website} range={range} /> : null}
     {subview === 'breakdown' ? <BreakdownView website={website} range={range} filters={filters} /> : null}
+    {subview === 'revenue' ? <RevenueView website={website} range={range} filters={filters} /> : null}
+    {subview === 'performance' ? <PerformanceView website={website} range={range} filters={filters} /> : null}
   </div>;
 }
 
 /* ── Tab 6: Links & Pixels ─────────────────────────────────────────────────── */
 
-function CreateLinkModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function LinkModal({ link, onClose, onDone }: { link?: TrackedLink; onClose: () => void; onDone: () => void }) {
   const action = useAction();
-  const { values, field } = useFields({ name: '', url: '', slug: '' });
-  return <Modal title="Create tracked short link" onClose={onClose}>
+  const { values, field } = useFields({
+    name: link?.name ?? '',
+    url: link?.url ?? '',
+    slug: link?.slug ?? '',
+  });
+  return <Modal title={link ? 'Edit tracked short link' : 'Create tracked short link'} onClose={onClose}>
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
         const slug = values.slug.trim();
         if (slug && slug.length < 8) throw new Error('Custom slugs must be at least 8 characters, or leave blank to auto-generate.');
-        await api<TrackedLink>('/links', 'POST', {
+        await api<TrackedLink>(link ? `/links/${link.id}` : '/links', link ? 'PATCH' : 'POST', {
           name: values.name.trim(),
           url: values.url.trim(),
           ...(slug ? { slug } : {}),
         });
         onDone();
-      }, 'Tracked link created.');
+      }, link ? 'Tracked link updated.' : 'Tracked link created.');
     }}>
       <TextInput label="Link name" placeholder="Spring launch banner" isRequired {...field('name')} />
       <TextInput label="Destination URL" type="url" placeholder="https://example.com/launch" isRequired {...field('url')} />
       <TextInput
         label="Custom slug"
-        description="8–100 letters, numbers, hyphens, or underscores. Leave blank to auto-generate."
-        isOptional
+        description={link
+          ? '8–100 letters, numbers, hyphens, or underscores. Updating the slug changes the short URL.'
+          : '8–100 letters, numbers, hyphens, or underscores. Leave blank to auto-generate.'}
+        isOptional={!link}
         {...field('slug')}
       />
       <Feedback error={action.error} />
       <FormActions>
         <Button label="Cancel" onClick={onClose} />
-        <Button type="submit" variant="primary" label="Create link" isLoading={action.busy} />
+        <Button type="submit" variant="primary" label={link ? 'Save link' : 'Create link'} isLoading={action.busy} />
       </FormActions>
     </form>
   </Modal>;
 }
 
-function CreatePixelModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function PixelModal({ pixel, onClose, onDone }: { pixel?: TrackingPixel; onClose: () => void; onDone: () => void }) {
   const action = useAction();
-  const { values, field } = useFields({ name: '', slug: '' });
-  return <Modal title="Create tracking pixel" onClose={onClose}>
+  const { values, field } = useFields({
+    name: pixel?.name ?? '',
+    slug: pixel?.slug ?? '',
+  });
+  return <Modal title={pixel ? 'Edit tracking pixel' : 'Create tracking pixel'} onClose={onClose}>
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
         const slug = values.slug.trim();
         if (slug && slug.length < 8) throw new Error('Custom slugs must be at least 8 characters, or leave blank to auto-generate.');
-        await api<TrackingPixel>('/pixels', 'POST', {
+        await api<TrackingPixel>(pixel ? `/pixels/${pixel.id}` : '/pixels', pixel ? 'PATCH' : 'POST', {
           name: values.name.trim(),
           ...(slug ? { slug } : {}),
         });
         onDone();
-      }, 'Tracking pixel created.');
+      }, pixel ? 'Tracking pixel updated.' : 'Tracking pixel created.');
     }}>
       <TextInput label="Pixel name" placeholder="Partner newsletter placement" isRequired {...field('name')} />
       <TextInput
         label="Custom slug"
-        description="8–100 letters, numbers, hyphens, or underscores. Leave blank to auto-generate."
-        isOptional
+        description={pixel
+          ? '8–100 letters, numbers, hyphens, or underscores. Updating the slug changes the image URL.'
+          : '8–100 letters, numbers, hyphens, or underscores. Leave blank to auto-generate.'}
+        isOptional={!pixel}
         {...field('slug')}
       />
       <Feedback error={action.error} />
       <FormActions>
         <Button label="Cancel" onClick={onClose} />
-        <Button type="submit" variant="primary" label="Create pixel" isLoading={action.busy} />
+        <Button type="submit" variant="primary" label={pixel ? 'Save pixel' : 'Create pixel'} isLoading={action.busy} />
       </FormActions>
     </form>
   </Modal>;
+}
+
+type TrendTarget =
+  | { kind: 'link'; item: TrackedLink }
+  | { kind: 'pixel'; item: TrackingPixel };
+
+function EntityTrendDrawer({
+  target,
+  origin,
+  inBulkBatch,
+  bulkPoints,
+  bulkLoading,
+  bulkError,
+  onRefreshBulk,
+  onClose,
+}: {
+  target: TrendTarget;
+  origin: string;
+  inBulkBatch: boolean;
+  bulkPoints?: Point[];
+  bulkLoading: boolean;
+  bulkError?: string;
+  onRefreshBulk: () => void;
+  onClose: () => void;
+}) {
+  const [periodKey, setPeriodKey] = useState<'default' | '7' | '30' | '90'>('default');
+  const [customRange, setCustomRange] = useState<DateRange>();
+
+  const useSingleFetch = periodKey !== 'default' || !inBulkBatch;
+  const endpoint = target.kind === 'link' ? '/links/charts' : '/pixels/charts';
+  const query = periodKey !== 'default' && customRange
+    ? `ids=${encodeURIComponent(target.item.id)}&${rangeQuery(customRange)}`
+    : `ids=${encodeURIComponent(target.item.id)}`;
+  const singleChart = useResource<EntityChartSeries>(useSingleFetch ? `${endpoint}?${query}` : null);
+
+  const points = useSingleFetch ? singleChart.data?.[target.item.id] : bulkPoints;
+  const loading = useSingleFetch ? singleChart.loading : bulkLoading;
+  const error = useSingleFetch ? singleChart.error : bulkError;
+  const refresh = useSingleFetch ? singleChart.refresh : onRefreshBulk;
+
+  const isLink = target.kind === 'link';
+  const totalHits = sumPoints(points);
+  const trackingUrl = isLink ? `${origin}/q/${target.item.slug}` : `${origin}/p/${target.item.slug}`;
+
+  return <SlideDrawer
+    title={target.item.name}
+    subtitle={isLink ? 'Tracked short link trend' : 'Tracking pixel trend'}
+    onClose={onClose}
+    width={580}
+  >
+    <MetadataList>
+      <MetadataListItem label="Slug"><Text type="code">{target.item.slug}</Text></MetadataListItem>
+      <MetadataListItem label={isLink ? 'Short URL' : 'Beacon URL'}><Text type="code">{trackingUrl}</Text></MetadataListItem>
+      {isLink ? <MetadataListItem label="Destination URL">
+        <Link href={target.item.url} isExternalLink>{target.item.url}</Link>
+      </MetadataListItem> : null}
+      <MetadataListItem label="Created">{date(target.item.createdAt)}</MetadataListItem>
+      <MetadataListItem label={isLink ? 'Total clicks' : 'Total impressions'}>
+        {loading && points === undefined ? '…' : number(totalHits ?? 0)}
+      </MetadataListItem>
+    </MetadataList>
+
+    <div className="ov-stack-sm">
+      <div className="ov-actions ov-actions--between">
+        <Heading level={3}>{isLink ? 'Clicks over time' : 'Impressions over time'}</Heading>
+        <div className="ov-actions">
+          <SegmentedControl
+            label="Trend window"
+            size="sm"
+            value={periodKey}
+            onChange={value => {
+              if (value === '7' || value === '30' || value === '90') {
+                setPeriodKey(value);
+                setCustomRange(recent(Number(value)));
+              } else {
+                setPeriodKey('default');
+                setCustomRange(undefined);
+              }
+            }}
+          >
+            <SegmentedControlItem value="default" label="Default" />
+            <SegmentedControlItem value="7" label="7d" />
+            <SegmentedControlItem value="30" label="30d" />
+            <SegmentedControlItem value="90" label="90d" />
+          </SegmentedControl>
+          <IconButton size="sm" label="Refresh trend chart" icon={<RefreshCw size={14} />} onClick={refresh} isLoading={loading} />
+        </div>
+      </div>
+
+      {points === undefined && (loading || error)
+        ? <AsyncState loading={loading} error={error} retry={refresh} />
+        : <Bars
+          points={points ?? []}
+          label={`${target.item.name} ${isLink ? 'clicks' : 'impressions'} over time`}
+        />}
+    </div>
+  </SlideDrawer>;
 }
 
 function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trackingOrigin?: string }) {
@@ -1709,10 +2849,33 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
   const pixels = useResource<TrackingPixel[]>('/pixels');
   const action = useAction();
 
-  const [createLink, setCreateLink] = useState(false);
-  const [createPixel, setCreatePixel] = useState(false);
+  const linkBatchIds = useMemo(() => (links.data ?? []).slice(0, 20).map(item => item.id), [links.data]);
+  const pixelBatchIds = useMemo(() => (pixels.data ?? []).slice(0, 20).map(item => item.id), [pixels.data]);
+  const linkBatchSet = useMemo(() => new Set(linkBatchIds), [linkBatchIds]);
+  const pixelBatchSet = useMemo(() => new Set(pixelBatchIds), [pixelBatchIds]);
+
+  const linkCharts = useResource<EntityChartSeries>(
+    linkBatchIds.length ? `/links/charts?ids=${encodeURIComponent(linkBatchIds.join(','))}` : null,
+  );
+  const pixelCharts = useResource<EntityChartSeries>(
+    pixelBatchIds.length ? `/pixels/charts?ids=${encodeURIComponent(pixelBatchIds.join(','))}` : null,
+  );
+
+  const [editLink, setEditLink] = useState<TrackedLink | 'new'>();
+  const [editPixel, setEditPixel] = useState<TrackingPixel | 'new'>();
   const [deleteLink, setDeleteLink] = useState<TrackedLink>();
   const [deletePixel, setDeletePixel] = useState<TrackingPixel>();
+  const [trendTarget, setTrendTarget] = useState<TrendTarget>();
+
+  function refreshLinks() {
+    links.refresh();
+    linkCharts.refresh();
+  }
+
+  function refreshPixels() {
+    pixels.refresh();
+    pixelCharts.refresh();
+  }
 
   return <div className="ov-stack">
     <Feedback error={action.error} notice={action.notice} />
@@ -1721,8 +2884,8 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
         title="Tracked short links"
         description="Create redirecting campaign URLs with anonymous click measurement"
         action={<div className="ov-actions">
-          <IconButton size="sm" label="Refresh links" icon={<RefreshCw size={14} />} onClick={links.refresh} isLoading={links.loading} />
-          {canEdit ? <Button size="sm" variant="primary" label="Create link" icon={<Link2 size={14} />} onClick={() => setCreateLink(true)} /> : null}
+          <IconButton size="sm" label="Refresh links" icon={<RefreshCw size={14} />} onClick={refreshLinks} isLoading={links.loading || linkCharts.loading} />
+          {canEdit ? <Button size="sm" variant="primary" label="Create link" icon={<Link2 size={14} />} onClick={() => setEditLink('new')} /> : null}
         </div>}
       >
         {!links.data ? <AsyncState loading={links.loading} error={links.error} retry={links.refresh} />
@@ -1739,12 +2902,29 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
                 renderCell: item => <Link href={item.url} isExternalLink>{item.url}</Link>,
               },
               { key: 'slug', header: 'Slug', renderCell: item => <Text type="code">{item.slug}</Text> },
+              {
+                key: 'hits',
+                header: 'Clicks',
+                align: 'end',
+                renderCell: item => {
+                  if (!linkBatchSet.has(item.id)) return '—';
+                  if (linkCharts.loading && !linkCharts.data) return '…';
+                  return number(sumPoints(linkCharts.data?.[item.id]) ?? 0);
+                },
+              },
               { key: 'createdAt', header: 'Created', renderCell: item => date(item.createdAt) },
               {
                 key: 'id',
                 header: 'Actions',
                 align: 'end',
                 renderCell: item => <span className="ov-actions ov-actions--end">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    label="Trend"
+                    icon={<TrendingUp size={14} />}
+                    onClick={() => setTrendTarget({ kind: 'link', item })}
+                  />
                   <IconButton
                     size="sm"
                     variant="ghost"
@@ -1755,13 +2935,22 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
                       void action.run(async () => navigator.clipboard.writeText(shortUrl), 'Tracked link URL copied.');
                     }}
                   />
-                  {canEdit ? <IconButton
-                    size="sm"
-                    variant="ghost"
-                    label={`Delete link ${item.name}`}
-                    icon={<Trash2 size={14} />}
-                    onClick={() => setDeleteLink(item)}
-                  /> : null}
+                  {canEdit ? <>
+                    <IconButton
+                      size="sm"
+                      variant="ghost"
+                      label={`Edit link ${item.name}`}
+                      icon={<Pencil size={14} />}
+                      onClick={() => setEditLink(item)}
+                    />
+                    <IconButton
+                      size="sm"
+                      variant="ghost"
+                      label={`Delete link ${item.name}`}
+                      icon={<Trash2 size={14} />}
+                      onClick={() => setDeleteLink(item)}
+                    />
+                  </> : null}
                 </span>,
               },
             ]}
@@ -1772,8 +2961,8 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
         title="Tracking pixels"
         description="Lightweight image beacons for measuring impressions on external placements"
         action={<div className="ov-actions">
-          <IconButton size="sm" label="Refresh pixels" icon={<RefreshCw size={14} />} onClick={pixels.refresh} isLoading={pixels.loading} />
-          {canEdit ? <Button size="sm" variant="primary" label="Create pixel" icon={<Plus size={14} />} onClick={() => setCreatePixel(true)} /> : null}
+          <IconButton size="sm" label="Refresh pixels" icon={<RefreshCw size={14} />} onClick={refreshPixels} isLoading={pixels.loading || pixelCharts.loading} />
+          {canEdit ? <Button size="sm" variant="primary" label="Create pixel" icon={<Plus size={14} />} onClick={() => setEditPixel('new')} /> : null}
         </div>}
       >
         {!pixels.data ? <AsyncState loading={pixels.loading} error={pixels.error} retry={pixels.refresh} />
@@ -1785,12 +2974,29 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
             columns={[
               { key: 'name', header: 'Name', renderCell: item => <Text weight="medium">{item.name}</Text> },
               { key: 'slug', header: 'Slug', renderCell: item => <Text type="code">{item.slug}</Text> },
+              {
+                key: 'hits',
+                header: 'Impressions',
+                align: 'end',
+                renderCell: item => {
+                  if (!pixelBatchSet.has(item.id)) return '—';
+                  if (pixelCharts.loading && !pixelCharts.data) return '…';
+                  return number(sumPoints(pixelCharts.data?.[item.id]) ?? 0);
+                },
+              },
               { key: 'createdAt', header: 'Created', renderCell: item => date(item.createdAt) },
               {
                 key: 'id',
                 header: 'Actions',
                 align: 'end',
                 renderCell: item => <span className="ov-actions ov-actions--end">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    label="Trend"
+                    icon={<TrendingUp size={14} />}
+                    onClick={() => setTrendTarget({ kind: 'pixel', item })}
+                  />
                   <IconButton
                     size="sm"
                     variant="ghost"
@@ -1801,13 +3007,22 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
                       void action.run(async () => navigator.clipboard.writeText(tag), 'Tracking pixel HTML copied.');
                     }}
                   />
-                  {canEdit ? <IconButton
-                    size="sm"
-                    variant="ghost"
-                    label={`Delete pixel ${item.name}`}
-                    icon={<Trash2 size={14} />}
-                    onClick={() => setDeletePixel(item)}
-                  /> : null}
+                  {canEdit ? <>
+                    <IconButton
+                      size="sm"
+                      variant="ghost"
+                      label={`Edit pixel ${item.name}`}
+                      icon={<Pencil size={14} />}
+                      onClick={() => setEditPixel(item)}
+                    />
+                    <IconButton
+                      size="sm"
+                      variant="ghost"
+                      label={`Delete pixel ${item.name}`}
+                      icon={<Trash2 size={14} />}
+                      onClick={() => setDeletePixel(item)}
+                    />
+                  </> : null}
                 </span>,
               },
             ]}
@@ -1815,14 +3030,28 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
       </Panel>
     </div>
 
-    {createLink && canEdit ? <CreateLinkModal
-      onClose={() => setCreateLink(false)}
-      onDone={() => { setCreateLink(false); links.refresh(); }}
+    {editLink && canEdit ? <LinkModal
+      link={editLink === 'new' ? undefined : editLink}
+      onClose={() => setEditLink(undefined)}
+      onDone={() => { setEditLink(undefined); refreshLinks(); }}
     /> : null}
 
-    {createPixel && canEdit ? <CreatePixelModal
-      onClose={() => setCreatePixel(false)}
-      onDone={() => { setCreatePixel(false); pixels.refresh(); }}
+    {editPixel && canEdit ? <PixelModal
+      pixel={editPixel === 'new' ? undefined : editPixel}
+      onClose={() => setEditPixel(undefined)}
+      onDone={() => { setEditPixel(undefined); refreshPixels(); }}
+    /> : null}
+
+    {trendTarget ? <EntityTrendDrawer
+      key={`${trendTarget.kind}:${trendTarget.item.id}`}
+      target={trendTarget}
+      origin={resolveOrigin(trackingOrigin)}
+      inBulkBatch={trendTarget.kind === 'link' ? linkBatchSet.has(trendTarget.item.id) : pixelBatchSet.has(trendTarget.item.id)}
+      bulkPoints={trendTarget.kind === 'link' ? linkCharts.data?.[trendTarget.item.id] : pixelCharts.data?.[trendTarget.item.id]}
+      bulkLoading={trendTarget.kind === 'link' ? linkCharts.loading : pixelCharts.loading}
+      bulkError={trendTarget.kind === 'link' ? linkCharts.error : pixelCharts.error}
+      onRefreshBulk={trendTarget.kind === 'link' ? linkCharts.refresh : pixelCharts.refresh}
+      onClose={() => setTrendTarget(undefined)}
     /> : null}
 
     {deleteLink && canEdit ? <ConfirmDialog
@@ -1833,8 +3062,9 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
       onClose={() => setDeleteLink(undefined)}
       onConfirm={() => void action.run(async () => {
         await api(`/links/${deleteLink.id}`, 'DELETE');
+        if (trendTarget?.kind === 'link' && trendTarget.item.id === deleteLink.id) setTrendTarget(undefined);
         setDeleteLink(undefined);
-        links.refresh();
+        refreshLinks();
       }, 'Tracked link deleted.')}
     /> : null}
 
@@ -1846,8 +3076,9 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
       onClose={() => setDeletePixel(undefined)}
       onConfirm={() => void action.run(async () => {
         await api(`/pixels/${deletePixel.id}`, 'DELETE');
+        if (trendTarget?.kind === 'pixel' && trendTarget.item.id === deletePixel.id) setTrendTarget(undefined);
         setDeletePixel(undefined);
-        pixels.refresh();
+        refreshPixels();
       }, 'Tracking pixel deleted.')}
     /> : null}
   </div>;
@@ -1943,6 +3174,140 @@ function EmailReportsTab({ canViewCampaignDetail }: { canViewCampaignDetail: boo
   </div>;
 }
 
+/* ── Tab 8: Marketing Reports ──────────────────────────────────────────────── */
+
+type MarketingReportTableRow = Record<string, string | number | null> & { _id: string };
+
+function MarketingReportsTab() {
+  const reports = useResource<MarketingReport[]>('/reports');
+  const exportAction = useAction();
+  const [selectedId, setSelectedId] = useState('');
+
+  const activeReport = reports.data?.find(item => String(item.id) === selectedId) ?? reports.data?.[0];
+  const detail = useResource<MarketingReportData>(activeReport ? `/reports/${activeReport.id}?limit=100` : null);
+
+  const columns = useMemo(() => {
+    if (!detail.data) return [];
+    if (detail.data.columns.length) return detail.data.columns;
+    const first = detail.data.rows[0];
+    return first ? Object.keys(first) : [];
+  }, [detail.data]);
+
+  const tableRows: MarketingReportTableRow[] = useMemo(
+    () => (detail.data?.rows ?? []).map((row, idx) => ({ ...row, _id: String(idx) })),
+    [detail.data?.rows],
+  );
+
+  function refreshAll() {
+    reports.refresh();
+    detail.refresh();
+  }
+
+  function handleExportCsv() {
+    if (!activeReport || !detail.data || !columns.length) return;
+    const csv = buildCsv(columns, detail.data.rows);
+    const filename = `ovelio-report-${slugifyFilename(activeReport.name || String(activeReport.id))}.csv`;
+    void exportAction.run(async () => {
+      saveFile(csv, filename, 'text/csv;charset=utf-8');
+    }, 'Marketing report exported as CSV.');
+  }
+
+  const rowSummary = detail.data
+    ? detail.data.totalResults > detail.data.rows.length
+      ? `Showing ${number(detail.data.rows.length)} of ${number(detail.data.totalResults)} rows`
+      : `${number(detail.data.totalResults)} ${detail.data.totalResults === 1 ? 'row' : 'rows'}`
+    : undefined;
+
+  return <div className="ov-stack">
+    <Feedback error={exportAction.error} notice={exportAction.notice} />
+
+    {!reports.data ? <Panel>
+      <AsyncState loading={reports.loading} error={reports.error} retry={reports.refresh} />
+    </Panel> : !reports.data.length || !activeReport ? <Panel>
+      <Empty
+        title="No marketing reports available"
+        description="Audience, email, form, asset, and landing page reports will appear here once configured."
+      />
+    </Panel> : <>
+      <Panel
+        title="Marketing reports"
+        description="Audience, email, form, asset, and landing page performance reports"
+        action={<div className="ov-actions">
+          <IconButton
+            size="sm"
+            label="Refresh marketing reports"
+            icon={<RefreshCw size={14} />}
+            onClick={refreshAll}
+            isLoading={reports.loading || detail.loading}
+          />
+          <Button
+            size="sm"
+            label="Export CSV"
+            icon={<Download size={14} />}
+            isDisabled={!detail.data?.rows.length || !columns.length || exportAction.busy}
+            onClick={handleExportCsv}
+          />
+        </div>}
+      >
+        <div className="ov-toolbar">
+          <Selector
+            label="Select report"
+            width={360}
+            value={String(activeReport.id)}
+            onChange={value => value && setSelectedId(value)}
+            options={reports.data.map(item => ({
+              value: String(item.id),
+              label: item.name || `Report #${item.id}`,
+              description: formatReportSource(item.source),
+            }))}
+          />
+          <div className="ov-actions">
+            <Badge variant="neutral" label={formatReportSource(activeReport.source)} />
+            {activeReport.system ? <Badge variant="info" label="System report" /> : null}
+            {rowSummary ? <Text type="supporting" color="secondary">{rowSummary}</Text> : null}
+          </div>
+        </div>
+
+        {activeReport.description ? (
+          <Text type="supporting" color="secondary">{activeReport.description}</Text>
+        ) : null}
+
+        {!detail.data ? <AsyncState loading={detail.loading} error={detail.error} retry={detail.refresh} />
+          : !columns.length ? <Empty
+            title="No rows returned"
+            description="This marketing report currently has no matching records."
+          /> : <Table
+            data={tableRows}
+            idKey="_id"
+            hasHover
+            emptyState={<Empty title="No rows returned" description="This marketing report currently has no matching records." />}
+            columns={columns.map(col => {
+              const isIdentifier = /(^|_|\.)id$/i.test(col);
+              const isNumeric = !isIdentifier && detail.data!.rows.some(row => typeof row[col] === 'number');
+              return {
+                key: col,
+                header: formatColumnHeader(col),
+                align: isNumeric ? ('end' as const) : undefined,
+                renderCell: (row: MarketingReportTableRow) => {
+                  const raw = row[col];
+                  if (raw == null || raw === '') return <Text color="secondary">—</Text>;
+                  if (typeof raw === 'number') return isNumeric ? number(raw) : String(raw);
+                  return String(raw);
+                },
+              };
+            })}
+          />}
+      </Panel>
+    </>}
+
+    <Banner
+      status="info"
+      title="Audience & marketing data boundary"
+      description="Marketing reports summarize contacts, emails, forms, assets, and landing pages separately from anonymous website analytics."
+    />
+  </div>;
+}
+
 /* ── Root Analytics Workspace ──────────────────────────────────────────────── */
 
 export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: string; initialTab?: string }) {
@@ -1991,7 +3356,7 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
   return <>
     <PageHeader
       title="Analytics"
-      description="Measure website activity, live visitors, sessions, conversions and newsletter performance."
+      description="Measure website activity, live visitors, sessions, conversions, newsletters and marketing reports."
       actions={isWebsiteScoped && canEdit
         ? <Button variant="primary" icon={<Plus size={16} />} label="Add website" onClick={() => setModal('website')} />
         : undefined}
@@ -2001,70 +3366,72 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
     <Feedback error={adminAction.error} notice={adminAction.notice} />
 
     {tab === 'Email reports' ? <EmailReportsTab canViewCampaignDetail={canEdit} />
-      : tab === 'Links & Pixels' ? <LinksAndPixelsTab canEdit={canEdit} trackingOrigin={trackingOrigin} />
-        : !websites.data ? <Panel><AsyncState loading={websites.loading} error={websites.error} retry={websites.refresh} /></Panel>
-          : !website ? <Panel>
-            <Empty
-              title="No websites connected"
-              description={canEdit ? 'Add a website to view its activity and get a tracking snippet.' : 'Ask a marketer or administrator to connect a website.'}
-            />
-          </Panel> : <div className="ov-stack">
-            <div className="ov-toolbar">
-              <div className="ov-actions">
-                <Selector
-                  label="Website"
-                  isLabelHidden
-                  width={260}
-                  value={website.id}
-                  onChange={value => {
-                    setSelected(value ?? '');
-                    setFilters({});
-                  }}
-                  options={websites.data.map(item => ({ value: item.id, label: item.name, description: item.domain }))}
-                />
-                {canEdit ? <Button label="Website settings" icon={<Settings2 size={15} />} onClick={() => setModal('settings')} /> : null}
-                <Selector
-                  label="Reporting period"
-                  isLabelHidden
-                  width={190}
-                  value={period}
-                  onChange={value => {
-                    if (value === 'custom') return setModal('dates');
-                    if (value) {
-                      setPeriod(value);
-                      setRange(recent(Number(value)));
-                    }
-                  }}
-                  options={[
-                    { value: '1', label: 'Last 24 hours' },
-                    { value: '7', label: 'Last 7 days' },
-                    { value: '30', label: 'Last 30 days' },
-                    { value: '90', label: 'Last 90 days' },
-                    { value: '365', label: 'Last 365 days' },
-                    { value: 'custom', label: period === 'custom' ? `${isoDay(range.startAt)} – ${isoDay(range.endAt)}` : 'Custom dates' },
-                  ]}
-                />
-                <Button label="Dates" icon={<CalendarDays size={15} />} onClick={() => setModal('dates')} />
+      : tab === 'Marketing reports' ? <MarketingReportsTab />
+        : tab === 'Links & Pixels' ? <LinksAndPixelsTab canEdit={canEdit} trackingOrigin={trackingOrigin} />
+          : !websites.data ? <Panel><AsyncState loading={websites.loading} error={websites.error} retry={websites.refresh} /></Panel>
+            : !website ? <Panel>
+              <Empty
+                title="No websites connected"
+                description={canEdit ? 'Add a website to view its activity and get a tracking snippet.' : 'Ask a marketer or administrator to connect a website.'}
+              />
+            </Panel> : <div className="ov-stack">
+              <div className="ov-toolbar">
+                <div className="ov-actions">
+                  <Selector
+                    label="Website"
+                    isLabelHidden
+                    width={260}
+                    value={website.id}
+                    onChange={value => {
+                      setSelected(value ?? '');
+                      setFilters({});
+                    }}
+                    options={websites.data.map(item => ({ value: item.id, label: item.name, description: item.domain }))}
+                  />
+                  {canEdit ? <Button label="Website settings" icon={<Settings2 size={15} />} onClick={() => setModal('settings')} /> : null}
+                  <Selector
+                    label="Reporting period"
+                    isLabelHidden
+                    width={190}
+                    value={period}
+                    onChange={value => {
+                      if (value === 'custom') return setModal('dates');
+                      if (value) {
+                        setPeriod(value);
+                        setRange(recent(Number(value)));
+                      }
+                    }}
+                    options={[
+                      { value: '1', label: 'Last 24 hours' },
+                      { value: '7', label: 'Last 7 days' },
+                      { value: '30', label: 'Last 30 days' },
+                      { value: '90', label: 'Last 90 days' },
+                      { value: '365', label: 'Last 365 days' },
+                      { value: 'custom', label: period === 'custom' ? `${isoDay(range.startAt)} – ${isoDay(range.endAt)}` : 'Custom dates' },
+                    ]}
+                  />
+                  <Button label="Dates" icon={<CalendarDays size={15} />} onClick={() => setModal('dates')} />
+                </div>
+                {canEdit ? <Button label="Tracking code" icon={<CodeXml size={16} />} onClick={() => setModal('tracking')} /> : null}
               </div>
-              {canEdit ? <Button label="Tracking code" icon={<CodeXml size={16} />} onClick={() => setModal('tracking')} /> : null}
-            </div>
 
-            <FilterBar items={activeFilterItems} onRemove={removeFilter} onClear={() => setFilters({})} />
+              <FilterBar items={activeFilterItems} onRemove={removeFilter} onClear={() => setFilters({})} />
 
-            {tab === 'Traffic' ? <TrafficTab
-              key={`${website.id}:${siteRevision}`}
-              website={website}
-              range={range}
-              filters={filters}
-              canEdit={canEdit}
-              onAddFilter={addFilter}
-              refreshRange={refreshRange}
-            /> : null}
-            {tab === 'Realtime' ? <RealtimeTab key={`${website.id}:${siteRevision}`} website={website} /> : null}
-            {tab === 'Sessions' ? <SessionsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
-            {tab === 'Goals & Funnels' ? <GoalsAndFunnelsTab key={`${website.id}:${siteRevision}`} website={website} range={range} canEdit={canEdit} /> : null}
-            {tab === 'Insights' ? <InsightsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
-          </div>}
+              {tab === 'Traffic' ? <TrafficTab
+                key={`${website.id}:${siteRevision}`}
+                website={website}
+                range={range}
+                filters={filters}
+                canEdit={canEdit}
+                onAddFilter={addFilter}
+                onApplyFilters={setFilters}
+                refreshRange={refreshRange}
+              /> : null}
+              {tab === 'Realtime' ? <RealtimeTab key={`${website.id}:${siteRevision}`} website={website} /> : null}
+              {tab === 'Sessions' ? <SessionsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
+              {tab === 'Goals & Funnels' ? <GoalsAndFunnelsTab key={`${website.id}:${siteRevision}`} website={website} range={range} canEdit={canEdit} /> : null}
+              {tab === 'Insights' ? <InsightsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
+            </div>}
 
     {modal === 'website' && canEdit ? <WebsiteForm
       onClose={() => setModal(undefined)}

@@ -662,3 +662,197 @@ test('SMTP diagnostic test clears masked password bullets and maintenance endpoi
     error instanceof UpstreamError && error.status === 400);
 });
 
+test('campaign archive mapping normalizes archiveSlug and updateCampaignArchive toggles and refreshes campaign', async () => {
+  let state: { archive: boolean; archive_slug?: string | null } = { archive: false, archive_slug: '   ' };
+  const calls: Array<{ method: string; path: string; body: unknown }> = [];
+
+  const adapter = fakeListmonk((url, method, body) => {
+    calls.push({ method, path: url.pathname, body });
+    if (url.pathname === '/api/settings' && method === 'GET') {
+      return reply({ 'privacy.disable_tracking': false, 'bounce.enabled': true });
+    }
+    if (url.pathname === '/api/campaigns/3/archive' && method === 'PUT') {
+      const payload = body as { archive: boolean; archive_slug?: string };
+      state = {
+        archive: payload.archive,
+        archive_slug: payload.archive_slug !== undefined ? payload.archive_slug : null,
+      };
+      return reply(true);
+    }
+    if (url.pathname === '/api/campaigns/3' && method === 'GET') {
+      return reply({ ...campaign, archive: state.archive, archive_slug: state.archive_slug });
+    }
+    throw new Error(`Unexpected ${method} ${url.pathname}`);
+  });
+
+  const initial = await adapter.campaign(3);
+  assert.equal(initial.archive, false);
+  assert.equal(initial.archiveSlug, undefined);
+
+  const archived = await adapter.updateCampaignArchive(3, { archive: true, archiveSlug: 'spring-issue' });
+  assert.deepEqual(
+    calls.find((c) => c.method === 'PUT' && c.path === '/api/campaigns/3/archive')?.body,
+    { archive: true, archive_slug: 'spring-issue' },
+  );
+  assert.equal(archived.archive, true);
+  assert.equal(archived.archiveSlug, 'spring-issue');
+  assert.equal(archived.metrics.opens, 3);
+
+  const unarchived = await adapter.updateCampaignArchive(3, { archive: false });
+  const disableCall = calls.filter((c) => c.method === 'PUT' && c.path === '/api/campaigns/3/archive').at(-1);
+  assert.deepEqual(disableCall?.body, { archive: false });
+  assert.equal(Object.hasOwn(disableCall?.body as Record<string, unknown>, 'archive_slug'), false);
+  assert.equal(unarchived.archive, false);
+  assert.equal(unarchived.archiveSlug, undefined);
+
+  const clearedSlug = await adapter.updateCampaignArchive(3, { archive: true, archiveSlug: '' });
+  const emptySlugCall = calls.filter((c) => c.method === 'PUT' && c.path === '/api/campaigns/3/archive').at(-1);
+  assert.deepEqual(emptySlugCall?.body, { archive: true, archive_slug: '' });
+  assert.equal(clearedSlug.archive, true);
+  assert.equal(clearedSlug.archiveSlug, undefined);
+
+  await assert.rejects(adapter.updateCampaignArchive(0, { archive: true }), (error) =>
+    error instanceof UpstreamError && error.status === 400);
+});
+
+test('subscriberActivity fetches and defensively normalizes newsletter views and link clicks', async () => {
+  let mode: 'full' | 'null' | 'empty' | 'partial' = 'full';
+  let requests = 0;
+
+  const adapter = fakeListmonk((url, method) => {
+    requests++;
+    assert.equal(method, 'GET');
+    assert.equal(url.pathname, '/api/subscribers/42/activity');
+    if (mode === 'null') return reply(null);
+    if (mode === 'empty') return reply({ campaign_views: null, link_clicks: null });
+    if (mode === 'partial') {
+      return reply({
+        campaign_views: [
+          null,
+          { campaign_id: '15', campaign_name: '  March Issue  ', created_at: null },
+        ],
+        link_clicks: [
+          { campaign_id: 15, campaign_name: null, url: 'https://example.com/docs', created_at: '2026-03-05T08:00:00Z' },
+          null,
+        ],
+      });
+    }
+    return reply({
+      campaign_views: [
+        { campaign_id: 10, campaign_name: 'Welcome', created_at: '2026-03-01T09:00:00Z' },
+      ],
+      link_clicks: [
+        { campaign_id: 10, campaign_name: 'Welcome', url: 'https://example.com/start', created_at: '2026-03-01T09:05:00Z' },
+      ],
+    });
+  });
+
+  assert.deepEqual(await adapter.subscriberActivity(42), {
+    views: [{ campaignId: 10, campaignName: 'Welcome', at: '2026-03-01T09:00:00Z' }],
+    clicks: [{ campaignId: 10, campaignName: 'Welcome', url: 'https://example.com/start', at: '2026-03-01T09:05:00Z' }],
+  });
+
+  mode = 'null';
+  assert.deepEqual(await adapter.subscriberActivity(42), { views: [], clicks: [] });
+
+  mode = 'empty';
+  assert.deepEqual(await adapter.subscriberActivity(42), { views: [], clicks: [] });
+
+  mode = 'partial';
+  assert.deepEqual(await adapter.subscriberActivity(42), {
+    views: [{ campaignId: 15, campaignName: 'March Issue', at: '' }],
+    clicks: [{ campaignId: 15, campaignName: '', url: 'https://example.com/docs', at: '2026-03-05T08:00:00Z' }],
+  });
+
+  const beforeInvalid = requests;
+  await assert.rejects(adapter.subscriberActivity(0), (error) =>
+    error instanceof UpstreamError && error.status === 400);
+  assert.equal(requests, beforeInvalid);
+});
+
+test('subscriberBounces normalizes bounce records and deleteSubscriberBounces clears them while ignoring 404', async () => {
+  let bounceMode: 'list' | 'null' = 'list';
+  let deleteStatus = 200;
+  let requests = 0;
+
+  const adapter = fakeListmonk((url, method) => {
+    requests++;
+    assert.equal(url.pathname, '/api/subscribers/42/bounces');
+    if (method === 'GET') {
+      if (bounceMode === 'null') return reply(null);
+      return reply([
+        {
+          id: 201,
+          type: 'hard',
+          source: 'postmark',
+          campaign: { id: 7, name: 'Launch' },
+          created_at: '2026-02-10T11:30:00Z',
+        },
+        {
+          id: 202,
+          type: 'soft',
+          source: 'smtp',
+          campaign: { id: 0, name: '' },
+          created_at: null,
+        },
+        {
+          id: 203,
+          type: null,
+          source: null,
+          campaign: null,
+        },
+      ]);
+    }
+    if (method === 'DELETE') {
+      if (deleteStatus === 200) return reply(true);
+      return Response.json({ message: 'error' }, { status: deleteStatus });
+    }
+    throw new Error(`Unexpected ${method} ${url.pathname}`);
+  });
+
+  assert.deepEqual(await adapter.subscriberBounces(42), [
+    {
+      id: 201,
+      type: 'hard',
+      source: 'postmark',
+      campaignId: 7,
+      campaignName: 'Launch',
+      createdAt: '2026-02-10T11:30:00Z',
+    },
+    {
+      id: 202,
+      type: 'soft',
+      source: 'smtp',
+      campaignId: null,
+      campaignName: null,
+      createdAt: null,
+    },
+    {
+      id: 203,
+      type: 'hard',
+      source: '',
+      campaignId: null,
+      campaignName: null,
+      createdAt: null,
+    },
+  ]);
+
+  bounceMode = 'null';
+  assert.deepEqual(await adapter.subscriberBounces(42), []);
+
+  await adapter.deleteSubscriberBounces(42);
+
+  deleteStatus = 404;
+  await adapter.deleteSubscriberBounces(42);
+
+  deleteStatus = 500;
+  await assert.rejects(adapter.deleteSubscriberBounces(42), (error) =>
+    error instanceof UpstreamError && error.status === 500);
+
+  const beforeInvalid = requests;
+  await assert.rejects(adapter.subscriberBounces(-1), (error) =>
+    error instanceof UpstreamError && error.status === 400);
+  await assert.rejects(adapter.deleteSubscriberBounces(0), (error) =>
+    error instanceof UpstreamError && error.status === 400);
+  assert.equal(requests, beforeInvalid);
+});

@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import type {
-  BounceRecord, Campaign, CampaignInput, CampaignLinkStat, DateRange, Health, MailingList, MailingListInput,
-  MaintenanceResult, MediaItem, Page, Point, RunningCampaignStat, Subscriber, SubscriberInput, Template,
-  TemplateInput, TransactionalEmailInput,
+  BounceRecord, Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, DateRange, Health, MailingList,
+  MailingListInput, MaintenanceResult, MediaItem, Page, Point, RunningCampaignStat, Subscriber, SubscriberActivity,
+  SubscriberBounce, SubscriberInput, Template, TemplateInput, TransactionalEmailInput,
 } from '../../contracts';
 import { basic, upstream, upstreamResponse, UpstreamError } from '../upstream';
 
@@ -56,6 +56,7 @@ type NativeCampaign = {
   content_type?: string;
   tags?: string[] | null;
   archive?: boolean;
+  archive_slug?: string | null;
   messenger?: string;
   send_at?: string | null;
   created_at?: string | null;
@@ -99,6 +100,28 @@ type NativeBounce = {
   type?: string;
   source?: string;
   campaign?: { id?: number; name?: string } | null;
+  created_at?: string | null;
+};
+type NativeSubscriberView = {
+  campaign_id?: number | string | null;
+  campaign_name?: string | null;
+  created_at?: string | null;
+};
+type NativeSubscriberClick = {
+  campaign_id?: number | string | null;
+  campaign_name?: string | null;
+  url?: string | null;
+  created_at?: string | null;
+};
+type NativeSubscriberActivity = {
+  campaign_views?: NativeSubscriberView[] | null;
+  link_clicks?: NativeSubscriberClick[] | null;
+};
+type NativeSubscriberBounce = {
+  id?: number | string | null;
+  type?: string | null;
+  source?: string | null;
+  campaign?: { id?: number | string | null; name?: string | null } | null;
   created_at?: string | null;
 };
 type NativeSettings = Record<string, unknown> & {
@@ -222,6 +245,15 @@ function mediaFromNative(item: NativeMedia): MediaItem {
   };
 }
 
+function str(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function num(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function bounceFromNative(bounce: NativeBounce): BounceRecord {
   return {
     id: bounce.id,
@@ -231,6 +263,42 @@ function bounceFromNative(bounce: NativeBounce): BounceRecord {
     source: bounce.source ?? '',
     campaignName: bounce.campaign?.name || null,
     createdAt: bounce.created_at ?? null,
+  };
+}
+
+function subscriberActivityFromNative(raw: NativeSubscriberActivity | null | undefined): SubscriberActivity {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const views = Array.isArray(data.campaign_views)
+    ? data.campaign_views
+      .filter((item): item is NativeSubscriberView => item !== null && typeof item === 'object')
+      .map((item) => ({
+        campaignId: num(item.campaign_id),
+        campaignName: str(item.campaign_name),
+        at: str(item.created_at),
+      }))
+    : [];
+  const clicks = Array.isArray(data.link_clicks)
+    ? data.link_clicks
+      .filter((item): item is NativeSubscriberClick => item !== null && typeof item === 'object')
+      .map((item) => ({
+        campaignId: num(item.campaign_id),
+        campaignName: str(item.campaign_name),
+        url: str(item.url),
+        at: str(item.created_at),
+      }))
+    : [];
+  return { views, clicks };
+}
+
+function subscriberBounceFromNative(bounce: NativeSubscriberBounce): SubscriberBounce {
+  const parsedCampaignId = num(bounce.campaign?.id);
+  return {
+    id: num(bounce.id),
+    type: str(bounce.type) || 'hard',
+    source: str(bounce.source),
+    campaignId: parsedCampaignId > 0 ? parsedCampaignId : null,
+    campaignName: str(bounce.campaign?.name) || null,
+    createdAt: str(bounce.created_at) || null,
   };
 }
 
@@ -268,6 +336,7 @@ function campaignFromNative(campaign: NativeCampaign, settings: NativeSettings =
     contentType: normalizeContentType(campaign.content_type),
     tags: campaign.tags ?? [],
     archive: Boolean(campaign.archive),
+    archiveSlug: str(campaign.archive_slug) || undefined,
     status: campaign.status,
     sendAt: campaign.send_at ?? null,
     createdAt: campaign.created_at ?? null,
@@ -381,6 +450,11 @@ export function createListmonk(options: Options) {
 
   async function setCampaignStatus(id: number, status: 'draft' | 'running' | 'scheduled' | 'paused' | 'cancelled') {
     return request<NativeCampaign>(`/api/campaigns/${safeId(id)}/status`, 'PUT', { status });
+  }
+
+  async function getCampaign(id: number): Promise<Campaign> {
+    const [campaign, metrics] = await Promise.all([nativeCampaign(id), metricSettings()]);
+    return campaignFromNative(campaign, metrics);
   }
 
   return {
@@ -503,6 +577,30 @@ export function createListmonk(options: Options) {
       await request<boolean>(`/api/subscribers/${safeId(subscriberId)}/optin`, 'POST');
     },
 
+    async subscriberActivity(subscriberId: number): Promise<SubscriberActivity> {
+      const data = await request<NativeSubscriberActivity | null>(`/api/subscribers/${safeId(subscriberId)}/activity`);
+      return subscriberActivityFromNative(data);
+    },
+
+    async subscriberBounces(subscriberId: number): Promise<SubscriberBounce[]> {
+      const data = await request<NativeSubscriberBounce[] | NativePage<NativeSubscriberBounce> | null>(
+        `/api/subscribers/${safeId(subscriberId)}/bounces`,
+      );
+      const rows = Array.isArray(data) ? data : (Array.isArray(data?.results) ? data.results : []);
+      return rows
+        .filter((item): item is NativeSubscriberBounce => item !== null && typeof item === 'object')
+        .map(subscriberBounceFromNative);
+    },
+
+    async deleteSubscriberBounces(subscriberId: number): Promise<void> {
+      try {
+        await request<boolean>(`/api/subscribers/${safeId(subscriberId)}/bounces`, 'DELETE');
+      } catch (error) {
+        if (isStatus(error, 404)) return;
+        throw error;
+      }
+    },
+
     async ensureTestSubscriber(email: string): Promise<Subscriber> {
       const address = emailKey(email);
       const existing = await findNativeSubscriber(address);
@@ -539,8 +637,7 @@ export function createListmonk(options: Options) {
     },
 
     async campaign(id: number): Promise<Campaign> {
-      const [campaign, metrics] = await Promise.all([nativeCampaign(id), metricSettings()]);
-      return campaignFromNative(campaign, metrics);
+      return getCampaign(id);
     },
 
     async createCampaign(input: CampaignInput): Promise<Campaign> {
@@ -551,6 +648,15 @@ export function createListmonk(options: Options) {
     async updateCampaign(id: number, input: CampaignInput): Promise<Campaign> {
       const payload = await campaignPayload(input);
       return campaignFromNative(await request<NativeCampaign>(`/api/campaigns/${safeId(id)}`, 'PUT', payload));
+    },
+
+    async updateCampaignArchive(id: number, input: CampaignArchiveInput): Promise<Campaign> {
+      const campaignId = safeId(id);
+      await request<unknown>(`/api/campaigns/${campaignId}/archive`, 'PUT', {
+        archive: input.archive,
+        ...(input.archiveSlug !== undefined ? { archive_slug: input.archiveSlug } : {}),
+      });
+      return getCampaign(campaignId);
     },
 
     async deleteCampaign(id: number): Promise<void> {

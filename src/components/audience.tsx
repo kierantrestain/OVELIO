@@ -1,10 +1,11 @@
 'use client';
 
 import {
-  Ban, Download, ListFilter, MailCheck, Minus, Pencil, Plus, Search, ShieldAlert, Trash2, Upload,
+  Ban, Download, ListFilter, MailCheck, Minus, Pencil, Plus, Search, Send, ShieldAlert, Trash2, Upload,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
+import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
 import { Field } from '@astryxdesign/core/Field';
@@ -12,6 +13,7 @@ import { IconButton } from '@astryxdesign/core/IconButton';
 import { Link } from '@astryxdesign/core/Link';
 import { MetadataList, MetadataListItem } from '@astryxdesign/core/MetadataList';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
+import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
 import { Table, pixel } from '@astryxdesign/core/Table';
@@ -21,8 +23,9 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  BounceRecord, Company, Contact, ContactDetail, ContactNote, MailingList, Page,
-  PointAction, PointTrigger, Segment, SegmentFilter, Stage, SuppressionRecord, Tag, Workflow,
+  BounceRecord, Company, Contact, ContactDetail, ContactNote, CustomField, CustomFieldObject,
+  JourneyEmail, MailingList, Page, PointAction, PointTrigger, Segment, SegmentFilter, Stage,
+  SuppressionRecord, Tag, Workflow,
 } from '@/contracts';
 import { api, date, number, saveFile, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
@@ -32,7 +35,7 @@ import {
 } from './ui';
 import type { Tone } from './ui';
 
-const tabs = ['Contacts', 'Segments', 'Mailing lists', 'Tags & stages', 'Companies', 'Lead scoring', 'Suppressions'] as const;
+const tabs = ['Contacts', 'Segments', 'Mailing lists', 'Tags & stages', 'Companies', 'Lead scoring', 'Suppressions', 'Custom fields'] as const;
 type AudienceTab = typeof tabs[number];
 type ImportResult = { imported: number; failed: { row: number; message: string }[] };
 type BulkActionType = 'add_tag' | 'remove_tag' | 'add_segment' | 'adjust_points';
@@ -49,6 +52,40 @@ const pointActionPath = '/point-actions';
 const pointTriggerPath = '/point-triggers';
 const suppressionPath = '/suppressions';
 const bouncePath = '/bounces';
+const fieldPath = '/fields';
+
+const customFieldTypes = [
+  { value: 'text', label: 'Short text' },
+  { value: 'textarea', label: 'Long text' },
+  { value: 'number', label: 'Number' },
+  { value: 'boolean', label: 'Boolean (Yes / No)' },
+  { value: 'date', label: 'Date' },
+  { value: 'datetime', label: 'Date & time' },
+  { value: 'email', label: 'Email address' },
+  { value: 'url', label: 'URL' },
+  { value: 'tel', label: 'Telephone' },
+  { value: 'select', label: 'Dropdown (select)' },
+  { value: 'multiselect', label: 'Multi-select' },
+  { value: 'country', label: 'Country' },
+  { value: 'region', label: 'Region' },
+  { value: 'timezone', label: 'Timezone' },
+  { value: 'locale', label: 'Locale' },
+] as const;
+
+const customFieldGroups = [
+  { value: 'core', label: 'Core' },
+  { value: 'social', label: 'Social' },
+  { value: 'personal', label: 'Personal' },
+  { value: 'professional', label: 'Professional' },
+] as const;
+
+type CustomFieldType = typeof customFieldTypes[number]['value'];
+type CustomFieldGroup = typeof customFieldGroups[number]['value'];
+
+const fieldTypeLabels: Record<string, string> = Object.fromEntries(customFieldTypes.map(item => [item.value, item.label]));
+const fieldGroupLabels: Record<string, string> = Object.fromEntries(customFieldGroups.map(item => [item.value, item.label]));
+const validFieldGroups = new Set<string>(customFieldGroups.map(item => item.value));
+const isChoiceFieldType = (type: string) => type === 'select' || type === 'multiselect';
 
 const csvTemplate = [
   'email,first_name,last_name,company,phone,position,city,country,website,tags,consent,evidence',
@@ -143,8 +180,8 @@ function resolveTab(input?: string): AudienceTab {
   if (!input) return 'Contacts';
   const exact = tabs.find(item => item === input);
   if (exact) return exact;
-  const lower = input.trim().toLowerCase();
-  return tabs.find(item => item.toLowerCase() === lower) ?? 'Contacts';
+  const normalized = input.trim().toLowerCase().replaceAll(/[-_]+/g, ' ').replaceAll(/\s+/g, ' ');
+  return tabs.find(item => item.toLowerCase() === normalized) ?? 'Contacts';
 }
 
 function Tags({ tags, onSelect }: { tags: string[]; onSelect?: (tag: string) => void }) {
@@ -651,6 +688,319 @@ function SuppressAddressForm({ onClose, onDone }: { onClose: () => void; onDone:
   </Modal>;
 }
 
+/* ── Custom Fields & Direct Email Modals ───────────────────────────────────── */
+
+function CustomFieldForm({
+  object,
+  existing,
+  onClose,
+  onDone,
+}: {
+  object: CustomFieldObject;
+  existing?: CustomField;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const action = useAction();
+  const { values, field } = useFields({
+    label: existing?.label ?? '',
+    alias: existing?.alias ?? '',
+    defaultValue: existing?.defaultValue ?? '',
+    optionsText: (existing?.options ?? []).join(', '),
+  });
+  const [type, setType] = useState<CustomFieldType>(
+    customFieldTypes.some(item => item.value === existing?.type) ? (existing!.type as CustomFieldType) : 'text',
+  );
+  const [group, setGroup] = useState<CustomFieldGroup>(
+    existing?.group && validFieldGroups.has(existing.group) ? (existing.group as CustomFieldGroup) : 'core',
+  );
+  const [isRequired, setIsRequired] = useState(existing?.isRequired ?? false);
+  const [isPubliclyUpdatable, setIsPubliclyUpdatable] = useState(existing?.isPubliclyUpdatable ?? false);
+  const [published, setPublished] = useState(existing?.published ?? true);
+
+  const activeType = existing ? existing.type : type;
+  const needsOptions = isChoiceFieldType(activeType);
+
+  return <Modal title={existing ? `Edit ${object} field` : `Create ${object} field`} onClose={onClose} size="large">
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const cleanLabel = values.label.trim();
+        if (!cleanLabel) throw new Error('Enter a field label.');
+
+        const cleanAlias = values.alias.trim().toLowerCase();
+        if (!existing && cleanAlias && !/^[a-z][a-z0-9_]{0,59}$/.test(cleanAlias)) {
+          throw new Error('Alias must start with a lowercase letter and use only lowercase letters, numbers and underscores.');
+        }
+
+        let options: string[] | undefined;
+        if (needsOptions) {
+          options = [...new Set(values.optionsText.split(',').map(item => item.trim()).filter(Boolean))];
+          if (!options.length) throw new Error('Enter at least one option separated by commas.');
+          if (options.length > 50) throw new Error('Enter up to 50 options.');
+        }
+
+        if (existing) {
+          await api(`${fieldPath}/${object}/${existing.id}`, 'PATCH', {
+            label: cleanLabel,
+            group,
+            defaultValue: values.defaultValue.trim(),
+            isRequired,
+            isPubliclyUpdatable,
+            published,
+            ...(needsOptions ? { options } : {}),
+          });
+        } else {
+          await api(`${fieldPath}/${object}`, 'POST', {
+            label: cleanLabel,
+            ...(cleanAlias ? { alias: cleanAlias } : {}),
+            type,
+            group,
+            ...(values.defaultValue.trim() ? { defaultValue: values.defaultValue.trim() } : {}),
+            isRequired,
+            isPubliclyUpdatable,
+            published,
+            ...(needsOptions ? { options } : {}),
+          });
+        }
+        onDone();
+      });
+    }}>
+      {existing ? (
+        <Text type="supporting" color="secondary">
+          Alias: {existing.alias} · Type: {fieldTypeLabels[existing.type] ?? prettifyKey(existing.type)}
+        </Text>
+      ) : null}
+      <TextInput label="Label" isRequired {...field('label')} />
+      {!existing ? (
+        <div className="ov-form-grid">
+          <TextInput label="Alias" description="Optional. Lowercase letters, numbers and underscores." placeholder="e.g. account_tier" isOptional {...field('alias')} />
+          <Selector label="Field type" value={type}
+            options={customFieldTypes.map(item => ({ value: item.value, label: item.label }))}
+            onChange={value => setType((value as CustomFieldType) || 'text')} />
+        </div>
+      ) : null}
+      <div className="ov-form-grid">
+        <Selector label="Group" value={group}
+          options={customFieldGroups.map(item => ({ value: item.value, label: item.label }))}
+          onChange={value => setGroup((value as CustomFieldGroup) || 'core')} />
+        <TextInput label="Default value" isOptional {...field('defaultValue')} />
+      </div>
+      {needsOptions ? (
+        <TextInput label="Options" description="Separate choices with commas (up to 50 options)." placeholder="Starter, Growth, Enterprise"
+          isRequired {...field('optionsText')} />
+      ) : null}
+      <div className="ov-stack-sm">
+        <Switch label="Required" description="Require a value when creating or updating records." value={isRequired} onChange={setIsRequired} />
+        <Switch label="Publicly updatable" description="Allow tracking parameters and embedded forms to update this field." value={isPubliclyUpdatable} onChange={setIsPubliclyUpdatable} />
+        <Switch label="Published" description="Published fields are available across forms, segments and profiles." value={published} onChange={setPublished} />
+      </div>
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label={existing ? 'Save field' : 'Create field'}
+          isLoading={action.busy} isDisabled={!values.label.trim() || (needsOptions && !values.optionsText.trim())} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
+function CustomFieldsTab({
+  object,
+  onObjectChange,
+  modal,
+  onModalChange,
+  onNotice,
+}: {
+  object: CustomFieldObject;
+  onObjectChange: (next: CustomFieldObject) => void;
+  modal: 'new' | CustomField | undefined;
+  onModalChange: (next: 'new' | CustomField | undefined) => void;
+  onNotice: (message: string) => void;
+}) {
+  const fields = useResource<CustomField[]>(`${fieldPath}/${object}`);
+  const action = useAction();
+  const [filter, setFilter] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<CustomField>();
+
+  const query = filter.trim().toLowerCase();
+  const visibleFields = (fields.data ?? []).filter(item =>
+    !query
+    || item.label.toLowerCase().includes(query)
+    || item.alias.toLowerCase().includes(query)
+    || item.type.toLowerCase().includes(query)
+    || item.group.toLowerCase().includes(query),
+  );
+
+  return <>
+    <Panel
+      title={object === 'company' ? 'Company custom fields' : 'Contact custom fields'}
+      description={fields.data
+        ? `${number(fields.data.length)} ${object} field${fields.data.length === 1 ? '' : 's'} configured.`
+        : 'Define structured attributes stored on contact and company profiles.'}
+    >
+      <div className="ov-toolbar">
+        <SegmentedControl label="Field object" value={object}
+          onChange={value => {
+            onObjectChange(value === 'company' ? 'company' : 'contact');
+            setFilter('');
+          }}>
+          <SegmentedControlItem value="contact" label="Contact fields" />
+          <SegmentedControlItem value="company" label="Company fields" />
+        </SegmentedControl>
+        <TextInput label="Filter custom fields" isLabelHidden type="search" startIcon="search"
+          placeholder="Filter by label or alias" value={filter} onChange={setFilter} width={250} />
+      </div>
+      <Feedback error={action.error} />
+      {!fields.data ? <AsyncState loading={fields.loading} error={fields.error} retry={fields.refresh} />
+        : <Table data={visibleFields} idKey="id" hasHover
+          emptyState={<Empty title={query ? 'No matching fields' : `No ${object} fields yet`}
+            description={query ? undefined : `Create a custom ${object} field to store structured attributes.`}
+            action={query ? <Button label="Clear filter" onClick={() => setFilter('')} /> : undefined} />}
+          columns={[
+            {
+              key: 'label',
+              header: 'Label',
+              renderCell: item => <span className="ov-cell">
+                <Text weight="medium">{item.label}</Text>
+                {item.defaultValue ? <Text type="supporting" color="secondary">Default: {item.defaultValue}</Text>
+                  : item.options.length ? <Text type="supporting" color="secondary">{number(item.options.length)} option{item.options.length === 1 ? '' : 's'}</Text> : null}
+              </span>,
+            },
+            {
+              key: 'alias',
+              header: 'Alias',
+              renderCell: item => <Text type="supporting" color="secondary">{item.alias}</Text>,
+            },
+            {
+              key: 'type',
+              header: 'Type',
+              renderCell: item => fieldTypeLabels[item.type] ?? prettifyKey(item.type),
+            },
+            {
+              key: 'group',
+              header: 'Group',
+              renderCell: item => <StatusBadge label={fieldGroupLabels[item.group] ?? prettifyKey(item.group)} />,
+            },
+            {
+              key: 'published',
+              header: 'Status',
+              renderCell: item => <span className="ov-tags">
+                <StatusBadge label={item.published ? 'Published' : 'Draft'} tone={item.published ? 'success' : 'neutral'} />
+                {item.isRequired ? <StatusBadge label="Required" tone="warning" /> : null}
+                {item.isPubliclyUpdatable ? <StatusBadge label="Public" tone="info" /> : null}
+                {item.isFixed ? <StatusBadge label="Built-in" tone="neutral" /> : null}
+              </span>,
+            },
+            {
+              key: 'id',
+              header: 'Actions',
+              align: 'end',
+              width: pixel(180),
+              renderCell: item => <span className="ov-actions ov-actions--end">
+                <Button size="sm" variant="ghost" label="Edit" icon={<Pencil size={14} />} onClick={() => onModalChange(item)} />
+                <Button size="sm" variant="ghost" label="Delete" icon={<Trash2 size={14} />}
+                  isDisabled={item.isFixed || action.busy}
+                  tooltip={item.isFixed ? 'Built-in fields cannot be deleted.' : undefined}
+                  onClick={() => setDeleteTarget(item)} />
+              </span>,
+            },
+          ]} />}
+    </Panel>
+
+    {modal ? <CustomFieldForm
+      object={object}
+      existing={modal === 'new' ? undefined : modal}
+      onClose={() => onModalChange(undefined)}
+      onDone={() => {
+        onNotice(modal === 'new' ? 'Custom field created.' : 'Custom field updated.');
+        onModalChange(undefined);
+        fields.refresh();
+      }}
+    /> : null}
+
+    {deleteTarget ? <ConfirmDialog
+      title={`Delete custom field “${deleteTarget.label}”`}
+      description={`Remove this ${object} field permanently? Stored values for this field will no longer be accessible.`}
+      actionLabel="Delete field"
+      destructive
+      busy={action.busy}
+      onClose={() => setDeleteTarget(undefined)}
+      onConfirm={() => {
+        const target = deleteTarget;
+        void action.run(async () => {
+          try {
+            await api(`${fieldPath}/${object}/${target.id}`, 'DELETE');
+            fields.refresh();
+            onNotice('Custom field deleted.');
+          } finally {
+            setDeleteTarget(undefined);
+          }
+        });
+      }}
+    /> : null}
+  </>;
+}
+
+function SendContactEmailModal({ contact, onClose, onSent }: { contact: ContactDetail; onClose: () => void; onSent: () => void }) {
+  const emails = useResource<JourneyEmail[]>('/journey-emails');
+  const action = useAction();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const eligible = Boolean(contact.email && contact.consent === 'opted_in' && !contact.suppressed);
+  const published = (emails.data ?? []).filter(item => item.published);
+  const chosen = published.find(item => String(item.id) === selectedId);
+
+  return <Modal title={`Send email to ${fullName(contact) || contact.email || `Contact #${contact.id}`}`} onClose={onClose}>
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      if (!eligible || !selectedId) return;
+      void action.run(async () => {
+        await api(`${contactsPath}/${contact.id}/send-email`, 'POST', { emailId: Number(selectedId) });
+        onSent();
+      });
+    }}>
+      {!eligible ? (
+        <Banner
+          status="warning"
+          title="Direct email delivery is unavailable"
+          description={contact.suppressed || contact.consent === 'suppressed'
+            ? 'This contact is suppressed and cannot receive marketing emails.'
+            : !contact.email
+              ? 'Add an email address to this contact before sending.'
+              : 'Record active opt-in consent before sending email to this contact.'}
+        />
+      ) : (
+        <Text type="supporting" color="secondary">Recipient: {contact.email}</Text>
+      )}
+      {!emails.data ? <AsyncState loading={emails.loading} error={emails.error} retry={emails.refresh} />
+        : !published.length ? (
+          <Empty
+            title="No published journey emails"
+            description="Create and publish a journey email in Automations before sending direct messages."
+            action={<Link href="/automations?tab=Journey+emails">Open journey emails</Link>}
+          />
+        ) : <>
+          <Selector
+            label="Journey email"
+            placeholder="Select a published journey email"
+            value={selectedId}
+            hasClear
+            onChange={setSelectedId}
+            options={published.map(item => ({ value: String(item.id), label: item.name, description: item.subject }))}
+          />
+          {chosen ? <Text type="supporting" color="secondary">Subject: {chosen.subject}</Text> : null}
+        </>}
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label="Send email" icon={<Send size={14} />}
+          isLoading={action.busy} isDisabled={!eligible || !selectedId || !published.length} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
 /* ── Main Audience Page Component ──────────────────────────────────────────── */
 
 type ConfirmState = {
@@ -680,10 +1030,11 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const [bulkSegmentId, setBulkSegmentId] = useState<string | null>(null);
   const [bulkPoints, setBulkPoints] = useState(10);
 
-  // Companies & Bounces state
+  // Companies, Bounces & Custom Fields state
   const [companyQuery, setCompanyQuery] = useState('');
   const [companySearch, setCompanySearch] = useState('');
   const [bouncePage, setBouncePage] = useState(1);
+  const [fieldObject, setFieldObject] = useState<CustomFieldObject>('contact');
 
   // Modals
   const [contactModal, setContactModal] = useState(false);
@@ -696,6 +1047,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const [pointActionModal, setPointActionModal] = useState<'new' | PointAction>();
   const [pointTriggerModal, setPointTriggerModal] = useState<'new' | PointTrigger>();
   const [suppressModal, setSuppressModal] = useState(false);
+  const [fieldModal, setFieldModal] = useState<'new' | CustomField>();
   const [confirmState, setConfirmState] = useState<ConfirmState>();
 
   // Resources
@@ -801,6 +1153,8 @@ export function Audience({ initialTab }: { initialTab?: string }) {
         </>;
       case 'Suppressions':
         return <Button variant="primary" icon={<ShieldAlert size={15} />} label="Suppress address" onClick={() => setSuppressModal(true)} />;
+      case 'Custom fields':
+        return <Button variant="primary" icon={<Plus size={16} />} label="Create custom field" onClick={() => setFieldModal('new')} />;
     }
   })();
 
@@ -1290,6 +1644,16 @@ export function Audience({ initialTab }: { initialTab?: string }) {
       </Panel>
     </div> : null}
 
+    {tab === 'Custom fields' ? (
+      <CustomFieldsTab
+        object={fieldObject}
+        onObjectChange={setFieldObject}
+        modal={fieldModal}
+        onModalChange={setFieldModal}
+        onNotice={setNotice}
+      />
+    ) : null}
+
     {contactModal ? <ContactForm onClose={() => setContactModal(false)} onDone={contact => router.push(`/audience/${contact.id}`)} /> : null}
     {importModal ? <ImportForm onClose={() => setImportModal(false)} onImported={() => { contacts.refresh(); setNotice('Import processed.'); }} /> : null}
     {segmentModal ? <SegmentForm segment={segmentModal === 'new' ? undefined : segmentModal} onClose={() => setSegmentModal(undefined)} onDone={() => {
@@ -1368,7 +1732,7 @@ export function ContactView({ id }: { id: string }) {
   const workflows = useResource<Workflow[]>('/workflows');
   const action = useAction();
 
-  const [modal, setModal] = useState<'edit' | 'delete'>();
+  const [modal, setModal] = useState<'edit' | 'delete' | 'send-email' | 'clear-bounces'>();
   const [deleteNote, setDeleteNote] = useState<ContactNote>();
   const [notice, setNotice] = useState('');
   const [consentAction, setConsentAction] = useState<string>();
@@ -1386,6 +1750,12 @@ export function ContactView({ id }: { id: string }) {
   const availableLists = manualLists.filter(list => !subscribed.includes(list.id));
   const chosenConsent = consentAction ?? (contact?.consent === 'unknown' ? 'opted_in' : 'suppressed');
   const enrolledIds = contact?.workflowIds ?? [];
+  const linkedCompanies = contact?.linkedCompanies ?? [];
+  const devices = contact?.devices ?? [];
+  const newsletterViews = contact?.newsletterActivity?.views ?? [];
+  const newsletterClicks = contact?.newsletterActivity?.clicks ?? [];
+  const contactBounces = contact?.subscriberBounces ?? [];
+  const canSendEmail = Boolean(contact && contact.email && contact.consent === 'opted_in' && !contact.suppressed);
   const locationText = contact ? [contact.city, contact.country].filter(Boolean).join(', ') : '';
 
   function mutate(task: () => Promise<unknown>, success: string) {
@@ -1405,6 +1775,15 @@ export function ContactView({ id }: { id: string }) {
     <PageHeader back={{ href: '/audience', label: 'Audience' }} title={contact ? fullName(contact) || contact.email || 'Contact' : 'Contact'}
       description={contact?.email || 'Contact record and preferences.'}
       actions={contact ? <>
+        <Button label="Send email" icon={<Send size={15} />} isDisabled={action.busy || !canSendEmail}
+          tooltip={!contact.email
+            ? 'Add an email address before sending.'
+            : contact.suppressed || contact.consent === 'suppressed'
+              ? 'Marketing emails are blocked because this contact is suppressed.'
+              : contact.consent !== 'opted_in'
+                ? 'Record active opt-in consent before sending a direct email.'
+                : undefined}
+          onClick={() => setModal('send-email')} />
         {user.role === 'admin' ? <>
           <Button label="Export contact" icon={<Download size={15} />} isDisabled={action.busy}
             onClick={() => void action.run(async () => saveFile(JSON.stringify(await api(`${path}/export`), null, 2), `ovelio-contact-${id}.json`, 'application/json'))} />
@@ -1556,6 +1935,71 @@ export function ContactView({ id }: { id: string }) {
           })}</Rows> : <Text color="secondary">Not currently enrolled in any automations.</Text>}
           {workflows.loading && enrolledIds.length ? <AsyncState loading={workflows.loading} error={workflows.error} retry={workflows.refresh} /> : null}
         </Panel>
+
+        <Panel title="Linked companies" description="Organisations linked to this contact profile."
+          action={<Link href="/audience?tab=Companies" type="supporting">Manage companies</Link>}>
+          {linkedCompanies.length ? <Rows>{linkedCompanies.map(company => <li key={company.id}>
+            <Text weight="medium">{company.name || `Company #${company.id}`}</Text>
+            {company.isPrimary ? <StatusBadge label="Primary" tone="info" /> : <StatusBadge label="Linked" tone="neutral" />}
+          </li>)}</Rows> : <Text color="secondary">No linked companies recorded.</Text>}
+        </Panel>
+
+        <Panel title="Recorded devices" description="Devices detected from email opens and tracked site visits.">
+          {devices.length ? <Rows>{devices.map(item => {
+            const details = [item.os ? `OS: ${item.os}` : '', item.brand ? `Brand: ${item.brand}` : ''].filter(Boolean).join(' · ');
+            return <li key={item.id}>
+              <span>
+                <Text weight="medium">{item.device ? prettifyKey(item.device) : 'Unknown device'}</Text>
+                <Text type="supporting" color="secondary">{details || 'No OS or brand details'}</Text>
+              </span>
+              {item.dateAdded ? <Timestamp value={item.dateAdded} format="date_time" /> : <Text type="supporting" color="secondary">—</Text>}
+            </li>;
+          })}</Rows> : <Text color="secondary">No devices recorded yet.</Text>}
+        </Panel>
+
+        <Panel title="Newsletter engagement" description="Recent newsletter opens and link clicks for this contact.">
+          {newsletterViews.length || newsletterClicks.length ? <div className="ov-stack-sm">
+            <div className="ov-stack-sm">
+              <Text type="label" color="secondary">Opens ({number(newsletterViews.length)})</Text>
+              {newsletterViews.length ? <Rows>{newsletterViews.map((entry, index) => <li key={`view-${entry.campaignId}-${entry.at}-${index}`}>
+                <Link href={`/campaigns/${entry.campaignId}`}>{entry.campaignName || `Campaign #${entry.campaignId}`}</Link>
+                <Timestamp value={entry.at} format="date_time" />
+              </li>)}</Rows> : <Text type="supporting" color="secondary">No opens recorded.</Text>}
+            </div>
+            <div className="ov-stack-sm">
+              <Text type="label" color="secondary">Link clicks ({number(newsletterClicks.length)})</Text>
+              {newsletterClicks.length ? <Rows>{newsletterClicks.map((entry, index) => <li key={`click-${entry.campaignId}-${entry.at}-${index}`}>
+                <span>
+                  <Link href={`/campaigns/${entry.campaignId}`}>{entry.campaignName || `Campaign #${entry.campaignId}`}</Link>
+                  {isSafeHttpUrl(entry.url)
+                    ? <Link href={entry.url} isExternalLink type="supporting">{entry.url}</Link>
+                    : <Text type="supporting" color="secondary">{entry.url || '—'}</Text>}
+                </span>
+                <Timestamp value={entry.at} format="date_time" />
+              </li>)}</Rows> : <Text type="supporting" color="secondary">No link clicks recorded.</Text>}
+            </div>
+          </div> : <Text color="secondary">No newsletter opens or link clicks recorded yet.</Text>}
+        </Panel>
+
+        <Panel title="Delivery bounces" description="Bounce records reported during outbound email deliveries."
+          action={contactBounces.length ? <Button size="sm" variant="ghost" label="Clear bounces" icon={<Trash2 size={14} />}
+            isDisabled={action.busy} onClick={() => setModal('clear-bounces')} /> : undefined}>
+          {contactBounces.length ? <Rows>{contactBounces.map(bounce => {
+            const [label, tone] = bounceTone[bounce.type] ?? [prettifyKey(bounce.type || 'bounce'), 'warning'];
+            return <li key={bounce.id}>
+              <span>
+                <span className="ov-actions">
+                  <StatusBadge label={label} tone={tone} />
+                  {bounce.campaignId
+                    ? <Link href={`/campaigns/${bounce.campaignId}`}>{bounce.campaignName || `Campaign #${bounce.campaignId}`}</Link>
+                    : bounce.campaignName ? <Text weight="medium">{bounce.campaignName}</Text> : null}
+                </span>
+                {bounce.source ? <Text type="supporting" color="secondary">Source: {bounce.source}</Text> : null}
+              </span>
+              {bounce.createdAt ? <Timestamp value={bounce.createdAt} format="date_time" /> : <Text type="supporting" color="secondary">—</Text>}
+            </li>;
+          })}</Rows> : <Text color="secondary">No delivery bounces recorded.</Text>}
+        </Panel>
       </div>
 
       <Panel title="Activity">
@@ -1570,6 +2014,29 @@ export function ContactView({ id }: { id: string }) {
       setNotice('Contact updated.');
       resource.refresh();
     }} /> : null}
+
+    {modal === 'send-email' && contact ? <SendContactEmailModal contact={contact} onClose={() => setModal(undefined)} onSent={() => {
+      setModal(undefined);
+      setNotice('Email sent to contact.');
+      resource.refresh();
+    }} /> : null}
+
+    {modal === 'clear-bounces' && contact ? <ConfirmDialog
+      title="Clear delivery bounces"
+      description="Remove all recorded bounce entries for this contact? Any active email suppression remains enforced."
+      actionLabel="Clear bounces"
+      destructive
+      busy={action.busy}
+      onClose={() => setModal(undefined)}
+      onConfirm={() => void action.run(async () => {
+        try {
+          await api(`${contactsPath}/${contact.id}/bounces`, 'DELETE');
+          resource.refresh();
+        } finally {
+          setModal(undefined);
+        }
+      }, 'Delivery bounces cleared.')}
+    /> : null}
 
     {modal === 'delete' ? <ConfirmDialog
       title="Delete contact"

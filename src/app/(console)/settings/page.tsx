@@ -6,11 +6,8 @@ export const metadata = { title: 'Settings' };
 const validTabs: readonly SettingsTab[] = ['Company', 'Team', 'Connections', 'Data & privacy'];
 
 function resolveTab(tab?: string, view?: string): SettingsTab {
-  const normalized = tab?.trim().toLowerCase();
-  const match = validTabs.find(item => item.toLowerCase() === normalized);
-  if (match) return match;
-  if (view?.trim().toLowerCase() === 'connections') return 'Connections';
-  return 'Company';
+  const candidate = (tab ?? view)?.trim().toLowerCase();
+  return validTabs.find(item => item.toLowerCase() === candidate) ?? 'Company';
 }
 
 export default async function SettingsPage({

@@ -1,5 +1,5 @@
 export type Role = 'admin' | 'marketer' | 'analyst';
-export type User = { id: string; email: string; name: string; role: Role };
+export type User = { id: string; email: string; name: string; role: Role; disabled?: boolean };
 export type Health = { status: 'ready' | 'unavailable'; message?: string };
 export type DateRange = { startAt: number; endAt: number };
 export type Point = { label: string; value: number };
@@ -69,6 +69,34 @@ export type ContactNoteInput = {
   type?: 'general' | 'email' | 'call' | 'meeting';
 };
 
+export type ContactLinkedCompany = {
+  id: number;
+  name: string;
+  isPrimary: boolean;
+};
+
+export type ContactDevice = {
+  id: number;
+  device: string;
+  os: string;
+  brand: string;
+  dateAdded: string | null;
+};
+
+export type SubscriberActivity = {
+  views: { campaignId: number; campaignName: string; at: string }[];
+  clicks: { campaignId: number; campaignName: string; url: string; at: string }[];
+};
+
+export type SubscriberBounce = {
+  id: number;
+  type: 'hard' | 'soft' | 'complaint' | string;
+  source: string;
+  campaignId: number | null;
+  campaignName: string | null;
+  createdAt: string | null;
+};
+
 export type ContactDetail = Contact & {
   consent: Consent;
   consentHistory?: ConsentEvent[];
@@ -77,6 +105,10 @@ export type ContactDetail = Contact & {
   notes?: ContactNote[];
   workflowIds?: number[];
   mailingListIds?: number[];
+  linkedCompanies?: ContactLinkedCompany[];
+  devices?: ContactDevice[];
+  newsletterActivity?: SubscriberActivity;
+  subscriberBounces?: SubscriberBounce[];
 };
 
 export type SegmentFilter = {
@@ -340,6 +372,126 @@ export type WebhookInput = {
   published?: boolean;
 };
 
+export type CustomFieldObject = 'contact' | 'company';
+
+export type CustomField = {
+  id: number;
+  label: string;
+  alias: string;
+  type: string;
+  group: string;
+  object: CustomFieldObject;
+  defaultValue: string;
+  isRequired: boolean;
+  isPubliclyUpdatable: boolean;
+  isFixed: boolean;
+  published: boolean;
+  options: string[];
+};
+
+export type CustomFieldInput = {
+  label: string;
+  alias?: string;
+  type: string;
+  group?: string;
+  defaultValue?: string;
+  isRequired?: boolean;
+  isPubliclyUpdatable?: boolean;
+  published?: boolean;
+  options?: string[];
+};
+
+export type Category = {
+  id: number;
+  title: string;
+  alias: string;
+  description: string;
+  color: string;
+  bundle: string;
+  published: boolean;
+};
+
+export type CategoryInput = {
+  title: string;
+  bundle: string;
+  description?: string;
+  color?: string;
+  published?: boolean;
+};
+
+export type DynamicContent = {
+  id: number;
+  name: string;
+  slotName: string;
+  content: string;
+  isCampaignBased: boolean;
+  published: boolean;
+  sentCount: number;
+  dateAdded: string | null;
+};
+
+export type DynamicContentInput = {
+  name: string;
+  slotName: string;
+  content: string;
+  isCampaignBased?: boolean;
+  published?: boolean;
+};
+
+export type FocusItem = {
+  id: number;
+  name: string;
+  description: string;
+  type: 'form' | 'notice' | 'link' | string;
+  style: 'bar' | 'modal' | 'notification' | 'page' | string;
+  headline: string;
+  tagline: string;
+  linkText: string;
+  linkUrl: string;
+  formId: number | null;
+  primaryColor: string;
+  textColor: string;
+  buttonColor: string;
+  buttonTextColor: string;
+  when: 'immediately' | 'scroll_slight' | 'scroll_middle' | 'scroll_bottom' | 'leave' | string;
+  published: boolean;
+  embedScript: string;
+};
+
+export type FocusItemInput = {
+  name: string;
+  description?: string;
+  type: 'form' | 'notice' | 'link';
+  style: 'bar' | 'modal' | 'notification' | 'page';
+  headline?: string;
+  tagline?: string;
+  linkText?: string;
+  linkUrl?: string;
+  formId?: number | null;
+  primaryColor?: string;
+  textColor?: string;
+  buttonColor?: string;
+  buttonTextColor?: string;
+  when?: 'immediately' | 'scroll_slight' | 'scroll_middle' | 'scroll_bottom' | 'leave';
+  published?: boolean;
+};
+
+export type MarketingReport = {
+  id: number;
+  name: string;
+  description: string;
+  source: string;
+  columns: string[];
+  system: boolean;
+};
+
+export type MarketingReportData = {
+  report: MarketingReport;
+  totalResults: number;
+  columns: string[];
+  rows: Record<string, string | number | null>[];
+};
+
 /* ── Newsletters, Lists, Templates, Media & Bounces (Listmonk) ─────────────── */
 
 export type MailingList = {
@@ -413,12 +565,18 @@ export type CampaignInput = {
   archive?: boolean;
 };
 
+export type CampaignArchiveInput = {
+  archive: boolean;
+  archiveSlug?: string;
+};
+
 export type Campaign = CampaignInput & {
   id: number;
   status: string;
   sendAt: string | null;
   createdAt: string | null;
   toSend?: number | null;
+  archiveSlug?: string;
   metrics: CampaignMetrics;
 };
 
@@ -646,6 +804,140 @@ export type TrackingPixel = {
 export type TrackingPixelInput = {
   name: string;
   slug?: string;
+};
+
+export type TrackedLinkUpdateInput = {
+  name?: string;
+  url?: string;
+  slug?: string;
+};
+
+export type TrackingPixelUpdateInput = {
+  name?: string;
+  slug?: string;
+};
+
+export type EntityChartSeries = Record<string, Point[]>;
+
+export type WebsiteSegmentFilter = {
+  name: string;
+  operator: string;
+  value: string;
+};
+
+export type WebsiteSegment = {
+  id: string;
+  name: string;
+  type: 'segment' | 'cohort';
+  filters: WebsiteSegmentFilter[];
+  match?: 'all' | 'any';
+  dateRange?: string;
+  action?: { type: 'path' | 'event'; value: string };
+  createdAt: string | null;
+};
+
+export type WebsiteSegmentInput = {
+  name: string;
+  type: 'segment' | 'cohort';
+  filters?: WebsiteSegmentFilter[];
+  match?: 'all' | 'any';
+  dateRange?: string;
+  action?: { type: 'path' | 'event'; value: string };
+};
+
+export type RevenueStats = {
+  sum: number;
+  count: number;
+  uniqueCount: number;
+  totalSessions: number;
+  average: number;
+  arpu: number;
+};
+
+export type RevenueMetricType = 'country' | 'region' | 'referrer' | 'channel';
+
+export type RevenueMetricRow = {
+  name: string;
+  sum: number;
+  count: number;
+};
+
+export type RevenueReport = {
+  currency: string;
+  stats: RevenueStats;
+  comparison: RevenueStats | null;
+  chart: Point[];
+  metrics: RevenueMetricRow[];
+};
+
+export type PerformanceMetricKey = 'lcp' | 'inp' | 'cls' | 'fcp' | 'ttfb';
+export type PerformanceBreakdownType = 'path' | 'title' | 'device' | 'browser';
+export type PerformancePercentiles = { p50: number; p75: number; p95: number };
+
+export type PerformanceStats = {
+  lcp: PerformancePercentiles;
+  inp: PerformancePercentiles;
+  cls: PerformancePercentiles;
+  fcp: PerformancePercentiles;
+  ttfb: PerformancePercentiles;
+  count: number;
+};
+
+export type PerformanceMetricRow = {
+  name: string;
+  count: number;
+  p50: number;
+  p75: number;
+  p95: number;
+};
+
+export type PerformanceReport = {
+  metric: PerformanceMetricKey;
+  stats: PerformanceStats;
+  chart: Point[];
+  metrics: PerformanceMetricRow[];
+};
+
+export type ExpandedMetricRow = {
+  name: string;
+  pageviews: number;
+  visitors: number;
+  visits: number;
+  bounces: number;
+  totaltime: number;
+};
+
+export type WebsiteEventRow = {
+  id: string;
+  sessionId: string;
+  urlPath: string;
+  pageTitle: string | null;
+  eventName: string | null;
+  eventType: number;
+  referrerDomain: string | null;
+  country: string | null;
+  device: string | null;
+  browser: string | null;
+  createdAt: string;
+};
+
+export type SessionStats = {
+  pageviews: number;
+  visitors: number;
+  visits: number;
+  countries: number;
+  events: number;
+};
+
+export type SessionPropertyStat = {
+  propertyName: string;
+  total: number;
+};
+
+export type SessionPropertyEntry = {
+  propertyName: string;
+  value: string;
+  dataType: number;
 };
 
 /* ── Unified Dashboard & Settings ──────────────────────────────────────────── */
