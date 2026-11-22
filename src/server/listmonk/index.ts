@@ -265,13 +265,6 @@ export function createListmonk(options: Options) {
       }));
     },
 
-    async subscribers(options: Pagination = {}): Promise<Page<Subscriber>> {
-      const query = withPagination(options);
-      query.set('order', 'ASC');
-      const page = await request<NativePage<NativeSubscriber>>(`/api/subscribers?${query}`);
-      return mappedPage(page, options, subscriberFromNative);
-    },
-
     async subscriber(id: number): Promise<Subscriber | null> {
       try {
         return subscriberFromNative(await nativeSubscriber(id));
@@ -374,6 +367,15 @@ export function createListmonk(options: Options) {
         request<NativePage<NativeCampaign>>(`/api/campaigns?${query}`), metricSettings(),
       ]);
       return mappedPage(data, options, (campaign) => campaignFromNative(campaign, metrics));
+    },
+
+    /** Removes the untouched sample draft that a fresh newsletter-engine install seeds. Idempotent. */
+    async removeInstallSample(): Promise<boolean> {
+      const data = await request<NativePage<NativeCampaign>>('/api/campaigns?status=draft&per_page=50');
+      const sample = data.results?.find(item => item.name === 'Test campaign' && /^Welcome to listmonk$/i.test(item.subject));
+      if (!sample) return false;
+      await request(`/api/campaigns/${safeId(sample.id)}`, 'DELETE');
+      return true;
     },
 
     async campaign(id: number): Promise<Campaign> {

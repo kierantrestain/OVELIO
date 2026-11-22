@@ -28,11 +28,6 @@ const stepSchema = z.object({ type: z.enum(['event', 'path']), value: z.string()
 const funnelSchema = stepSchema.extend({ visitors: count }).array();
 const goalSchema = z.object({ id: uid, name: z.string(), parameters: stepSchema });
 const goalStatsSchema = z.object({ num: count, total: count });
-const savedFunnelSchema = z.object({
-  id: uid,
-  name: z.string(),
-  parameters: z.object({ window: z.number().positive(), steps: stepSchema.array().min(2).max(8) }),
-});
 const loginSchema = z.object({ token: z.string().min(1) });
 const service = 'tracking';
 const pageSize = 100;
@@ -61,7 +56,6 @@ const funnelInput = z.object({
   windowMinutes: z.number().int().min(1).max(10_080),
 });
 
-export type SavedFunnel = { id: string; name: string; steps: FunnelStep[]; windowMinutes: number };
 export type WebsiteInput = z.input<typeof websiteInput>;
 
 type UmamiConfig = {
@@ -98,15 +92,6 @@ function mapSeries(rows: { x: string; y: number }[]): Point[] {
 
 function mapGoal(goal: z.output<typeof goalSchema>): Goal {
   return { id: goal.id, name: goal.name, ...goal.parameters };
-}
-
-function mapFunnel(funnel: z.output<typeof savedFunnelSchema>): SavedFunnel {
-  return {
-    id: funnel.id,
-    name: funnel.name,
-    steps: funnel.parameters.steps,
-    windowMinutes: funnel.parameters.window,
-  };
 }
 
 function validated<T>(schema: z.ZodType<T>, data: unknown): T {
@@ -253,13 +238,6 @@ export function createUmami(config: UmamiConfig) {
       }));
     },
 
-    async updateWebsite(id: string, input: WebsiteInput): Promise<Website> {
-      return validated(websiteSchema, await authorized(websitePath(id), {
-        method: 'POST',
-        body: JSON.stringify(websiteInput.parse(input)),
-      }));
-    },
-
     async report(id: string, range: DateRange, dimensions = reportDimensions): Promise<WebsiteReport> {
       const path = websitePath(id);
       const query = queryRange(range);
@@ -295,19 +273,6 @@ export function createUmami(config: UmamiConfig) {
         window: String(input.windowMinutes),
       });
       return validated(funnelSchema, result).map(({ value, visitors }) => ({ label: value, visitors }));
-    },
-
-    async funnels(id: string): Promise<SavedFunnel[]> {
-      return (await allPages(`${websitePath(id)}/funnels`, savedFunnelSchema)).map(mapFunnel);
-    },
-
-    async createFunnel(id: string, input: z.input<typeof funnelInput>): Promise<SavedFunnel> {
-      const { name, steps, windowMinutes } = funnelInput.parse(input);
-      const result = await authorized(`${websitePath(id)}/funnels`, {
-        method: 'POST',
-        body: JSON.stringify({ name, parameters: { window: windowMinutes, steps } }),
-      });
-      return mapFunnel(validated(savedFunnelSchema, result));
     },
 
     async goals(id: string): Promise<Goal[]> {

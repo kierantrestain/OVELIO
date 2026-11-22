@@ -1,35 +1,36 @@
 'use client';
 
-import { ArrowRight } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { request, useAction } from './client';
+import { Button } from '@astryxdesign/core/Button';
+import { Heading } from '@astryxdesign/core/Heading';
+import { Text } from '@astryxdesign/core/Text';
+import { TextInput } from '@astryxdesign/core/TextInput';
+import { request, useAction, useFields } from './client';
 import { Brand } from './shell';
-import { Button, Feedback, Field } from './ui';
+import { Feedback } from './ui';
 
 export function LoginForm() {
   const router = useRouter();
   const { run, busy, error } = useAction();
-  return <main className="login-page">
-    <section className="login-card">
+  const { values, field } = useFields({ email: '', password: '' });
+  return <main className="ov-login">
+    <section className="ov-login-form">
       <Brand />
-      <div className="login-heading"><h1>Sign in</h1><p>Access your OVELIO workspace.</p></div>
-      <form className="form-stack" onSubmit={event => {
+      <div className="ov-stack-sm"><Heading level={1}>Sign in</Heading><Text color="secondary">Access your OVELIO workspace.</Text></div>
+      <form onSubmit={event => {
         event.preventDefault();
-        const values = Object.fromEntries(new FormData(event.currentTarget));
         void run(async () => {
           await request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(values) });
           router.replace('/overview');
           router.refresh();
         });
       }}>
-        <Field label="Email address"><input type="email" name="email" autoComplete="username" required maxLength={254} /></Field>
-        <Field label="Password"><input type="password" name="password" autoComplete="current-password" required maxLength={128} /></Field>
+        <TextInput label="Email address" type="email" autoComplete="username" isRequired hasAutoFocus {...field('email')} />
+        <TextInput label="Password" type="password" autoComplete="current-password" isRequired {...field('password')} />
         <Feedback error={error} />
-        <Button type="submit" variant="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'} <ArrowRight size={17} /></Button>
+        <Button type="submit" variant="primary" label="Sign in" isLoading={busy} isDisabled={!values.email || !values.password} />
       </form>
     </section>
-    <div className="login-art"><span className="login-orbit login-orbit--one" /><span className="login-orbit login-orbit--two" />
-      <span className="login-orbit login-orbit--three" /><div><p>Marketing.<br />Connected.</p></div>
-    </div>
+    <div className="ov-login-art" aria-hidden="true"><p>Marketing.<br />Connected.</p></div>
   </main>;
 }

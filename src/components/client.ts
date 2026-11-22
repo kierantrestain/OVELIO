@@ -77,3 +77,24 @@ export const date = (value: string | number | null | undefined) => value == null
   dateStyle: 'medium',
   timeStyle: typeof value === 'string' && value.includes('T') ? 'short' : undefined,
 }).format(new Date(value));
+
+/** Controlled form state for Astryx inputs: `field('name')` spreads `value` and `onChange`. */
+export function useFields<T extends Record<string, string>>(initial: T) {
+  const [values, setValues] = useState(initial);
+  const field = (name: keyof T & string) => ({
+    value: values[name],
+    onChange: (value: string) => setValues(current => ({ ...current, [name]: value })),
+  });
+  return { values, setValues, field };
+}
+
+
+/** Offers generated content to the browser as a download. */
+export function saveFile(content: string, filename: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

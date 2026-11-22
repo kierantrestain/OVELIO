@@ -324,7 +324,7 @@ services:
     volumes: [umami-data:/var/lib/postgresql/data]
 
   umami:
-    image: ghcr.io/umami-software/umami:3.5.0
+    image: umamisoftware/umami:3.5.0
     init: true
     restart: unless-stopped
     environment:

@@ -23,6 +23,17 @@ OVELIO_PORT=3101 MAILPIT_PORT=8026 sh deploy/init-env.sh .env.client2
 docker compose --env-file .env.client2 -p ovelio-client2 up -d --wait --wait-timeout 420
 ```
 
+## Architecture
+
+| Layer | Responsibility |
+| --- | --- |
+| OVELIO console (Next.js, TypeScript) | Sign-in, roles, navigation and every screen. Built on the [Astryx](https://github.com/meta/astryx) design system with OVELIO's own colour tokens. |
+| OVELIO API (`/api/console/*`) | One authenticated gateway with typed adapters in `src/server/{mautic,listmonk,umami}`. Engine credentials stay server-side. |
+| Worker and SMTP policy | Retried, idempotent jobs for contact and segment sync, suppression and erasure; a consent and suppression check before every relayed email. |
+| Engines | Mautic holds contacts, segments, forms and journeys. Listmonk delivers newsletters. Umami records website traffic. Each keeps its own database on an isolated network. |
+
+Interface code lives in `src/components`: `ui.tsx` is the shared OVELIO kit over Astryx (panels, metrics, charts, dialogs, feedback), `shell.tsx` is the application frame, and each section has one file. Contracts shared by the console and the API are in `src/contracts`.
+
 ## First workflows
 
 1. Import an Audience CSV with `email`, `first_name`, `last_name`, `company`, `tags` and `consent`. Only `email` is required. Use `opted_in` and record where and when permission was obtained for recipients who have given it.
@@ -90,4 +101,11 @@ npm run test:integration
 npm run test:e2e
 ```
 
-The integration and browser suites require the local Compose stack and use synthetic addresses. CI also checks restart persistence, a second installation, and a restore into a fresh project. See [Third-party notices](NOTICE.md) before redistributing OVELIO.
+The integration and browser suites require the local Compose stack and use synthetic addresses. Set `OVELIO_TEST_CHROMIUM` to use an existing Chromium binary instead of installing one. CI also checks restart persistence, a second installation, and a restore into a fresh project. See [Third-party notices](NOTICE.md) before redistributing OVELIO.
+
+## Known limitations
+
+- Delivery confirmation depends on the SMTP provider. Relay acceptance is recorded, but delivered, bounce and complaint counts appear only when the provider forwards authenticated feedback to `POST /api/delivery/suppress`.
+- Workflows use a step-based editor over Mautic campaigns: a trigger segment, email steps, delays and open or click conditions. Branching canvases and other Mautic decision types remain available only in the engine.
+- Website visitors stay anonymous. Email and website reports are shown side by side, and visits are attributed to campaigns only through UTM parameters.
+- Each client runs as a separate Compose project with its own credentials and volumes. There is no shared multi-tenant control plane.

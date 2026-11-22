@@ -43,7 +43,7 @@ async function saveState(contact: Contact, client: PoolClient) {
   return result.rows[0];
 }
 
-export function nativeSuppressed(subscriber: Subscriber | null) {
+function nativeSuppressed(subscriber: Subscriber | null) {
   return Boolean(subscriber?.blocked || subscriber?.lists.some(list => list.status === 'unsubscribed'));
 }
 

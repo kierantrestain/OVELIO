@@ -152,3 +152,26 @@ test('delivery bootstrap preserves masked secrets and avoids rewriting applied s
   assert.deepEqual(await adapter.configureDelivery(input), { changed: false, needsRestart: false });
   assert.equal(writes, 1);
 });
+
+test('install sample cleanup deletes only the untouched seeded draft', async () => {
+  const deleted: string[] = [];
+  const adapter = fakeListmonk((url, method) => {
+    if (method === 'DELETE') {
+      deleted.push(url.pathname);
+      return reply(true);
+    }
+    assert.equal(url.searchParams.get('status'), 'draft');
+    return reply({ total: 2, results: [
+      { ...campaign, id: 1, name: 'Test campaign', subject: 'Welcome to listmonk' },
+      { ...campaign, id: 9, name: 'Test campaign', subject: 'Our real launch' },
+    ] });
+  });
+  assert.equal(await adapter.removeInstallSample(), true);
+  assert.deepEqual(deleted, ['/api/campaigns/1']);
+
+  const untouched = fakeListmonk((_url, method) => {
+    assert.equal(method, 'GET');
+    return reply({ total: 1, results: [{ ...campaign, name: 'Welcome series', subject: 'Welcome to listmonk' }] });
+  });
+  assert.equal(await untouched.removeInstallSample(), false);
+});
