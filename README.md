@@ -54,6 +54,8 @@ Set `OVELIO_HOST` to your DNS name and `APP_ORIGIN` to its HTTPS origin. Keep DN
 | `SMTP_RELAY_USERNAME`, `SMTP_RELAY_PASSWORD` | Provider SMTP credentials |
 | `SMTP_DKIM_SELECTOR` | Provider's DKIM selector for the Settings DNS check |
 | `SMTP_VERIFIED_DOMAIN` | From domain after the provider has confirmed verification |
+| `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` | Optional Auth0 OIDC login (set Allowed Callback URL to `<APP_ORIGIN>/api/auth/auth0/callback` and Allowed Logout URL to `<APP_ORIGIN>/login`) |
+| `AUTH0_AUTO_PROVISION`, `AUTH0_DEFAULT_ROLE` | Optional (`true` to auto-create new Auth0 users with role `analyst`, `marketer` or `admin`; first user in an empty workspace becomes `admin`) |
 
 ```sh
 docker compose -f compose.yaml -f compose.production.yaml build app

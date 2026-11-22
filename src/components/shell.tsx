@@ -9,6 +9,7 @@ import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { AppShell } from '@astryxdesign/core/AppShell';
 import { Avatar } from '@astryxdesign/core/Avatar';
+import { Banner } from '@astryxdesign/core/Banner';
 import { BreadcrumbItem, Breadcrumbs } from '@astryxdesign/core/Breadcrumbs';
 import { CommandPalette } from '@astryxdesign/core/CommandPalette';
 import { IconButton } from '@astryxdesign/core/IconButton';
@@ -87,8 +88,8 @@ const commandDefinitions: CommandEntry[] = [
   { id: 'go-data-privacy', label: 'Settings — Data & privacy', auxiliaryData: { href: '/settings?view=data+%26+privacy', group: 'Settings', aliases: ['privacy', 'gdpr', 'backup', 'maintenance', 'export', 'licences'], role: 'admin' } },
 ];
 
-export function Shell({ user, workspace, children }: {
-  user: User; workspace: Pick<CompanySettings, 'name' | 'accent'>; children: ReactNode;
+export function Shell({ user, workspace, devPreview = false, children }: {
+  user: User; workspace: Pick<CompanySettings, 'name' | 'accent'>; devPreview?: boolean; children: ReactNode;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -131,7 +132,11 @@ export function Shell({ user, workspace, children }: {
     topContent={workspace.name !== 'OVELIO' ? <Text type="supporting" color="secondary">{workspace.name}</Text> : undefined}
     footer={<div className="ov-stack-sm">
       <SideNavItem label="Sign out" icon={LogOut} isDisabled={logout.busy} onClick={() => void logout.run(async () => {
-        await request('/api/auth/logout', { method: 'POST' });
+        const result = await request<{ ok: boolean; logoutUrl?: string }>('/api/auth/logout', { method: 'POST' });
+        if (result?.logoutUrl) {
+          window.location.assign(result.logoutUrl);
+          return;
+        }
         router.replace('/login');
         router.refresh();
       })} />
@@ -164,6 +169,11 @@ export function Shell({ user, workspace, children }: {
     <div style={accent}>
       <AppShell sideNav={sideNav} topNav={topNav} variant="elevated">
         <div className="ov-page">
+          {devPreview ? <Banner
+            status="info"
+            title="Developer preview mode"
+            description="Exploring interactive sample data without connected backend services. Run OVELIO with Docker Compose to connect live audience, email, and analytics engines."
+          /> : null}
           {section && ranks[user.role] < ranks[section.role]
             ? <Panel><Empty title="Your role cannot access this section" action={<Link href="/overview">Return to Overview</Link>} /></Panel>
             : children}

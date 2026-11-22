@@ -15,6 +15,7 @@ import { assertOrigin, emailKey } from '@/server/config';
 import {
   approvedCampaign, assertDeliveryReady, changeCampaign, mailContent, sendTest, sendTransactional, testSmtpRelay,
 } from '@/server/delivery';
+import { assertPreviewOrigin, handleDevPreviewConsole, isDevPreviewMode } from '@/server/dev-preview';
 import { json, readBody, respondError } from '@/server/http';
 import { retryDeadJob } from '@/server/jobs';
 import { listmonk } from '@/server/listmonk';
@@ -982,6 +983,11 @@ const endpoints: Entry[] = [
 async function dispatch(request: Request, context: { params: Promise<{ path: string[] }> }) {
   try {
     const { path } = await context.params;
+    if (isDevPreviewMode()) {
+      await requireUser('analyst');
+      if (request.method !== 'GET') assertPreviewOrigin(request);
+      return await handleDevPreviewConsole(request, path);
+    }
     for (const entry of endpoints) {
       if (entry.method !== request.method) continue;
       const match = entry.path.exec(path.join('/'));
