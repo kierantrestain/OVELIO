@@ -1,25 +1,45 @@
 import type {
-  Contact, ContactDetail, ContactInput, DateRange, Health, JourneyEmail, LeadForm,
-  Page, Point, Segment, SegmentInput, Workflow, WorkflowInput,
+  Asset, AssetInput, Company, CompanyInput, Contact, ContactDetail, ContactInput,
+  ContactNote, ContactNoteInput, DateRange, FormSubmission, Health, JourneyEmail,
+  JourneyEmailInput, LandingPage, LandingPageInput, LeadForm, LeadFormInput, Page,
+  Point, PointAction, PointActionInput, PointTrigger, PointTriggerInput, Segment,
+  SegmentFilter, SegmentInput, Stage, StageInput, Tag, Webhook, WebhookInput,
+  Workflow, WorkflowContact, WorkflowInput,
 } from '../../contracts';
 import { basic, upstream, UpstreamError } from '../upstream';
 import {
-  date, flag, item, items, published, record, requiredId, service,
-  text, toContact, toSegment, total, type ApiRecord,
+  date, flag, item, items, number, positiveId, published, record, requiredId, service,
+  text, toAsset, toCompany, toContact, toContactNote, toFormField, toFormSubmission,
+  toLandingPage, toPointAction, toPointTrigger, toSegment, toStage, toTag, toWebhook,
+  toWorkflowContact, total, type ApiRecord,
 } from './normalize';
 import { managedSteps, toWorkflow, verifySavedWorkflow, workflowPayload } from './workflows';
 
 type Config = { url?: string; username?: string; password?: string; fetch?: typeof fetch };
 type SuppressionReason = 'unsubscribe' | 'bounce' | 'complaint' | 'erasure';
-type ContactQuery = { page?: number; limit?: number; search?: string; segmentId?: number };
+type ContactQuery = { page?: number; limit?: number; search?: string; segmentId?: number; tag?: string };
 type Where = [column: string, expression: string, value?: string | number];
-type JourneyEmailInput = { name: string; subject: string; body: string };
-type LeadFormInput = { name: string; message?: string };
+type NativeFormField = {
+  label: string;
+  type: string;
+  alias: string;
+  mappedObject?: 'contact';
+  mappedField?: string;
+  showLabel?: boolean;
+  isRequired?: boolean;
+  properties?: Record<string, unknown>;
+};
 
 const day = 86400000;
 const maxPage = 100;
 const unsubscribeLink = /<a\s+[^>]*href\s*=\s*["']\{unsubscribe_url\}["']/i;
+const unsubscribeFooter = '<p><a href="{unsubscribe_url}">Unsubscribe from marketing emails</a></p>';
 const suppressionCodes = { unsubscribe: 1, bounce: 2, complaint: 3, erasure: 3 };
+const defaultFormFields: NativeFormField[] = [
+  { label: 'First name', type: 'text', alias: 'first_name', mappedObject: 'contact', mappedField: 'firstname', showLabel: true },
+  { label: 'Email address', type: 'email', alias: 'email', mappedObject: 'contact', mappedField: 'email', showLabel: true, isRequired: true },
+  { label: 'Submit', type: 'button', alias: 'submit' },
+];
 
 function queryPath(path: string, query: URLSearchParams) {
   return `${path}?${query}`;
@@ -47,15 +67,65 @@ function sortContacts(a: Contact, b: Contact) {
   return (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || b.id - a.id;
 }
 
+function requiredText(raw: string, message: string) {
+  const cleaned = raw.trim();
+  if (!cleaned) throw new UpstreamError(service, 400, message);
+  return cleaned;
+}
+
+function validHttpUrl(raw: string, message: string) {
+  const cleaned = raw.trim();
+  try {
+    const parsed = new URL(cleaned);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error();
+    return cleaned;
+  } catch {
+    throw new UpstreamError(service, 400, message);
+  }
+}
+
 function contactPayload(input: ContactInput, tags?: string[]) {
+  const blanks = [
+    input.firstName, input.lastName, input.company,
+    input.phone, input.position, input.city, input.country, input.website,
+  ].some(value => value === '');
   return {
     email: input.email.trim().toLowerCase(),
     firstname: input.firstName,
     lastname: input.lastName,
     company: input.company,
+    phone: input.phone,
+    position: input.position,
+    city: input.city,
+    country: input.country,
+    website: input.website,
     tags,
-    ...(input.firstName === '' || input.lastName === '' || input.company === '' ? { overwriteWithBlank: true } : {}),
+    ...(blanks ? { overwriteWithBlank: true } : {}),
   };
+}
+
+function segmentFiltersPayload(filters: SegmentFilter[]) {
+  return filters.map(filter => ({
+    glue: filter.glue,
+    field: filter.field,
+    object: filter.object ?? 'lead',
+    type: filter.type ?? 'text',
+    operator: filter.operator,
+    filter: filter.filter,
+    properties: { filter: filter.filter },
+  }));
+}
+
+function companyPayload(input: Partial<CompanyInput>) {
+  const payload: ApiRecord = {};
+  if (input.name !== undefined) payload.companyname = requiredText(input.name, 'Enter a company name.');
+  if (input.email !== undefined) payload.companyemail = input.email;
+  if (input.website !== undefined) payload.companywebsite = input.website;
+  if (input.industry !== undefined) payload.companyindustry = input.industry;
+  if (input.city !== undefined) payload.companycity = input.city;
+  if (input.country !== undefined) payload.companycountry = input.country;
+  if (Object.values(payload).some(value => value === '')) payload.overwriteWithBlank = true;
+  return payload;
 }
 
 function wantedTags(tags: string[]) {
@@ -64,17 +134,91 @@ function wantedTags(tags: string[]) {
   return cleaned;
 }
 
+function cleanTriggers(triggers: string[]) {
+  const cleaned = [...new Set(triggers.map(trigger => trigger.trim()).filter(Boolean))];
+  if (!cleaned.length) throw new UpstreamError(service, 400, 'Select at least one webhook trigger.');
+  return cleaned;
+}
+
 function allowedEmail(dto: ApiRecord) {
   return dto.emailType === 'template' && !flag(dto.sendToDnc) && unsubscribeLink.test(text(dto.customHtml));
 }
 
+function withUnsubscribeLink(body: string) {
+  if (unsubscribeLink.test(body)) return body;
+  return /<\/body\s*>/i.test(body)
+    ? body.replace(/<\/body\s*>/i, `${unsubscribeFooter}</body>`)
+    : body + unsubscribeFooter;
+}
+
 function toEmail(dto: ApiRecord): JourneyEmail {
-  return { id: requiredId(dto.id), name: text(dto.name), subject: text(dto.subject), published: published(dto) };
+  return {
+    id: requiredId(dto.id),
+    name: text(dto.name),
+    subject: text(dto.subject),
+    body: text(dto.customHtml),
+    published: published(dto),
+    sentCount: number(dto.sentCount),
+    readCount: number(dto.readCount),
+  };
 }
 
 function plainFormMessage(message: string) {
   return message.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;').replaceAll("'", '&#39;').replaceAll('{', '&#123;').replaceAll('}', '&#125;');
+}
+
+function buildFormFields(inputFields: NonNullable<LeadFormInput['fields']>): NativeFormField[] {
+  const seen = new Set<string>();
+  const built: NativeFormField[] = [];
+  let hasMappedEmail = false;
+
+  for (const field of inputFields) {
+    const label = requiredText(field.label, 'Enter a label for each form field.');
+    const alias = field.alias.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    if (!alias || alias === 'submit' || seen.has(alias)) {
+      throw new UpstreamError(service, 400, 'Use a unique valid alias for each form field.');
+    }
+    seen.add(alias);
+
+    const mappedField = field.mappedField?.trim() || (field.type === 'email' ? 'email' : undefined);
+    if (field.type === 'email' && mappedField === 'email') hasMappedEmail = true;
+
+    const options = field.options?.map(option => option.trim()).filter(Boolean);
+    const listItems = options?.map(option => ({ label: option, value: option }));
+    const properties = listItems?.length
+      ? field.type === 'checkboxgrp'
+        ? { optionlist: { list: listItems } }
+        : { list: { list: listItems } }
+      : undefined;
+
+    built.push({
+      label,
+      type: field.type,
+      alias,
+      showLabel: true,
+      ...(mappedField ? { mappedObject: 'contact' as const, mappedField } : {}),
+      ...(field.isRequired ? { isRequired: true } : {}),
+      ...(properties ? { properties } : {}),
+    });
+  }
+
+  if (!hasMappedEmail) {
+    const emailAlias = seen.has('email') ? 'contact_email' : 'email';
+    if (seen.has(emailAlias)) throw new UpstreamError(service, 400, 'Include an email field mapped to the contact email.');
+    built.push({
+      label: 'Email address',
+      type: 'email',
+      alias: emailAlias,
+      mappedObject: 'contact',
+      mappedField: 'email',
+      showLabel: true,
+      isRequired: true,
+    });
+  }
+
+  built.push({ label: 'Submit', type: 'button', alias: 'submit' });
+  return built;
 }
 
 export function createMautic(config: Config = {}) {
@@ -113,6 +257,14 @@ export function createMautic(config: Config = {}) {
     return item((await request(path, method, dto))[key]);
   }
 
+  async function remove(path: string) {
+    try {
+      await request(path, 'DELETE');
+    } catch (error) {
+      if (!(error instanceof UpstreamError) || error.status !== 404) throw error;
+    }
+  }
+
   async function contact(id: number) {
     return toContact(await get('/contacts', 'contact', id));
   }
@@ -133,7 +285,20 @@ export function createMautic(config: Config = {}) {
   async function toForm(dto: ApiRecord): Promise<LeadForm> {
     const id = requiredId(dto.id);
     const submissions = await tally('/stats/form_submissions', [['form_id', 'eq', id]]).catch(() => null);
-    return { id, name: text(dto.name), submissions, published: published(dto) };
+    const fields = dto.fields && typeof dto.fields === 'object'
+      ? Object.values(dto.fields)
+          .map(record)
+          .filter(field => text(field.type) !== 'button' && text(field.alias))
+          .map(toFormField)
+      : [];
+    return {
+      id,
+      name: text(dto.name),
+      description: text(dto.description),
+      submissions,
+      published: published(dto),
+      fields,
+    };
   }
 
   return {
@@ -151,7 +316,7 @@ export function createMautic(config: Config = {}) {
       }
     },
 
-    async contacts({ page = 1, limit = 25, search, segmentId }: ContactQuery = {}): Promise<Page<Contact>> {
+    async contacts({ page = 1, limit = 25, search, segmentId, tag }: ContactQuery = {}): Promise<Page<Contact>> {
       if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(limit) || limit < 1) {
         throw new UpstreamError(service, 400, 'Choose a valid contact page.');
       }
@@ -165,6 +330,8 @@ export function createMautic(config: Config = {}) {
         if (!source.alias || /"/.test(source.alias)) throw new UpstreamError(service, 502);
         filters.push(`segment:"${source.alias}"`);
       }
+      const cleanTag = tag?.replace(/["<>]/g, ' ').trim();
+      if (cleanTag) filters.push(`tag:"${cleanTag}"`);
       const term = search?.replace(/["<>]/g, ' ').trim();
       if (term) filters.push(`"${term}"`);
       if (filters.length) query.set('search', filters.join(' '));
@@ -203,11 +370,7 @@ export function createMautic(config: Config = {}) {
     },
 
     async deleteContact(id: number) {
-      try {
-        await request(`/contacts/${requiredId(id)}/delete`, 'DELETE');
-      } catch (error) {
-        if (!(error instanceof UpstreamError) || error.status !== 404) throw error;
-      }
+      await remove(`/contacts/${requiredId(id)}/delete`);
     },
 
     async setSuppressed(id: number, reason: SuppressionReason) {
@@ -219,6 +382,46 @@ export function createMautic(config: Config = {}) {
       if (!(await contact(id)).suppressed) {
         throw new UpstreamError(service, 502, 'The audience engine did not confirm the suppression.');
       }
+    },
+
+    async adjustPoints(contactId: number, delta: number): Promise<Contact> {
+      const id = requiredId(contactId);
+      if (!Number.isSafeInteger(delta) || delta === 0) {
+        throw new UpstreamError(service, 400, 'Enter a non-zero whole number of points.');
+      }
+      const direction = delta > 0 ? 'plus' : 'minus';
+      const response = record(await request(`/contacts/${id}/points/${direction}/${Math.abs(delta)}`, 'POST'));
+      if (response.success === false) {
+        throw new UpstreamError(service, 502, 'The audience engine did not confirm the point adjustment.');
+      }
+      return positiveId(record(response.contact).id) ? toContact(item(response.contact)) : contact(id);
+    },
+
+    async contactNotes(contactId: number): Promise<ContactNote[]> {
+      const response = await request(`/contacts/${requiredId(contactId)}/notes?limit=50`);
+      return items(response.notes)
+        .map(toContactNote)
+        .sort((a, b) => (b.dateTime ?? '').localeCompare(a.dateTime ?? '') || b.id - a.id);
+    },
+
+    async createContactNote(contactId: number, input: ContactNoteInput): Promise<ContactNote> {
+      const content = requiredText(input.text, 'Enter note text.');
+      return toContactNote(await write('/notes/new', 'note', 'POST', {
+        lead: requiredId(contactId),
+        text: content,
+        type: input.type ?? 'general',
+      }));
+    },
+
+    async deleteContactNote(noteId: number): Promise<void> {
+      await remove(`/notes/${requiredId(noteId)}/delete`);
+    },
+
+    async contactCampaigns(contactId: number): Promise<number[]> {
+      const response = await request(`/contacts/${requiredId(contactId)}/campaigns`);
+      return items(response.campaigns)
+        .filter(entry => !flag(entry.manuallyRemoved))
+        .map(entry => requiredId(entry.id));
     },
 
     async segments(): Promise<Segment[]> {
@@ -245,10 +448,26 @@ export function createMautic(config: Config = {}) {
       });
     },
 
-    async createSegment(input: SegmentInput) {
+    async createSegment(input: SegmentInput): Promise<Segment> {
       return toSegment(await write('/segments/new', 'list', 'POST', {
-        name: input.name, description: input.description, isPublished: true,
+        name: input.name,
+        description: input.description,
+        isPublished: input.published ?? true,
+        ...(input.filters !== undefined ? { filters: segmentFiltersPayload(input.filters) } : {}),
       }));
+    },
+
+    async updateSegment(id: number, input: Partial<SegmentInput>): Promise<Segment> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = input.name;
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.published !== undefined) payload.isPublished = input.published;
+      if (input.filters !== undefined) payload.filters = segmentFiltersPayload(input.filters);
+      return toSegment(await write(`/segments/${requiredId(id)}/edit`, 'list', 'PATCH', payload));
+    },
+
+    async deleteSegment(id: number): Promise<void> {
+      await remove(`/segments/${requiredId(id)}/delete`);
     },
 
     async addToSegment(segmentId: number, contactId: number) {
@@ -257,6 +476,175 @@ export function createMautic(config: Config = {}) {
 
     async removeFromSegment(segmentId: number, contactId: number) {
       await request(`/segments/${requiredId(segmentId)}/contact/${requiredId(contactId)}/remove`, 'POST');
+    },
+
+    async tags(): Promise<Tag[]> {
+      return (await list('/tags', 'tags')).map(toTag).sort((a, b) => a.tag.localeCompare(b.tag));
+    },
+
+    async createTag(tag: string, description?: string): Promise<Tag> {
+      const clean = requiredText(tag, 'Enter a tag name.');
+      if (clean.startsWith('-')) throw new UpstreamError(service, 400, 'A tag cannot start with a hyphen.');
+      return toTag(await write('/tags/new', 'tag', 'POST', {
+        tag: clean,
+        ...(description !== undefined ? { description } : {}),
+      }));
+    },
+
+    async deleteTag(id: number): Promise<void> {
+      await remove(`/tags/${requiredId(id)}/delete`);
+    },
+
+    async stages(): Promise<Stage[]> {
+      return (await list('/stages', 'stages'))
+        .map(toStage)
+        .sort((a, b) => a.weight - b.weight || a.name.localeCompare(b.name));
+    },
+
+    async createStage(input: StageInput): Promise<Stage> {
+      const name = requiredText(input.name, 'Enter a lifecycle stage name.');
+      const weight = input.weight ?? 0;
+      if (!Number.isSafeInteger(weight)) throw new UpstreamError(service, 400, 'Enter a whole number weight.');
+      return toStage(await write('/stages/new', 'stage', 'POST', {
+        name,
+        description: input.description ?? '',
+        weight,
+        isPublished: input.published ?? true,
+      }));
+    },
+
+    async updateStage(id: number, input: Partial<StageInput>): Promise<Stage> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a lifecycle stage name.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.weight !== undefined) {
+        if (!Number.isSafeInteger(input.weight)) throw new UpstreamError(service, 400, 'Enter a whole number weight.');
+        payload.weight = input.weight;
+      }
+      if (input.published !== undefined) payload.isPublished = input.published;
+      return toStage(await write(`/stages/${requiredId(id)}/edit`, 'stage', 'PATCH', payload));
+    },
+
+    async deleteStage(id: number): Promise<void> {
+      await remove(`/stages/${requiredId(id)}/delete`);
+    },
+
+    async setContactStage(contactId: number, stageId: number): Promise<void> {
+      await request(`/stages/${requiredId(stageId)}/contact/${requiredId(contactId)}/add`, 'POST');
+    },
+
+    async removeContactStage(contactId: number, stageId: number): Promise<void> {
+      await request(`/stages/${requiredId(stageId)}/contact/${requiredId(contactId)}/remove`, 'POST');
+    },
+
+    async companies(query?: { search?: string }): Promise<Company[]> {
+      const params = new URLSearchParams();
+      const term = query?.search?.replace(/["<>]/g, ' ').trim();
+      if (term) params.set('search', term);
+      return (await list('/companies', 'companies', params))
+        .map(toCompany)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    async createCompany(input: CompanyInput): Promise<Company> {
+      return toCompany(await write('/companies/new', 'company', 'POST', companyPayload(input)));
+    },
+
+    async updateCompany(id: number, input: Partial<CompanyInput>): Promise<Company> {
+      return toCompany(await write(`/companies/${requiredId(id)}/edit`, 'company', 'PATCH', companyPayload(input)));
+    },
+
+    async deleteCompany(id: number): Promise<void> {
+      await remove(`/companies/${requiredId(id)}/delete`);
+    },
+
+    async addContactToCompany(companyId: number, contactId: number): Promise<void> {
+      await request(`/companies/${requiredId(companyId)}/contact/${requiredId(contactId)}/add`, 'POST');
+    },
+
+    async pointActions(): Promise<PointAction[]> {
+      return (await list('/points', 'points')).map(toPointAction).sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    async pointActionTypes(): Promise<Record<string, string>> {
+      const response = await request('/points/actions/types');
+      const raw = record(response.actionTypes ?? response);
+      const flat: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        if (typeof value === 'string') {
+          flat[key] = value;
+        } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+          for (const [subKey, subValue] of Object.entries(value as ApiRecord)) {
+            if (typeof subValue === 'string') flat[subKey] = subValue;
+          }
+        }
+      }
+      return flat;
+    },
+
+    async createPointAction(input: PointActionInput): Promise<PointAction> {
+      const name = requiredText(input.name, 'Enter a point action name.');
+      const type = requiredText(input.type, 'Select a point action type.');
+      if (!Number.isSafeInteger(input.delta)) throw new UpstreamError(service, 400, 'Enter a whole number of points.');
+      return toPointAction(await write('/points/new', 'point', 'POST', {
+        name,
+        description: input.description ?? '',
+        type,
+        delta: input.delta,
+        isPublished: input.published ?? true,
+      }));
+    },
+
+    async updatePointAction(id: number, input: Partial<PointActionInput>): Promise<PointAction> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a point action name.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.type !== undefined) payload.type = requiredText(input.type, 'Select a point action type.');
+      if (input.delta !== undefined) {
+        if (!Number.isSafeInteger(input.delta)) throw new UpstreamError(service, 400, 'Enter a whole number of points.');
+        payload.delta = input.delta;
+      }
+      if (input.published !== undefined) payload.isPublished = input.published;
+      return toPointAction(await write(`/points/${requiredId(id)}/edit`, 'point', 'PATCH', payload));
+    },
+
+    async deletePointAction(id: number): Promise<void> {
+      await remove(`/points/${requiredId(id)}/delete`);
+    },
+
+    async pointTriggers(): Promise<PointTrigger[]> {
+      return (await list('/points/triggers', 'triggers'))
+        .map(toPointTrigger)
+        .sort((a, b) => a.points - b.points || a.name.localeCompare(b.name));
+    },
+
+    async createPointTrigger(input: PointTriggerInput): Promise<PointTrigger> {
+      const name = requiredText(input.name, 'Enter a point trigger name.');
+      if (!Number.isSafeInteger(input.points)) throw new UpstreamError(service, 400, 'Enter a whole number point threshold.');
+      return toPointTrigger(await write('/points/triggers/new', 'trigger', 'POST', {
+        name,
+        description: input.description ?? '',
+        points: input.points,
+        isPublished: input.published ?? true,
+        triggerExistingLeads: input.triggerExistingLeads ?? false,
+      }));
+    },
+
+    async updatePointTrigger(id: number, input: Partial<PointTriggerInput>): Promise<PointTrigger> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a point trigger name.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.points !== undefined) {
+        if (!Number.isSafeInteger(input.points)) throw new UpstreamError(service, 400, 'Enter a whole number point threshold.');
+        payload.points = input.points;
+      }
+      if (input.published !== undefined) payload.isPublished = input.published;
+      if (input.triggerExistingLeads !== undefined) payload.triggerExistingLeads = input.triggerExistingLeads;
+      return toPointTrigger(await write(`/points/triggers/${requiredId(id)}/edit`, 'trigger', 'PATCH', payload));
+    },
+
+    async deletePointTrigger(id: number): Promise<void> {
+      await remove(`/points/triggers/${requiredId(id)}/delete`);
     },
 
     async forms(): Promise<LeadForm[]> {
@@ -269,26 +657,23 @@ export function createMautic(config: Config = {}) {
     },
 
     async createForm(input: LeadFormInput): Promise<LeadForm> {
-      const name = input.name.trim();
-      if (!name) throw new UpstreamError(service, 400, 'Enter a lead capture form name.');
-      const fields = [
-        { label: 'First name', type: 'text', alias: 'first_name', mappedObject: 'contact', mappedField: 'firstname', showLabel: true },
-        { label: 'Email address', type: 'email', alias: 'email', mappedObject: 'contact', mappedField: 'email', showLabel: true, isRequired: true },
-        { label: 'Submit', type: 'button', alias: 'submit' },
-      ];
+      const name = requiredText(input.name, 'Enter a lead capture form name.');
+      const wantPublished = input.published ?? true;
+      const fields = input.fields?.length ? buildFormFields(input.fields) : defaultFormFields;
       const dto = await write('/forms/new', 'form', 'POST', {
         name,
+        ...(input.description !== undefined ? { description: input.description } : {}),
         formType: 'standalone',
         postAction: 'message',
         postActionProperty: plainFormMessage(input.message?.trim() || 'Thank you. Your details have been received.'),
-        isPublished: true,
+        isPublished: wantPublished,
         noIndex: true,
         fields,
         actions: [],
       });
       const saved = items(dto.fields);
       if (
-        dto.formType !== 'standalone' || !published(dto) || saved.length !== fields.length
+        dto.formType !== 'standalone' || (wantPublished && !published(dto)) || saved.length !== fields.length
         || !fields.every(field => saved.some(current => current.alias === field.alias && current.type === field.type
           && (!field.mappedField || (current.mappedField === field.mappedField && current.mappedObject === 'contact'))
           && (!field.isRequired || flag(current.isRequired))))
@@ -296,6 +681,43 @@ export function createMautic(config: Config = {}) {
         throw new UpstreamError(service, 502, 'The audience engine did not confirm the published lead capture form and mapped fields.');
       }
       return toForm(dto);
+    },
+
+    async updateForm(id: number, input: Partial<LeadFormInput>): Promise<LeadForm> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a lead capture form name.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.message !== undefined) {
+        payload.postAction = 'message';
+        payload.postActionProperty = plainFormMessage(input.message.trim() || 'Thank you. Your details have been received.');
+      }
+      if (input.published !== undefined) payload.isPublished = input.published;
+      if (input.fields !== undefined) {
+        if (!input.fields.length) throw new UpstreamError(service, 400, 'Add at least one form field.');
+        payload.fields = buildFormFields(input.fields);
+      }
+      const dto = await write(`/forms/${requiredId(id)}/edit`, 'form', 'PATCH', payload);
+      return toForm(dto);
+    },
+
+    async deleteForm(id: number): Promise<void> {
+      await remove(`/forms/${requiredId(id)}/delete`);
+    },
+
+    async formSubmissions(formId: number, page = 1): Promise<Page<FormSubmission>> {
+      const id = requiredId(formId);
+      if (!Number.isSafeInteger(page) || page < 1) {
+        throw new UpstreamError(service, 400, 'Choose a valid submission page.');
+      }
+      const limit = 25;
+      const start = (page - 1) * limit;
+      const response = await request(`/forms/${id}/submissions?start=${start}&limit=${limit}`);
+      return {
+        items: items(response.submissions).map(entry => toFormSubmission(entry, id)),
+        total: total(response),
+        page,
+        limit,
+      };
     },
 
     async leadCount(range: DateRange) {
@@ -334,19 +756,46 @@ export function createMautic(config: Config = {}) {
       return (await list('/emails', 'emails')).filter(allowedEmail).map(toEmail).sort((a, b) => a.name.localeCompare(b.name));
     },
 
-    async createEmail(input: JourneyEmailInput) {
-      const footer = '<p><a href="{unsubscribe_url}">Unsubscribe from marketing emails</a></p>';
-      const customHtml = /<\/body\s*>/i.test(input.body)
-        ? input.body.replace(/<\/body\s*>/i, `${footer}</body>`)
-        : input.body + footer;
+    async email(id: number): Promise<JourneyEmail> {
+      return toEmail(await get('/emails', 'email', id));
+    },
+
+    async createEmail(input: JourneyEmailInput): Promise<JourneyEmail> {
+      const wantPublished = input.published ?? true;
       const dto = await write('/emails/new', 'email', 'POST', {
-        name: input.name, subject: input.subject, customHtml, emailType: 'template',
-        template: 'mautic_code_mode', language: 'en', isPublished: true, sendToDnc: false,
+        name: input.name,
+        subject: input.subject,
+        customHtml: withUnsubscribeLink(input.body),
+        emailType: 'template',
+        template: 'mautic_code_mode',
+        language: 'en',
+        isPublished: wantPublished,
+        sendToDnc: false,
       });
-      if (!allowedEmail(dto) || !published(dto)) {
+      if (!allowedEmail(dto) || (wantPublished && !published(dto))) {
         throw new UpstreamError(service, 502, 'The engine did not confirm a published automation email with an unsubscribe link.');
       }
       return toEmail(dto);
+    },
+
+    async updateEmail(id: number, input: JourneyEmailInput): Promise<JourneyEmail> {
+      const payload: ApiRecord = {
+        name: input.name,
+        subject: input.subject,
+        customHtml: withUnsubscribeLink(input.body),
+        emailType: 'template',
+        sendToDnc: false,
+      };
+      if (input.published !== undefined) payload.isPublished = input.published;
+      const dto = await write(`/emails/${requiredId(id)}/edit`, 'email', 'PATCH', payload);
+      if (!allowedEmail(dto) || (input.published !== undefined && published(dto) !== input.published)) {
+        throw new UpstreamError(service, 502, 'The engine did not confirm the automation email update with an unsubscribe link.');
+      }
+      return toEmail(dto);
+    },
+
+    async deleteEmail(id: number): Promise<void> {
+      await remove(`/emails/${requiredId(id)}/delete`);
     },
 
     async workflows(): Promise<Workflow[]> {
@@ -368,16 +817,28 @@ export function createMautic(config: Config = {}) {
       return verifySavedWorkflow(dto, input);
     },
 
+    async deleteWorkflow(id: number): Promise<void> {
+      await remove(`/campaigns/${requiredId(id)}/delete`);
+    },
+
+    async workflowContacts(id: number): Promise<WorkflowContact[]> {
+      const response = await request(`/campaigns/${requiredId(id)}/contacts`);
+      const raw = response.contacts;
+      if (!raw || typeof raw !== 'object') throw new UpstreamError(service, 502);
+      return Object.values(raw).map(entry => toWorkflowContact(record(entry)));
+    },
+
     async setWorkflowEnabled(id: number, enabled: boolean) {
       const current = await get('/campaigns', 'campaign', id);
       if (enabled) {
         const workflow = toWorkflow(current);
         if (!workflow.editable) throw new UpstreamError(service, 409, 'This automation cannot be activated from the step editor.');
+        const emailSteps = workflow.steps.filter(step => (step.kind ?? 'email') === 'email');
         const [source, ...emails] = await Promise.all([
-          segment(workflow.segmentId),
-          ...workflow.steps.map(step => get('/emails', 'email', step.emailId)),
+          workflow.segmentId > 0 ? segment(workflow.segmentId) : Promise.resolve(null),
+          ...emailSteps.map(step => get('/emails', 'email', step.emailId)),
         ]);
-        if (!source.published || emails.some(email => !allowedEmail(email) || !published(email))) {
+        if ((source && !source.published) || emails.some(email => !allowedEmail(email) || !published(email))) {
           throw new UpstreamError(service, 409, 'Publish the audience segment and use published emails with an unsubscribe link.');
         }
       }
@@ -388,6 +849,118 @@ export function createMautic(config: Config = {}) {
         throw new UpstreamError(service, 502, 'The automation engine did not confirm the new status.');
       }
       return saved;
+    },
+
+    async assets(): Promise<Asset[]> {
+      return (await list('/assets', 'assets')).map(toAsset).sort((a, b) => a.title.localeCompare(b.title));
+    },
+
+    async createAsset(input: AssetInput): Promise<Asset> {
+      const title = requiredText(input.title, 'Enter an asset title.');
+      const remotePath = validHttpUrl(input.remotePath, 'Enter a valid HTTP or HTTPS asset URL.');
+      try {
+        return toAsset(await write('/assets/new', 'asset', 'POST', {
+          title,
+          description: input.description ?? '',
+          storageLocation: 'remote',
+          file: remotePath,
+          isPublished: input.published ?? true,
+        }));
+      } catch (error) {
+        if (error instanceof UpstreamError && error.status === 400) {
+          throw new UpstreamError(service, 400, 'Enter a reachable HTTP or HTTPS file URL so its file type can be verified.');
+        }
+        throw error;
+      }
+    },
+
+    async updateAsset(id: number, input: Partial<AssetInput>): Promise<Asset> {
+      const payload: ApiRecord = {};
+      if (input.title !== undefined) payload.title = requiredText(input.title, 'Enter an asset title.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.remotePath !== undefined) {
+        payload.storageLocation = 'remote';
+        payload.file = validHttpUrl(input.remotePath, 'Enter a valid HTTP or HTTPS asset URL.');
+      }
+      if (input.published !== undefined) payload.isPublished = input.published;
+      try {
+        return toAsset(await write(`/assets/${requiredId(id)}/edit`, 'asset', 'PATCH', payload));
+      } catch (error) {
+        if (error instanceof UpstreamError && error.status === 400) {
+          throw new UpstreamError(service, 400, 'Enter a reachable HTTP or HTTPS file URL so its file type can be verified.');
+        }
+        throw error;
+      }
+    },
+
+    async deleteAsset(id: number): Promise<void> {
+      await remove(`/assets/${requiredId(id)}/delete`);
+    },
+
+    async pages(): Promise<LandingPage[]> {
+      return (await list('/pages', 'pages')).map(toLandingPage).sort((a, b) => a.title.localeCompare(b.title));
+    },
+
+    async createPage(input: LandingPageInput): Promise<LandingPage> {
+      const title = requiredText(input.title, 'Enter a landing page title.');
+      return toLandingPage(await write('/pages/new', 'page', 'POST', {
+        title,
+        ...(input.alias !== undefined ? { alias: input.alias } : {}),
+        metaDescription: input.metaDescription ?? '',
+        customHtml: input.customHtml,
+        template: 'blank',
+        isPublished: input.published ?? true,
+      }));
+    },
+
+    async updatePage(id: number, input: Partial<LandingPageInput>): Promise<LandingPage> {
+      const payload: ApiRecord = {};
+      if (input.title !== undefined) payload.title = requiredText(input.title, 'Enter a landing page title.');
+      if (input.alias !== undefined) payload.alias = input.alias;
+      if (input.metaDescription !== undefined) payload.metaDescription = input.metaDescription;
+      if (input.customHtml !== undefined) payload.customHtml = input.customHtml;
+      if (input.published !== undefined) payload.isPublished = input.published;
+      return toLandingPage(await write(`/pages/${requiredId(id)}/edit`, 'page', 'PATCH', payload));
+    },
+
+    async deletePage(id: number): Promise<void> {
+      await remove(`/pages/${requiredId(id)}/delete`);
+    },
+
+    async webhooks(): Promise<Webhook[]> {
+      return (await list('/hooks', 'hooks')).map(toWebhook).sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    async webhookTriggers(): Promise<Record<string, unknown>> {
+      const response = await request('/hooks/triggers');
+      return record(response.triggers ?? response);
+    },
+
+    async createWebhook(input: WebhookInput): Promise<Webhook> {
+      const name = requiredText(input.name, 'Enter a webhook name.');
+      const webhookUrl = validHttpUrl(input.webhookUrl, 'Enter a valid HTTP or HTTPS webhook URL.');
+      const triggers = cleanTriggers(input.triggers);
+      return toWebhook(await write('/hooks/new', 'hook', 'POST', {
+        name,
+        description: input.description ?? '',
+        webhookUrl,
+        triggers,
+        isPublished: input.published ?? true,
+      }));
+    },
+
+    async updateWebhook(id: number, input: Partial<WebhookInput>): Promise<Webhook> {
+      const payload: ApiRecord = {};
+      if (input.name !== undefined) payload.name = requiredText(input.name, 'Enter a webhook name.');
+      if (input.description !== undefined) payload.description = input.description;
+      if (input.webhookUrl !== undefined) payload.webhookUrl = validHttpUrl(input.webhookUrl, 'Enter a valid HTTP or HTTPS webhook URL.');
+      if (input.triggers !== undefined) payload.triggers = cleanTriggers(input.triggers);
+      if (input.published !== undefined) payload.isPublished = input.published;
+      return toWebhook(await write(`/hooks/${requiredId(id)}/edit`, 'hook', 'PATCH', payload));
+    },
+
+    async deleteWebhook(id: number): Promise<void> {
+      await remove(`/hooks/${requiredId(id)}/delete`);
     },
   };
 }

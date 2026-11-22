@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { createContext, useContext, useState } from 'react';
 import type { ReactNode } from 'react';
 import { LinkProvider } from '@astryxdesign/core/Link';
+import { ToastViewport } from '@astryxdesign/core/Toast';
 import { Theme } from '@astryxdesign/core/theme';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
 
@@ -23,7 +24,9 @@ export function Providers({ initialMode, children }: { initialMode: ColorMode; c
   }
   return <ModeContext.Provider value={{ mode, toggle }}>
     <Theme theme={neutralTheme} mode={mode}>
-      <LinkProvider component={Link}>{children}</LinkProvider>
+      <ToastViewport position="bottomEnd" maxVisible={4}>
+        <LinkProvider component={Link}>{children}</LinkProvider>
+      </ToastViewport>
     </Theme>
   </ModeContext.Provider>;
 }

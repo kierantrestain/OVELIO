@@ -121,9 +121,23 @@ export async function dashboard(): Promise<Dashboard> {
     ...(dead.rows.length ? [{ label: 'A background job needs attention', href: '/settings' }] : []),
   ];
   return {
-    contacts: contacts?.total ?? null, contactGrowth: growth, activeCampaigns: newsletters?.active ?? null,
-    activeWorkflows: workflows?.filter(item => item.enabled).length ?? null, email: newsletters?.email ?? aggregateEmailMetrics([], false),
-    emailTrend: newsletters?.trend ?? null, visitors: traffic?.current?.visitors ?? null, websiteName: site?.name,
-    traffic: traffic?.pageviews ?? null, leads, conversions: conversions?.unique ?? null, conversionGoal: primary?.name, recent, alerts,
+    contacts: contacts?.total ?? null,
+    contactGrowth: growth,
+    activeCampaigns: newsletters?.active ?? null,
+    runningCampaigns: newsletters?.running ?? [],
+    activeWorkflows: workflows?.filter(item => item.enabled).length ?? null,
+    email: newsletters?.email ?? aggregateEmailMetrics([], false),
+    emailTrend: newsletters?.trend ?? null,
+    emailClicksTrend: newsletters?.clicksTrend ?? null,
+    emailBouncesTrend: newsletters?.bouncesTrend ?? null,
+    visitors: traffic?.current?.visitors ?? null,
+    activeVisitors: traffic?.activeVisitors ?? null,
+    websiteName: site?.name,
+    traffic: traffic?.pageviews ?? null,
+    leads,
+    conversions: conversions?.unique ?? null,
+    conversionGoal: primary?.name,
+    recent,
+    alerts,
   };
 }

@@ -40,7 +40,7 @@ export function respondError(scope: string, error: unknown) {
   }
   if (error instanceof AppError) return json({ error: error.message }, error.status);
   if (error instanceof UpstreamError) {
-    const status = error.status === 404 ? 404 : error.status === 409 ? 409 : 502;
+    const status = error.status === 400 ? 400 : error.status === 404 ? 404 : error.status === 409 ? 409 : 502;
     return json({ error: error.message }, status);
   }
   logError(scope, error);

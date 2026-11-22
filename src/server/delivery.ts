@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import sanitize from 'sanitize-html';
-import type { CampaignInput, CampaignMetrics, DateRange } from '../contracts';
+import type { CampaignInput, CampaignMetrics, DateRange, TransactionalEmailInput } from '../contracts';
 import { recordActivity } from './activity';
 import { checkRecipient } from './audience';
 import { AppError, requiredEnv } from './config';
@@ -57,7 +57,10 @@ export function approvedCampaign(input: CampaignInput): CampaignInput {
   if (input.fromEmail && input.fromEmail.toLowerCase() !== approved.toLowerCase()) {
     throw new AppError(400, 'Choose the configured sender email address.');
   }
-  return { ...input, fromEmail: approved, body: mailContent(input.body) };
+  const contentType = input.contentType ?? 'html';
+  const body = contentType === 'plain' || contentType === 'markdown' ? input.body.trim() : mailContent(input.body);
+  if (!body) throw new AppError(400, 'Enter email content.');
+  return { ...input, fromEmail: approved, contentType, body };
 }
 
 export async function assertDeliveryReady() {
@@ -71,6 +74,25 @@ export async function sendTest(id: number, email: string) {
   await listmonk.ensureTestSubscriber(email);
   await listmonk.testCampaign(id, email);
   await recordActivity('Newsletter test queued', '/campaigns');
+}
+
+export async function sendTransactional(input: TransactionalEmailInput) {
+  await assertDeliveryReady();
+  if (!await checkRecipient(input.email)) {
+    throw new AppError(409, 'Choose an audience contact with active email consent.');
+  }
+  await listmonk.ensureTestSubscriber(input.email);
+  await listmonk.sendTransactional({ ...input, fromEmail: requiredEnv('SMTP_FROM_EMAIL') });
+  await recordActivity('Transactional email queued', '/campaigns?tab=Transactional');
+}
+
+export async function testSmtpRelay(email: string) {
+  await assertDeliveryReady();
+  if (!await checkRecipient(email)) {
+    throw new AppError(409, 'Choose an opted-in audience contact for the SMTP diagnostic test.');
+  }
+  await listmonk.testSmtp(email, requiredEnv('SMTP_LISTMONK_PASSWORD'));
+  await recordActivity('SMTP diagnostic email sent', '/settings?view=connections');
 }
 
 export async function changeCampaign(id: number, action: 'start' | 'pause' | 'schedule', sendAt?: string) {
@@ -116,11 +138,27 @@ export function aggregateEmailMetrics(items: { metrics: CampaignMetrics }[], com
 }
 
 export async function campaignSummary(range: DateRange) {
-  const campaigns = await listmonk.campaigns({ limit: 100 });
-  const active = await listmonk.campaigns({ limit: 1, status: ['running', 'scheduled'] });
-  const trend = campaigns.total <= campaigns.items.length ?
-    await listmonk.campaignTrend(campaigns.items.map(item => item.id), range).catch(() => null) : null;
-  return { active: active.total, email: aggregateEmailMetrics(campaigns.items, campaigns.total <= campaigns.items.length), trend };
+  const [campaigns, active, running] = await Promise.all([
+    listmonk.campaigns({ limit: 100 }),
+    listmonk.campaigns({ limit: 1, status: ['running', 'scheduled'] }),
+    listmonk.runningCampaignStats().catch(() => []),
+  ]);
+  const ids = campaigns.total <= campaigns.items.length ? campaigns.items.map(item => item.id) : null;
+  const [trend, clicksTrend, bouncesTrend] = ids
+    ? await Promise.all([
+      listmonk.campaignTrend(ids, range, 'views').catch(() => null),
+      listmonk.campaignTrend(ids, range, 'clicks').catch(() => null),
+      listmonk.campaignTrend(ids, range, 'bounces').catch(() => null),
+    ])
+    : [null, null, null];
+  return {
+    active: active.total,
+    running,
+    email: aggregateEmailMetrics(campaigns.items, campaigns.total <= campaigns.items.length),
+    trend,
+    clicksTrend,
+    bouncesTrend,
+  };
 }
 
 export function createRelay() {

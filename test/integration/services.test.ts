@@ -162,3 +162,220 @@ test('real audience, newsletter, suppression and welcome workflows', { timeout: 
   await writeFile('test-results/acceptance.json', JSON.stringify({ recipient, subject, workflowName: active.name }), { mode: 0o600 });
   context.diagnostic('Confirmed native contacts, list membership, test and bulk mail, cross-engine unsubscribe and workflow delivery.');
 });
+
+test('extended audience, delivery, automation and analytics capabilities across all three engines', { timeout: 240000 }, async context => {
+  const env = testEnv();
+  const api = await apiClient(env);
+  const tag = Date.now().toString(36);
+  const contactEmail = 'extended-' + tag + '@example.test';
+
+  // Mautic extended: contact fields, points, notes, tags, stages, companies, dynamic segment, scoring, forms, assets, pages, webhooks, multi-action workflow
+  const created = await api.get<Contact>('/contacts', 'POST', {
+    email: contactEmail,
+    firstName: 'Extended',
+    lastName: 'Contact',
+    company: 'OVELIO Labs',
+    phone: '+44 20 7946 0958',
+    position: 'Marketing Lead',
+    city: 'London',
+    country: 'United Kingdom',
+    website: 'https://example.test',
+    tags: ['vip-' + tag],
+    consent: 'opted_in',
+    evidence: 'Automated extended acceptance fixture',
+  });
+  assert.ok(created.id > 0);
+
+  const scored = await api.get<ContactDetail>('/contacts/' + created.id + '/points', 'POST', { delta: 15 });
+  assert.ok(scored.points >= 15);
+  assert.ok((scored.consentHistory?.length ?? 0) >= 1);
+
+  const note = await api.get<{ id: number }>('/contacts/' + created.id + '/notes', 'POST', {
+    text: 'Follow up after product demo', type: 'call',
+  });
+  assert.ok((await api.get<Array<{ id: number }>>('/contacts/' + created.id + '/notes')).some(item => item.id === note.id));
+  assert.equal((await api.response('/notes/' + note.id, 'DELETE')).status, 204);
+
+  const createdTag = await api.get<{ id: number }>('/tags', 'POST', { tag: 'extra-' + tag });
+  assert.ok((await api.get<Array<{ id: number }>>('/tags')).some(item => item.id === createdTag.id));
+  assert.ok((await api.get<Page<Contact>>('/contacts?tag=' + encodeURIComponent('vip-' + tag))).items.some(item => item.id === created.id));
+  assert.equal((await api.response('/tags/' + createdTag.id, 'DELETE')).status, 204);
+
+  const stage = await api.get<{ id: number }>('/stages', 'POST', { name: 'MQL ' + tag, description: 'Qualified', weight: 20, published: true });
+  await api.get('/stages/' + stage.id, 'PATCH', { name: 'MQL Updated ' + tag });
+  const staged = await api.get<ContactDetail>('/contacts/' + created.id + '/stage', 'POST', { stageId: stage.id });
+  assert.equal(staged.stageId, stage.id);
+  await api.get('/contacts/' + created.id + '/stage', 'POST', { stageId: null });
+  assert.equal((await api.response('/stages/' + stage.id, 'DELETE')).status, 204);
+
+  const company = await api.get<{ id: number }>('/companies', 'POST', {
+    name: 'Acme ' + tag, email: 'hello-' + tag + '@acme.test', website: 'https://acme.test', industry: 'Technology', city: 'London',
+  });
+  await api.get('/companies/' + company.id, 'PATCH', { city: 'Bristol' });
+  await api.get('/companies/' + company.id + '/contacts', 'POST', { contactId: created.id });
+  assert.equal((await api.response('/companies/' + company.id, 'DELETE')).status, 204);
+
+  const filteredSeg = await api.get<Segment>('/segments', 'POST', {
+    name: 'Filtered ' + tag,
+    published: true,
+    filters: [{ glue: 'and', field: 'email', object: 'lead', type: 'email', operator: 'like', filter: '@example.test' }],
+  });
+  await api.get('/segments/' + filteredSeg.id, 'PATCH', { name: 'Filtered v2 ' + tag });
+  await api.get('/contacts/bulk', 'POST', { ids: [created.id], action: 'add_segment', segmentId: filteredSeg.id });
+
+  const actionTypes = await api.get<Record<string, string>>('/point-actions/types');
+  assert.ok(Object.keys(actionTypes).length > 0);
+  const pointAction = await api.get<{ id: number }>('/point-actions', 'POST', {
+    name: 'Score rule ' + tag, type: Object.keys(actionTypes)[0], delta: 10, published: true,
+  });
+  const pointTrigger = await api.get<{ id: number }>('/point-triggers', 'POST', {
+    name: 'Hot lead ' + tag, points: 50, published: true, triggerExistingLeads: false,
+  });
+  assert.equal((await api.response('/point-actions/' + pointAction.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/point-triggers/' + pointTrigger.id, 'DELETE')).status, 204);
+
+  const form = await api.get<{ id: number; fields?: unknown[] }>('/forms', 'POST', {
+    name: 'Custom Form ' + tag,
+    fields: [
+      { label: 'Email', alias: 'email', type: 'email', mappedField: 'email', isRequired: true },
+      { label: 'Company', alias: 'company', type: 'text', mappedField: 'company' },
+    ],
+  });
+  assert.ok((form.fields?.length ?? 0) >= 2);
+  await api.get('/forms/' + form.id, 'PATCH', { name: 'Custom Form v2 ' + tag });
+  assert.ok(Array.isArray((await api.get<{ items: unknown[] }>('/forms/' + form.id + '/submissions?page=1')).items));
+  assert.equal((await api.response('/forms/' + form.id, 'DELETE')).status, 204);
+
+  const jEmail = await api.get<JourneyEmail>('/journey-emails', 'POST', {
+    name: 'Journey ' + tag, subject: 'Journey ' + tag, body: '<p>Welcome</p>',
+  });
+  await api.get('/journey-emails/' + jEmail.id, 'PATCH', {
+    name: 'Journey v2 ' + tag, subject: 'Journey v2 ' + tag, body: '<p>Updated</p>',
+  });
+  const multiWf = await api.get<Workflow>('/workflows', 'POST', {
+    name: 'Multi-step ' + tag,
+    segmentId: filteredSeg.id,
+    steps: [
+      { kind: 'email', emailId: jEmail.id, delayMinutes: 0 },
+      { kind: 'tags', emailId: 0, delayMinutes: 0, addTags: ['onboarded-' + tag] },
+      { kind: 'points', emailId: 0, delayMinutes: 0, pointsDelta: 5 },
+    ],
+  });
+  assert.equal(multiWf.steps.length, 3);
+  assert.ok(Array.isArray(await api.get<unknown[]>('/workflows/' + multiWf.id + '/contacts')));
+  assert.equal((await api.response('/workflows/' + multiWf.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/journey-emails/' + jEmail.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/segments/' + filteredSeg.id, 'DELETE')).status, 204);
+
+  const png1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const formBody = new FormData();
+  formBody.append('file', new Blob([png1x1], { type: 'image/png' }), 'pixel-' + tag + '.png');
+  const login = await fetch(env.origin + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: env.origin },
+    body: JSON.stringify({ email: env.email, password: env.password }),
+  });
+  const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? '';
+  const uploadRes = await fetch(env.origin + '/api/console/media', {
+    method: 'POST',
+    headers: { origin: env.origin, cookie },
+    body: formBody,
+  });
+  assert.equal(uploadRes.status, 201);
+  const uploaded = await uploadRes.json() as { id: number; url: string };
+
+  const asset = await api.get<{ id: number }>('/assets', 'POST', {
+    title: 'Guide ' + tag, remotePath: 'http://mautic/robots.txt', published: true,
+  });
+  await api.get('/assets/' + asset.id, 'PATCH', { title: 'Guide v2 ' + tag });
+  assert.equal((await api.response('/assets/' + asset.id, 'DELETE')).status, 204);
+
+  const landing = await api.get<{ id: number }>('/pages', 'POST', {
+    title: 'Promo ' + tag, metaDescription: 'Promo', customHtml: '<h1>Promo</h1>', published: true,
+  });
+  await api.get('/pages/' + landing.id, 'PATCH', { title: 'Promo v2 ' + tag });
+  assert.equal((await api.response('/pages/' + landing.id, 'DELETE')).status, 204);
+
+  const hook = await api.get<{ id: number }>('/webhooks', 'POST', {
+    name: 'Hook ' + tag, webhookUrl: 'https://example.test/hook', triggers: ['mautic.lead_post_save_new'], published: false,
+  });
+  assert.equal((await api.response('/webhooks/' + hook.id, 'DELETE')).status, 204);
+
+  await api.get('/suppressions', 'POST', {
+    email: 'manual-' + tag + '@example.test', reason: 'unsubscribe', evidence: 'Automated suppression fixture',
+  });
+  assert.ok((await api.get<unknown[]>('/suppressions')).length >= 1);
+
+  // Listmonk extended: list edit/delete, template CRUD/preview/tx, transactional send, campaign clone/analytics/delete, media upload/delete, bounces, SMTP diagnostic, maintenance GC
+  const list = await api.get<MailingList>('/lists', 'POST', { name: 'Ext List ' + tag, description: 'Test', type: 'private', optin: 'double' });
+  await api.get('/lists/' + list.id, 'PATCH', { name: 'Ext List v2 ' + tag, description: 'Updated' });
+
+  const tpl = await api.get<Template>('/templates', 'POST', { name: 'Ext Tpl ' + tag, type: 'campaign', body: '<div>{{ template "content" . }}</div>' });
+  await api.get('/templates/' + tpl.id, 'PATCH', { name: 'Ext Tpl v2 ' + tag, type: 'campaign', body: '<section>{{ template "content" . }}</section>' });
+  assert.ok((await api.response('/templates/' + tpl.id + '/preview')).ok);
+
+  const txTpl = await api.get<Template>('/templates', 'POST', {
+    name: 'Ext Tx ' + tag, type: 'tx', subject: 'Receipt', body: '<p>Hello {{ .Tx.Data.name }}</p>',
+  });
+  await api.get('/tx', 'POST', { email: contactEmail, templateId: txTpl.id, subject: 'Tx ' + tag, data: { name: 'Extended' } });
+
+  const camp = await api.get<Campaign>('/campaigns', 'POST', {
+    name: 'Ext Camp ' + tag, subject: 'Ext Subj ' + tag, body: '<p>Content</p>',
+    listIds: [list.id], templateId: tpl.id, tags: ['ext'], altBody: 'Plain copy',
+  });
+  const cloned = await api.get<Campaign>('/campaigns/' + camp.id + '/clone', 'POST', { name: 'Ext Clone ' + tag });
+  assert.notEqual(cloned.id, camp.id);
+  assert.ok(Array.isArray((await api.get<{ links: unknown[] }>('/campaigns/' + camp.id + '/analytics')).links));
+  assert.ok(Array.isArray(await api.get<unknown[]>('/campaigns/running')));
+  assert.ok(Array.isArray((await api.get<Page<unknown>>('/bounces?page=1')).items));
+  assert.equal((await api.response('/media/' + uploaded.id, 'DELETE')).status, 204);
+
+  await api.get('/settings/smtp/test', 'POST', { email: contactEmail });
+  assert.equal(typeof (await api.get<{ count: number }>('/settings/maintenance', 'POST', { action: 'gc_unconfirmed' })).count, 'number');
+
+  assert.equal((await api.response('/campaigns/' + cloned.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/campaigns/' + camp.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/templates/' + tpl.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/templates/' + txTpl.id, 'DELETE')).status, 204);
+  assert.equal((await api.response('/lists/' + list.id, 'DELETE')).status, 204);
+
+  // Umami extended: website CRUD, realtime, sessions, weekly, funnels CRUD, goals CRUD, annotations, shares, retention, journeys, attribution, breakdown, links & pixels
+  const site = await api.get<{ id: string }>('/websites', 'POST', { name: 'Ext Site ' + tag, domain: 'ext-' + tag + '.example.test' });
+  await api.get('/websites/' + site.id, 'PATCH', { name: 'Ext Site v2 ' + tag, domain: 'ext-' + tag + '.example.test' });
+  const rangeQ = 'startAt=' + (Date.now() - 86_400_000) + '&endAt=' + Date.now();
+  assert.equal(typeof (await api.get<{ visitors: number }>('/websites/' + site.id + '/realtime')).visitors, 'number');
+  assert.equal((await api.get<number[][]>('/websites/' + site.id + '/sessions/weekly?' + rangeQ)).length, 7);
+  assert.ok(Array.isArray((await api.get<Page<unknown>>('/websites/' + site.id + '/sessions?' + rangeQ + '&page=1')).items));
+  assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/events/properties?' + rangeQ)));
+  assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/retention?' + rangeQ)));
+  assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/journeys?' + rangeQ + '&steps=3')));
+  assert.equal(typeof (await api.get<{ total: { pageviews: number } }>('/websites/' + site.id + '/attribution?' + rangeQ + '&model=first-click&type=path&step=%2F')).total.pageviews, 'number');
+  assert.ok(Array.isArray(await api.get<unknown[]>('/websites/' + site.id + '/breakdown', 'POST', {
+    startAt: Date.now() - 86_400_000, endAt: Date.now(), fields: ['path', 'browser'],
+  })));
+
+  const savedFunnel = await api.get<{ id: string }>('/websites/' + site.id + '/funnels', 'POST', {
+    name: 'Funnel ' + tag, steps: [{ type: 'path', value: '/' }, { type: 'event', value: 'signup' }], windowMinutes: 60,
+  });
+  assert.equal((await api.get<unknown[]>('/websites/' + site.id + '/funnels/' + savedFunnel.id + '/stats?' + rangeQ)).length, 2);
+  assert.equal((await api.response('/websites/' + site.id + '/funnels/' + savedFunnel.id, 'DELETE')).status, 204);
+
+  const ann = await api.get<{ id: string }>('/websites/' + site.id + '/annotations', 'POST', {
+    date: new Date().toISOString().slice(0, 10), allDay: true, note: 'Campaign launch ' + tag,
+  });
+  assert.equal((await api.response('/websites/' + site.id + '/annotations/' + ann.id, 'DELETE')).status, 204);
+
+  const share = await api.get<{ id: string }>('/websites/' + site.id + '/shares', 'POST', { name: 'Board ' + tag });
+  assert.equal((await api.response('/websites/' + site.id + '/shares/' + share.id, 'DELETE')).status, 204);
+
+  const link = await api.get<{ id: string }>('/links', 'POST', { name: 'Link ' + tag, url: 'https://example.test/promo' });
+  assert.equal((await api.response('/links/' + link.id, 'DELETE')).status, 204);
+
+  const pixel = await api.get<{ id: string }>('/pixels', 'POST', { name: 'Pixel ' + tag });
+  assert.equal((await api.response('/pixels/' + pixel.id, 'DELETE')).status, 204);
+
+  assert.ok((await api.response('/websites/' + site.id + '/export?' + rangeQ)).ok);
+  assert.equal((await api.response('/websites/' + site.id, 'DELETE')).status, 204);
+
+  context.diagnostic('Verified extended Mautic, Listmonk, and Umami APIs end-to-end against live services.');
+});

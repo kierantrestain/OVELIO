@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import Papa from 'papaparse';
 import { z } from 'zod';
-import type { Consent, Contact, ContactDetail, ContactInput, Subscriber } from '../contracts';
+import type { Consent, ConsentEvent, Contact, ContactDetail, ContactInput, Subscriber, SuppressionRecord } from '../contracts';
 import { recordActivity } from './activity';
 import { AppError, emailKey, logError } from './config';
 import { db, transaction } from './db';
@@ -67,6 +67,56 @@ async function suppressKey(key: string, reason: Reason, evidence: string, client
 
 export async function receiveSuppression(email: string, reason: Reason, evidence: string) {
   await transaction(client => suppressKey(emailKey(email), reason, evidence, client));
+}
+
+export async function manualSuppress(email: string, reason: Reason, evidence: string) {
+  const normalized = email.trim().toLowerCase();
+  const [contact, subscriber] = await Promise.all([
+    mautic.findContact(normalized).catch(() => null),
+    listmonk.findSubscriber(normalized).catch(() => null),
+  ]);
+  await transaction(async client => {
+    await client.query('SELECT pg_advisory_xact_lock(64337002)');
+    if (contact) await saveState(contact, client);
+    await suppressKey(emailKey(normalized), reason, evidence.trim(), client, contact?.id);
+  });
+  await Promise.all([
+    contact && !contact.suppressed ? missingIsOkay(mautic.setSuppressed(contact.id, reason)) : null,
+    subscriber && !subscriber.blocked ? missingIsOkay(listmonk.blockSubscriber(subscriber.id)) : null,
+  ]);
+  await recordActivity('Email address suppressed', '/audience?tab=Suppressions');
+}
+
+export async function listSuppressions(): Promise<SuppressionRecord[]> {
+  const result = await db.query<{
+    email_key: string;
+    reason: SuppressionRecord['reason'];
+    created_at: Date;
+    contact_id: string | null;
+  }>(
+    `SELECT s.email_key, s.reason, s.created_at, cs.contact_id
+     FROM suppressions s
+     LEFT JOIN contact_state cs ON cs.email_key = s.email_key
+     ORDER BY s.created_at DESC
+     LIMIT 200`,
+  );
+  const records: SuppressionRecord[] = [];
+  for (const row of result.rows) {
+    const contactId = row.contact_id ? Number(row.contact_id) : null;
+    let email: string | null = null;
+    if (contactId) {
+      const contact = await missingIsOkay(mautic.contact(contactId)).catch(() => null);
+      if (contact?.email && emailKey(contact.email) === row.email_key) email = contact.email;
+    }
+    records.push({
+      emailKey: row.email_key,
+      reason: row.reason,
+      at: row.created_at.toISOString(),
+      contactId,
+      email,
+    });
+  }
+  return records;
 }
 
 async function optIn(contact: Contact, state: State, evidence: string, client: PoolClient) {
@@ -135,8 +185,17 @@ export async function setConsent(id: number, action: 'opted_in' | 'suppressed', 
 }
 
 export async function contactDetail(id: number): Promise<ContactDetail> {
-  const [contact, segments, activity, state] = await Promise.all([
-    mautic.contact(id), mautic.contactSegments(id), mautic.contactActivity(id), getState(id),
+  const [contact, segments, activity, state, notes, workflowIds, consentRows] = await Promise.all([
+    mautic.contact(id),
+    mautic.contactSegments(id),
+    mautic.contactActivity(id),
+    getState(id),
+    mautic.contactNotes(id).catch(() => []),
+    mautic.contactCampaigns(id).catch(() => []),
+    db.query<{ id: string; action: 'opted_in' | 'suppressed'; evidence: string; created_at: Date }>(
+      'SELECT id, action, evidence, created_at FROM consent_events WHERE contact_id = $1 ORDER BY id DESC LIMIT 30',
+      [id],
+    ),
   ]);
   const key = contact.email ? emailKey(contact.email) : null;
   const suppressed = contact.suppressed || Boolean(key && await isSuppressed(key));
@@ -149,10 +208,26 @@ export async function contactDetail(id: number): Promise<ContactDetail> {
       logError('contact-lists', error);
     }
   }
-  return { ...contact, suppressed, segments, activity, mailingListIds, consent: suppressed ? 'suppressed' : state?.email_key === key ? state.consent : 'unknown' };
+  const consentHistory: ConsentEvent[] = consentRows.rows.map(row => ({
+    id: String(row.id),
+    action: row.action,
+    evidence: row.evidence,
+    at: row.created_at.toISOString(),
+  }));
+  return {
+    ...contact,
+    suppressed,
+    segments,
+    activity,
+    notes,
+    workflowIds,
+    consentHistory,
+    mailingListIds,
+    consent: suppressed ? 'suppressed' : state?.email_key === key ? state.consent : 'unknown',
+  };
 }
 
-export async function contactDirectory(options: { search?: string; page?: number; segmentId?: number }) {
+export async function contactDirectory(options: { search?: string; page?: number; segmentId?: number; tag?: string }) {
   const page = await mautic.contacts(options);
   const keys = page.items.filter(item => item.email).map(item => emailKey(item.email));
   const muted = await db.query<{ email_key: string }>(`SELECT email_key FROM suppressions WHERE email_key = ANY($1::text[])`, [keys]);
@@ -160,6 +235,38 @@ export async function contactDirectory(options: { search?: string; page?: number
   return { ...page, items: page.items.map(item => ({
     ...item, suppressed: item.suppressed || Boolean(item.email && blocked.has(emailKey(item.email))),
   })) };
+}
+
+export async function bulkUpdateContacts(input: {
+  ids: number[];
+  action: 'add_tag' | 'remove_tag' | 'add_segment' | 'adjust_points';
+  tag?: string;
+  segmentId?: number;
+  points?: number;
+}) {
+  let updated = 0;
+  for (const contactId of input.ids) {
+    if (input.action === 'add_tag' && input.tag) {
+      const current = await mautic.contact(contactId);
+      const nextTags = [...new Set([...current.tags, input.tag.trim()])];
+      await mautic.updateContact(contactId, { email: current.email, tags: nextTags });
+      updated++;
+    } else if (input.action === 'remove_tag' && input.tag) {
+      const current = await mautic.contact(contactId);
+      const nextTags = current.tags.filter(t => t.toLowerCase() !== input.tag!.trim().toLowerCase());
+      await mautic.updateContact(contactId, { email: current.email, tags: nextTags });
+      updated++;
+    } else if (input.action === 'add_segment' && input.segmentId) {
+      await mautic.addToSegment(input.segmentId, contactId);
+      await enqueue('contact_sync', String(contactId), { contactId });
+      updated++;
+    } else if (input.action === 'adjust_points' && input.points) {
+      await mautic.adjustPoints(contactId, input.points);
+      updated++;
+    }
+  }
+  await recordActivity(`Bulk contact update applied (${updated})`, '/audience');
+  return { updated };
 }
 
 export async function updateMembership(contactId: number, segmentId: number, member: boolean) {
@@ -187,6 +294,30 @@ export async function updateMailingList(contactId: number, listId: number, membe
     await listmonk.removeSubscriberFromLists(subscriber.id, [listId]);
   }
   return contactDetail(contactId);
+}
+
+export async function resendContactOptin(contactId: number) {
+  const contact = await mautic.contact(contactId);
+  if (!contact.email) throw new AppError(409, 'Add an email address first.');
+  if (!await checkRecipient(contact.email)) throw new AppError(409, 'This contact does not have active marketing consent.');
+  const subscriber = await listmonk.findSubscriber(contact.email);
+  if (!subscriber) throw new AppError(404, 'No synced newsletter subscriber found for this contact.');
+  await listmonk.resendOptin(subscriber.id);
+}
+
+export async function deleteSegmentSafely(segmentId: number) {
+  await mautic.deleteSegment(segmentId);
+  await db.query('DELETE FROM segment_lists WHERE segment_id = $1', [segmentId]);
+  await recordActivity('Segment deleted', '/audience?tab=Segments');
+}
+
+export async function deleteListSafely(listId: number) {
+  const mapping = await db.query('SELECT segment_id FROM segment_lists WHERE list_id = $1', [listId]);
+  if (mapping.rows.length) {
+    throw new AppError(409, 'This mailing list is linked to an audience segment. Delete the segment instead.');
+  }
+  await listmonk.deleteList(listId);
+  await recordActivity('Mailing list deleted', '/audience?tab=Mailing+lists');
 }
 
 export async function requestErasure(id: number) {
@@ -324,9 +455,18 @@ export async function checkRecipient(email: string): Promise<boolean> {
 
 const optionalText = z.string().trim().max(150).optional();
 export const contactFields = z.object({
-  email: z.email().max(254), firstName: optionalText, lastName: optionalText, company: optionalText,
+  email: z.email().max(254),
+  firstName: optionalText,
+  lastName: optionalText,
+  company: optionalText,
+  phone: optionalText,
+  position: optionalText,
+  city: optionalText,
+  country: optionalText,
+  website: z.string().trim().max(300).optional(),
   tags: z.array(z.string().trim().min(1).max(70)).max(30).optional(),
-  consent: z.enum(['opted_in', 'unknown']).optional(), evidence: z.string().trim().max(500).optional(),
+  consent: z.enum(['opted_in', 'unknown']).optional(),
+  evidence: z.string().trim().max(500).optional(),
 });
 
 export async function importContacts(csv: string, evidence?: string) {
@@ -344,9 +484,18 @@ export async function importContacts(csv: string, evidence?: string) {
       if (malformed.has(index)) throw new AppError(400, 'Column count does not match the header.');
       const optedIn = row.consent?.trim().toLowerCase() === 'opted_in' || row.consent?.trim().toLowerCase() === 'optedin';
       const input = contactFields.parse({
-        email: row.email?.trim(), firstName: row.firstname || undefined, lastName: row.lastname || undefined,
-        company: row.company || undefined, tags: row.tags?.split('|').map(tag => tag.trim()).filter(Boolean),
-        consent: optedIn ? 'opted_in' : undefined, evidence: row.evidence || evidence,
+        email: row.email?.trim(),
+        firstName: row.firstname || undefined,
+        lastName: row.lastname || undefined,
+        company: row.company || undefined,
+        phone: row.phone || undefined,
+        position: row.position || undefined,
+        city: row.city || undefined,
+        country: row.country || undefined,
+        website: row.website || undefined,
+        tags: row.tags?.split('|').map(tag => tag.trim()).filter(Boolean),
+        consent: optedIn ? 'opted_in' : undefined,
+        evidence: row.evidence || evidence,
       });
       await saveContact(input);
       imported++;
@@ -374,11 +523,18 @@ export async function exportContacts() {
     for (const item of result.items) {
       const state = lookup.get(item.id);
       const consent = item.suppressed ? 'suppressed' : item.email && state?.email_key === emailKey(item.email) ? state.consent : 'unknown';
-      rows.push([item.email, item.firstName, item.lastName, item.company, item.tags.join('|'), consent]);
+      rows.push([
+        item.email, item.firstName, item.lastName, item.company,
+        item.phone ?? '', item.position ?? '', item.city ?? '', item.country ?? '',
+        item.tags.join('|'), consent,
+      ]);
     }
     if (page * result.limit >= result.total || !result.items.length) break;
   }
-  return Papa.unparse({ fields: ['email', 'first_name', 'last_name', 'company', 'tags', 'consent'], data: rows }, { escapeFormulae: true });
+  return Papa.unparse({
+    fields: ['email', 'first_name', 'last_name', 'company', 'phone', 'position', 'city', 'country', 'tags', 'consent'],
+    data: rows,
+  }, { escapeFormulae: true });
 }
 
 export async function exportContact(id: number) {
