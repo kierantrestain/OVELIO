@@ -97,6 +97,35 @@ http://127.0.0.1:9900 {
 		}
 	}
 
+	# ANA-03: tracked-link redirects and pixels are recorded by the analytics engine.
+	@umamiRedirect {
+		method GET HEAD
+		path_regexp umamiRedirect ^/[qp]/[A-Za-z0-9_-]{1,100}$
+	}
+	handle @umamiRedirect {
+		reverse_proxy umami:3000 {
+			header_up -Authorization
+			header_up -Cookie
+			header_up X-Ovelio-Client-Ip {remote_host}
+		}
+	}
+
+	# DEL-03: provider bounce webhooks. Listmonk verifies each provider's credentials, so Authorization is kept.
+	# The authenticated native /webhooks/bounce route is deliberately not exposed.
+	@listmonkBounce {
+		method POST
+		path /webhooks/service/ses /webhooks/service/sendgrid /webhooks/service/postmark /webhooks/service/azure /webhooks/service/forwardemail /webhooks/service/lettermint
+	}
+	handle @listmonkBounce {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy listmonk:9000 {
+			header_up -Cookie
+			header_down -Set-Cookie
+		}
+	}
+
 	handle {
 		request_body {
 			max_size 5MB

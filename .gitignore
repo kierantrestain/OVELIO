@@ -8,3 +8,6 @@ playwright-report/
 test-results/
 backups/
 .DS_Store
+
+# Pinned engine sources for reading (scripts/fetch-refs.sh)
+.refs/

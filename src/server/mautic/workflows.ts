@@ -1,3 +1,4 @@
+import { maxWorkflowSteps } from '../../contracts';
 import type { Workflow, WorkflowInput, WorkflowStep, WorkflowStepKind } from '../../contracts';
 import { UpstreamError } from '../upstream';
 import { flag, items, number, positiveId, published, record, requiredId, service, text, type ApiRecord } from './normalize';
@@ -182,8 +183,8 @@ export function toWorkflow(dto: ApiRecord): Workflow {
 }
 
 export function workflowPayload(input: WorkflowInput, prior: ManagedStep[] = []) {
-  if (!input.steps.length || input.steps.length > 20) {
-    throw new UpstreamError(service, 400, 'Add between 1 and 20 workflow steps.');
+  if (!input.steps.length || input.steps.length > maxWorkflowSteps) {
+    throw new UpstreamError(service, 400, `Add between 1 and ${maxWorkflowSteps} workflow steps.`);
   }
 
   const useFormTrigger = input.segmentId === 0 && input.formId !== undefined && input.formId > 0;

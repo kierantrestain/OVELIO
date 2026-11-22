@@ -1,19 +1,34 @@
+import { randomBytes } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import sanitize from 'sanitize-html';
-import type { CampaignInput, CampaignMetrics, DateRange, TransactionalEmailInput } from '../contracts';
+import type { Campaign, CampaignInput, Page, CampaignMetrics, DateRange, TransactionalEmailInput } from '../contracts';
 import { recordActivity } from './activity';
 import { checkRecipient } from './audience';
 import { AppError, requiredEnv } from './config';
 import { db, transaction } from './db';
 import { listmonk } from './listmonk';
 
-const metricKeys: (keyof CampaignMetrics)[] = ['sent', 'delivered', 'opens', 'clicks', 'bounces', 'unsubscribes'];
+const metricKeys: Exclude<keyof CampaignMetrics, 'unavailable'>[] = ['sent', 'delivered', 'opens', 'clicks', 'bounces', 'unsubscribes'];
 const contentSlot = '{{ template "content" . }}';
 const contentMarker = 'OVELIO_NEWSLETTER_CONTENT_SLOT';
 const spacing = /^\d+(?:\.\d+)?(?:px|rem|em|%)?(?:\s+\d+(?:\.\d+)?(?:px|rem|em|%)?){0,3}$/;
 
-export function mailContent(body: string, template = false) {
-  const source = template ? body.replaceAll(contentSlot, contentMarker) : body;
+// Listmonk 6.2.0 merge tags that are safe to keep (subscriber and campaign fields, plus link functions).
+const mergeTag = new RegExp(
+  '\\{\\{\\s*(\\.Subscriber\\.(?:FirstName|LastName|Name|Email|UUID)|\\.Subscriber\\.Attribs\\.[A-Za-z0-9_]+'
+  + '|\\.Campaign\\.(?:Name|Subject)|UnsubscribeURL|OptinURL|MessageURL|ManageURL)\\s*\\}\\}', 'g');
+
+export function mailContent(body: string, template = false, mergeTags = false) {
+  let source = template ? body.replaceAll(contentSlot, contentMarker) : body;
+  // Allow-listed tags are swapped for unguessable plain-text tokens, sanitised, then restored in canonical form.
+  const nonce = 'ovtag' + randomBytes(9).toString('hex');
+  const tags: string[] = [];
+  if (mergeTags) {
+    source = source.replace(mergeTag, (_all, name: string) => {
+      tags.push(`{{ ${name} }}`);
+      return `${nonce}x${tags.length - 1}x`;
+    });
+  }
   const output = sanitize(source.replaceAll('{{', '&#123;&#123;'), {
     allowedTags: [...sanitize.defaults.allowedTags, 'img', 'center', 'font', 'hr', 'header', 'section', 'tfoot', 'main'],
     allowedAttributes: {
@@ -48,7 +63,8 @@ export function mailContent(body: string, template = false) {
     allowProtocolRelative: false,
   });
   if (!output.trim()) throw new AppError(400, 'Enter email content.');
-  const safe = output.replaceAll('{{', '&#123;&#123;');
+  let safe = output.replaceAll('{{', '&#123;&#123;');
+  if (tags.length) safe = safe.replace(new RegExp(`${nonce}x(\\d+)x`, 'g'), (_all, index: string) => tags[Number(index)] ?? '');
   return template ? safe.replaceAll(contentMarker, contentSlot) : safe;
 }
 
@@ -58,7 +74,7 @@ export function approvedCampaign(input: CampaignInput): CampaignInput {
     throw new AppError(400, 'Choose the configured sender email address.');
   }
   const contentType = input.contentType ?? 'html';
-  const body = contentType === 'plain' || contentType === 'markdown' ? input.body.trim() : mailContent(input.body);
+  const body = contentType === 'plain' || contentType === 'markdown' ? input.body.trim() : mailContent(input.body, false, true);
   if (!body) throw new AppError(400, 'Enter email content.');
   return { ...input, fromEmail: approved, contentType, body };
 }
@@ -134,16 +150,38 @@ export function aggregateEmailMetrics(items: { metrics: CampaignMetrics }[], com
     const total = counts.reduce<number>((sum, count) => sum + (count ?? 0), 0);
     return [key, complete && (counts.length ? counts.every(count => count !== null) : tracked) ? total : null] as const;
   });
-  return Object.fromEntries(values) as CampaignMetrics;
+  return {
+    ...Object.fromEntries(values) as Omit<CampaignMetrics, 'unavailable'>,
+    unavailable: {
+      delivered: 'Needs delivery feedback from your email provider. Listmonk only records sent and bounced.',
+      unsubscribes: 'Per-campaign unsubscribes are not recorded yet.',
+    },
+  };
+}
+
+const summaryPageLimit = 100;
+const summaryMaxPages = 50;
+
+/** Reads every campaign page by page. `complete` is false only if the safety limit stopped the read early. */
+export async function allCampaigns(read: (options: { page: number; limit: number }) => Promise<Page<Campaign>> = options => listmonk.campaigns(options)) {
+  const items: Campaign[] = [];
+  let total = 0;
+  for (let page = 1; page <= summaryMaxPages; page++) {
+    const batch = await read({ page, limit: summaryPageLimit });
+    total = batch.total;
+    items.push(...batch.items);
+    if (!batch.items.length || items.length >= total) break;
+  }
+  return { items, total, complete: items.length >= total };
 }
 
 export async function campaignSummary(range: DateRange) {
   const [campaigns, active, running] = await Promise.all([
-    listmonk.campaigns({ limit: 100 }),
+    allCampaigns(),
     listmonk.campaigns({ limit: 1, status: ['running', 'scheduled'] }),
     listmonk.runningCampaignStats().catch(() => []),
   ]);
-  const ids = campaigns.total <= campaigns.items.length ? campaigns.items.map(item => item.id) : null;
+  const ids = campaigns.complete ? campaigns.items.map(item => item.id) : null;
   const [trend, clicksTrend, bouncesTrend] = ids
     ? await Promise.all([
       listmonk.campaignTrend(ids, range, 'views').catch(() => null),
@@ -154,7 +192,7 @@ export async function campaignSummary(range: DateRange) {
   return {
     active: active.total,
     running,
-    email: aggregateEmailMetrics(campaigns.items, campaigns.total <= campaigns.items.length),
+    email: aggregateEmailMetrics(campaigns.items, campaigns.complete),
     trend,
     clicksTrend,
     bouncesTrend,

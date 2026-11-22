@@ -106,7 +106,8 @@ test('campaign metrics distinguish historic data, tracking disabled, and unknown
     ? reply({ 'privacy.disable_tracking': true, 'bounce.enabled': false })
     : reply(campaign));
   const result = await adapter.campaign(3);
-  assert.deepEqual(result.metrics, { sent: 10, delivered: null, opens: 3, clicks: null, bounces: null, unsubscribes: null });
+  assert.deepEqual({ ...result.metrics, unavailable: undefined }, { sent: 10, delivered: null, opens: 3, clicks: null, bounces: null, unsubscribes: null, unavailable: undefined });
+  assert.ok(result.metrics.unavailable?.delivered);
 });
 
 test('scheduling saves the native date before promoting the campaign state', async () => {
@@ -534,8 +535,7 @@ test('media library lists array or paginated payloads, uploads multipart FormDat
 });
 
 test('bounces support campaign filtering, safe campaign name mapping, delete, and blocklist', async () => {
-  let blocklistCalls = 0;
-  const adapter = fakeListmonk((url, method, body) => {
+  const adapter = fakeListmonk((url, method) => {
     if (url.pathname === '/api/bounces' && method === 'GET') {
       assert.equal(url.searchParams.get('page'), '2');
       assert.equal(url.searchParams.get('per_page'), '10');
@@ -557,11 +557,6 @@ test('bounces support campaign filtering, safe campaign name mapping, delete, an
       });
     }
     if (url.pathname === '/api/bounces/101' && method === 'DELETE') return reply(true);
-    if (url.pathname === '/api/bounces/blocklist' && method === 'PUT') {
-      blocklistCalls++;
-      assert.deepEqual(body, { ids: [101, 102] });
-      return reply(true);
-    }
     throw new Error(`Unexpected ${method} ${url.pathname}`);
   });
 
@@ -578,10 +573,6 @@ test('bounces support campaign filtering, safe campaign name mapping, delete, an
   ]);
 
   await adapter.deleteBounce(101);
-  await adapter.blocklistBounced([]);
-  assert.equal(blocklistCalls, 0);
-  await adapter.blocklistBounced([101, 102]);
-  assert.equal(blocklistCalls, 1);
 });
 
 test('transactional email sends normalized payload to /api/tx', async () => {

@@ -26,6 +26,7 @@ import type {
   LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
   WorkflowInput, WorkflowStep, WorkflowStepKind,
 } from '@/contracts';
+import { maxWorkflowSteps } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
 import {
@@ -568,7 +569,7 @@ function WorkflowForm({ workflow, onClose, onDone }: { workflow?: Workflow; onCl
         </div>;
       })}
 
-      {steps.length < 12 ? <div>
+      {steps.length < maxWorkflowSteps ? <div>
         <Button label="Add step" icon={<Plus size={15} />} onClick={() => setSteps(items => [...items, makeEmptyStep(nextKey.current++)])} />
       </div> : null}
       <Feedback error={action.error} />

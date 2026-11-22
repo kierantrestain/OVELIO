@@ -71,6 +71,10 @@ import type {
   WebsiteShare,
   WeeklyTraffic,
 } from '@/contracts';
+import { SEGMENT_DIMENSION_OPERATORS, UNFILTERABLE_DIMENSIONS, operatorLabel } from '@/contracts/analytics';
+
+// ANA-04: Umami 3.5.0 has no filter column for these report dimensions, so their rows are not clickable filters.
+const isFilterable = (dimension: ReportDimension) => !(UNFILTERABLE_DIMENSIONS as readonly string[]).includes(dimension);
 import { api, date, duration, message, number, saveFile, useAction, useFields, useResource } from './client';
 import { EmailMetrics } from './overview';
 import { useUser } from './shell';
@@ -190,7 +194,6 @@ const stepTypes = [
 const segmentFilterDimensionOptions: { value: ReportDimension; label: string }[] = [
   { value: 'path', label: 'Path' },
   { value: 'referrer', label: 'Referrer' },
-  { value: 'channel', label: 'Channel' },
   { value: 'country', label: 'Country' },
   { value: 'region', label: 'Region' },
   { value: 'city', label: 'City' },
@@ -206,27 +209,10 @@ const segmentFilterDimensionOptions: { value: ReportDimension; label: string }[]
   { value: 'title', label: 'Page title' },
   { value: 'query', label: 'Query' },
   { value: 'hostname', label: 'Hostname' },
-  { value: 'screen', label: 'Screen' },
   { value: 'language', label: 'Language' },
 ];
 
-const segmentOperatorOptions = [
-  { value: 'eq', label: 'Equals' },
-  { value: 'neq', label: 'Does not equal' },
-  { value: 'c', label: 'Contains' },
-  { value: 'nc', label: 'Does not contain' },
-  { value: 's', label: 'Starts with' },
-  { value: 'ns', label: 'Does not start with' },
-] as const;
-
-const segmentOperatorLabels: Record<string, string> = {
-  eq: '=',
-  neq: '≠',
-  c: 'contains',
-  nc: 'not contains',
-  s: 'starts with',
-  ns: 'not starts with',
-};
+const segmentOperatorOptions = SEGMENT_DIMENSION_OPERATORS.map(value => ({ value, label: operatorLabel(value) }));
 
 const cohortDateRangeOptions = [
   { value: '24hour', label: 'Last 24 hours' },
@@ -532,7 +518,6 @@ function TrackingCode({ website, origin, onClose }: { website: Website; origin: 
 function WebsiteSettingsModal({
   website,
   range,
-  origin,
   isAdmin,
   onClose,
   onUpdated,
@@ -541,7 +526,6 @@ function WebsiteSettingsModal({
 }: {
   website: Website;
   range: DateRange;
-  origin: string;
   isAdmin: boolean;
   onClose: () => void;
   onUpdated: (website: Website) => void;
@@ -595,20 +579,12 @@ function WebsiteSettingsModal({
         <Feedback error={shareAction.error} notice={shareAction.notice} />
         {!shares.data ? <AsyncState loading={shares.loading} error={shares.error} retry={shares.refresh} />
           : shares.data.length ? <Rows>{shares.data.map(share => {
-            const shareUrl = `${origin}/share/${share.slug}`;
             return <li key={share.id}>
               <span>
                 <Text weight="medium">{share.name}</Text>
-                <Text type="supporting" color="secondary">{shareUrl}</Text>
+                <Text type="supporting" color="secondary">The public page is served by the analytics engine and is not available on this site&apos;s address yet.</Text>
               </span>
               <span className="ov-actions">
-                <IconButton
-                  size="sm"
-                  variant="ghost"
-                  label={`Copy share link ${share.name}`}
-                  icon={<Copy size={14} />}
-                  onClick={() => void shareAction.run(async () => navigator.clipboard.writeText(shareUrl), 'Share link copied.')}
-                />
                 <IconButton
                   size="sm"
                   variant="ghost"
@@ -964,7 +940,7 @@ function SavedSegmentsPanel({
     }
     for (const rule of item.filters) {
       const dim = dimensionLabels[rule.name as ReportDimension] ?? rule.name;
-      const op = segmentOperatorLabels[rule.operator] ?? rule.operator;
+      const op = operatorLabel(rule.operator);
       parts.push(`${dim} ${op} ${rule.value}`);
     }
     return parts.join(' · ') || 'No filter rules recorded';
@@ -1319,9 +1295,11 @@ function TrafficTab({
                 {
                   key: 'name',
                   header: dimensionLabels[activeExpandedDim] ?? 'Name',
-                  renderCell: row => <Link onClick={() => onAddFilter(activeExpandedDim, row.name)} weight="medium">
-                    {row.name || 'Unknown'}
-                  </Link>,
+                  renderCell: row => isFilterable(activeExpandedDim)
+                    ? <Link onClick={() => onAddFilter(activeExpandedDim, row.name)} weight="medium">
+                      {row.name || 'Unknown'}
+                    </Link>
+                    : <span>{row.name || 'Unknown'}</span>,
                 },
                 { key: 'visitors', header: 'Visitors', align: 'end', renderCell: row => number(row.visitors) },
                 { key: 'visits', header: 'Visits', align: 'end', renderCell: row => number(row.visits) },
@@ -3338,7 +3316,7 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
 
   function addFilter(dimension: ReportDimension, value: string) {
     const trimmed = value.trim();
-    if (!trimmed) return;
+    if (!trimmed || !isFilterable(dimension)) return;
     const filterKey = filterKeyForDimension(dimension);
     setFilters(current => ({ ...current, [filterKey]: trimmed }));
   }
@@ -3458,7 +3436,6 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
     {modal === 'settings' && website && canEdit ? <WebsiteSettingsModal
       website={website}
       range={range}
-      origin={resolveOrigin(trackingOrigin)}
       isAdmin={isAdmin}
       onClose={() => setModal(undefined)}
       onUpdated={updated => {

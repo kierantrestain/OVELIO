@@ -223,6 +223,7 @@ function CampaignForm({ campaign, onClose, onDone }: {
   const quickVariables = (
     <div className="ov-actions">
       <Button size="sm" label="First Name" onClick={() => insertSnippet('{{ .Subscriber.FirstName }}')} />
+      <Button size="sm" label="Last Name" onClick={() => insertSnippet('{{ .Subscriber.LastName }}')} />
       <Button size="sm" label="Email" onClick={() => insertSnippet('{{ .Subscriber.Email }}')} />
       <Button size="sm" label="Unsubscribe" onClick={() => insertSnippet('{{ UnsubscribeURL }}')} />
       {contentType === 'html' ? (
@@ -1260,6 +1261,9 @@ export function CampaignView({ id }: { id: string }) {
         action={<Button size="sm" label="Refresh metrics" icon={<RefreshCw size={14} />} onClick={refreshAll} isLoading={resource.loading || analytics.loading} />}
       >
         <EmailMetrics metrics={campaign.metrics} />
+        {Object.entries(campaign.metrics.unavailable ?? {}).map(([key, note]) => <Text key={key} type="label" color="secondary">
+          {key === 'delivered' ? 'Delivered' : 'Unsubscribes'}: {note}
+        </Text>)}
         {canEdit ? <div className="ov-actions">
           <Text type="label" color="secondary">Export CSV:</Text>
           {exportMetrics.map(item => <Button
