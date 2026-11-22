@@ -74,6 +74,8 @@ Run the production commands with `COMPOSE_FILE=compose.yaml:compose.production.y
 
 OVELIO defaults to no recorded marketing consent and stores consent evidence and suppression history. Native unsubscribes and permanent delivery failures can suppress the same address across both sending engines. Audience supports contact export and erasure. A keyed address digest can be retained to screen future imports against an objection. Set your retention period, privacy notice, provider contracts and lawful basis for processing before importing customer data. Assess consent requirements for tracking pixels separately from marketing emails. [ICO guidance on marketing email and PECR](https://ico.org.uk/for-organisations/direct-marketing-and-privacy-and-electronic-communications/guidance-on-direct-marketing-using-electronic-mail/)
 
+Contact erasure removes the audience and subscriber records. Native form results can retain submitted values after the contact link is cleared. Include retained form results and backup retention in your operator's erasure process. [Mautic form submission storage](https://github.com/mautic/mautic/blob/7.2.2/app/bundles/FormBundle/Entity/Submission.php)
+
 ## Verify
 
 ```sh
