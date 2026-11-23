@@ -29,11 +29,14 @@ test('console navigation and an interactive CSV import', async ({ page }) => {
     mimeType: 'text/csv',
     buffer: Buffer.from('email,first_name,last_name\n' + address + ',Browser,Fixture\n'),
   });
-  const imported = page.waitForResponse(response => response.url().endsWith('/api/console/contacts/import'));
+  // AUD-10: upload, check the suggested mapping, then run the import in the background and wait for it to finish.
+  await form.getByRole('button', { name: 'Continue', exact: true }).click();
+  const started = page.waitForResponse(response => /\/api\/console\/contacts\/imports\/[0-9a-f-]{36}\/start$/.test(response.url()));
   await form.getByRole('button', { name: 'Import contacts', exact: true }).click();
-  const response = await imported;
-  expect(response.ok()).toBe(true);
-  expect(await response.json()).toMatchObject({ imported: 1, failed: [] });
+  expect((await started).ok()).toBe(true);
+  await expect(form.getByText('Import finished')).toBeVisible({ timeout: 60_000 });
+  await expect(form.getByText('Created 1')).toBeVisible();
+  await form.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByText(address, { exact: true })).toBeVisible();
 });
 

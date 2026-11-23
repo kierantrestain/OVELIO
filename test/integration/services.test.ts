@@ -4,7 +4,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import type {
-  Campaign, Contact, ContactDetail, Dashboard, JourneyEmail, MailingList, Page, Segment, Settings, Template, Workflow,
+  Campaign, Contact, ContactDetail, Dashboard, ImportPreview, ImportRun, JourneyEmail, MailingList, Page, Segment, Settings,
+  Template, Workflow,
 } from '../../src/contracts/index';
 import { apiClient, eventually, testEnv } from './client';
 
@@ -39,13 +40,23 @@ test('real audience, newsletter, suppression and welcome workflows', { timeout: 
   await eventually('all four integration connections and SMTP setup', () => api.get<Settings>('/settings'),
     settings => Object.values(settings.health).every(health => health.status === 'ready') && settings.sender.configured);
 
-  const result = await api.get<{ imported: number; failed: unknown[] }>('/contacts/import', 'POST', {
+  // AUD-10: upload a draft, start it with the suggested mapping, then follow the background job to the end.
+  const evidence = 'Automated test fixture, verified consent at import';
+  const draft = await api.get<{ run: ImportRun; preview: ImportPreview }>('/contacts/imports', 'POST', {
     csv: 'email,first_name,last_name,consent\n' + recipient + ',Ada,Lovelace,opted_in\n'
       + unsubscribe + ',Grace,Hopper,opted_in\n',
-    evidence: 'Automated test fixture, verified consent at import',
+    fileName: 'acceptance.csv', evidence,
   });
-  assert.equal(result.imported, 2);
-  assert.deepEqual(result.failed, []);
+  assert.equal(draft.preview.rowCount, 2);
+  assert.equal(draft.preview.mapping.email, 'email', 'the email column is mapped automatically');
+  await api.get<ImportRun>('/contacts/imports/' + draft.run.id + '/start', 'POST', {
+    mapping: draft.preview.mapping, dryRun: false, updateExisting: true, evidence,
+  });
+  const result = await eventually('background contact import', () => api.get<ImportRun>('/contacts/imports/' + draft.run.id),
+    run => run.status === 'done' || run.status === 'failed', 120000);
+  assert.equal(result.status, 'done');
+  assert.equal(result.created + result.updated, 2);
+  assert.equal(result.skipped + result.errors, 0);
 
   const lookup = async (email: string) => {
     const page = await api.get<{ items: Contact[] }>('/contacts?q=' + encodeURIComponent(email));
