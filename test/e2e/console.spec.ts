@@ -36,7 +36,8 @@ test('console navigation and an interactive CSV import', async ({ page }) => {
   expect((await started).ok()).toBe(true);
   await expect(form.getByText('Import finished')).toBeVisible({ timeout: 60_000 });
   await expect(form.getByText('Created 1')).toBeVisible();
-  await form.getByRole('button', { name: 'Close', exact: true }).click();
+  // The footer button, not the dialog's corner close icon (which only has an aria-label).
+  await form.getByRole('button', { name: 'Close', exact: true }).filter({ hasText: 'Close' }).click();
   await expect(page.getByText(address, { exact: true })).toBeVisible();
 });
 
