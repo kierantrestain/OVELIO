@@ -4,7 +4,7 @@ import {
   Ban, Download, ListFilter, MailCheck, Minus, Pencil, Plus, Search, Send, ShieldAlert, Trash2, Upload,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
@@ -23,12 +23,20 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  BounceRecord, Company, Contact, ContactDetail, ContactNote, CustomField, CustomFieldObject,
+  BounceRecord, Company, Contact, ContactDetail, ContactNote, ContactSortKey, ContactTimeline, ContactView, ImportMapping, ImportPreview, ImportRun, CustomField, CustomFieldObject,
   JourneyEmail, MailingList, Page, PointAction, PointTrigger, PointTriggerEventInput, PointTriggerEventType,
-  Segment, SegmentFilter, Stage, SuppressionRecord, Tag, Workflow,
+  Segment, SegmentFilter, SegmentFilterField, SegmentOffsetUnit, SegmentOptions, SegmentPicker, SegmentRule, Stage,
+  SuppressionRecord, Tag, Workflow,
 } from '@/contracts';
+import {
+  contactSearchCommands, contactSortKeys, canonicalSegmentOperator, emptySegmentRule, formatSegmentOffset, parseSegmentDate, resolveSegmentField, segmentDateUnits,
+  segmentFieldCatalogue, segmentFilterFromRule, segmentOffsetUnits, segmentOperatorsFor, segmentRelativeDates,
+  segmentRuleFromFilter, segmentValueMode,
+} from '@/contracts';
+import type { SelectorOptionType } from '@astryxdesign/core/Selector';
 import { api, date, number, saveFile, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
+import { WorkflowRunLog } from './workflow-run-log';
 import {
   AsyncState, ConfirmDialog, Empty, Feedback, FilterBar, FormActions, Modal,
   PageHeader, Pager, Panel, Rows, StatusBadge, Tabs,
@@ -37,7 +45,6 @@ import type { Tone } from './ui';
 
 const tabs = ['Contacts', 'Segments', 'Mailing lists', 'Tags & stages', 'Companies', 'Lead scoring', 'Suppressions', 'Custom fields'] as const;
 type AudienceTab = typeof tabs[number];
-type ImportResult = { imported: number; failed: { row: number; message: string }[] };
 type BulkActionType = 'add_tag' | 'remove_tag' | 'add_segment' | 'adjust_points';
 type SuppressionReason = SuppressionRecord['reason'];
 type NoteType = 'general' | 'email' | 'call' | 'meeting';
@@ -94,26 +101,9 @@ const csvTemplate = [
   'sam.taylor@example.com,Sam,Taylor,Beacon Labs,,Product Manager,Manchester,United Kingdom,,product-updates,,',
 ].join('\n') + '\n';
 
-const segmentFieldOptions = [
-  { value: 'email', label: 'Email' },
-  { value: 'company', label: 'Company' },
-  { value: 'country', label: 'Country' },
-  { value: 'city', label: 'City' },
-  { value: 'points', label: 'Lead score' },
-  { value: 'tags', label: 'Tags' },
-];
-
-const segmentOperatorOptions = [
-  { value: 'like', label: 'Contains / matches' },
-  { value: 'eq', label: 'Equals' },
-  { value: 'neq', label: 'Does not equal' },
-  { value: 'gt', label: 'Greater than' },
-  { value: 'lt', label: 'Less than' },
-  { value: 'in', label: 'In list' },
-];
-
 const fallbackPointActionTypes: Record<string, string> = {
   'email.open': 'Opens an email',
+  'email.send': 'Is sent an email',
   'url.hit': 'Visits a tracked page',
   'form.submit': 'Submits a lead form',
   'asset.download': 'Downloads an asset',
@@ -125,7 +115,14 @@ const suppressionReasons: { value: SuppressionReason; label: string }[] = [
   { value: 'bounce', label: 'Bounce' },
   { value: 'complaint', label: 'Complaint' },
   { value: 'erasure', label: 'Erasure' },
+  { value: 'manual', label: 'Manual' },
 ];
+
+const sortLabels: Record<ContactSortKey, string> = {
+  createdAt: 'Date added', updatedAt: 'Last changed', lastActive: 'Last active', email: 'Email', firstName: 'First name', lastName: 'Last name',
+  company: 'Company', city: 'City', country: 'Country', position: 'Position', points: 'Score', id: 'Contact id',
+};
+const sortChoices = contactSortKeys.map(value => ({ value, label: sortLabels[value] }));
 
 const noteTypes: { value: NoteType; label: string }[] = [
   { value: 'general', label: 'General' },
@@ -139,6 +136,7 @@ const suppressionTone: Record<SuppressionReason, [string, Tone]> = {
   bounce: ['Bounce', 'error'],
   complaint: ['Complaint', 'error'],
   erasure: ['Erasure', 'neutral'],
+  manual: ['Manual', 'warning'],
 };
 
 const bounceTone: Record<string, [string, Tone]> = {
@@ -314,23 +312,52 @@ function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: 
   </Modal>;
 }
 
+type ImportDraft = { run: ImportRun; preview: ImportPreview };
+
+// Upload, map columns, optionally dry-run, then follow the background job's progress.
 function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
   const action = useAction();
   const [file, setFile] = useState<File>();
   const [evidence, setEvidence] = useState('');
-  const [result, setResult] = useState<ImportResult>();
+  const [draft, setDraft] = useState<ImportDraft>();
+  const [mapping, setMapping] = useState<ImportMapping>({});
+  const [updateExisting, setUpdateExisting] = useState(true);
+  const [run, setRun] = useState<ImportRun>();
+  const watching = run && (run.status === 'queued' || run.status === 'running') ? run.id : null;
+  useEffect(() => {
+    if (!watching) return;
+    const timer = setInterval(() => {
+      void api<ImportRun>(`/contacts/imports/${watching}`).then(next => {
+        setRun(next);
+        if (next.status === 'done' && !next.dryRun) onImported();
+      }).catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [watching, onImported]);
+
+  async function start(dryRun: boolean) {
+    if (!draft) return;
+    setRun(await api<ImportRun>(`/contacts/imports/${draft.run.id}/start`, 'POST', {
+      mapping, dryRun, updateExisting, evidence: evidence.trim() || undefined,
+    }));
+  }
+  const issues = run && run.skipped + run.errors > 0;
+  const emailMapped = Object.values(mapping).includes('email');
+  const percent = run?.total ? Math.min(100, Math.round(run.processed / run.total * 100)) : 0;
+
   return <Modal title="Import contacts" onClose={onClose}>
-    <form className="ov-stack-sm" onSubmit={event => {
+    {!draft ? <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
         if (!file?.size) throw new Error('Choose a CSV file to import.');
-        if (file.size > 1_000_000) throw new Error('Choose a CSV file smaller than 1 MB.');
-        setResult(await api<ImportResult>('/contacts/import', 'POST', { csv: await file.text(), evidence: evidence.trim() || undefined }));
-        onImported();
+        if (file.size > 25_000_000) throw new Error('Choose a CSV file smaller than 25 MB.');
+        const next = await api<ImportDraft>('/contacts/imports', 'POST', { csv: await file.text(), fileName: file.name, evidence: evidence.trim() || undefined });
+        setDraft(next);
+        setMapping(next.preview.mapping);
       });
     }}>
       <div className="ov-actions ov-actions--between">
-        <Text type="supporting" color="secondary">Include an email column and up to 500 rows. Optional columns: first_name, last_name, company, phone, position, city, country, website, tags (separated by |), consent and evidence. A column named after a custom field alias fills that field.</Text>
+        <Text type="supporting" color="secondary">Upload a CSV with a header row and an email column. Large files run in the background; you choose how each column maps in the next step.</Text>
         <Button size="sm" label="Download CSV template" icon={<Download size={14} />}
           onClick={() => saveFile(csvTemplate, 'ovelio-contacts-template.csv', 'text/csv')} />
       </div>
@@ -338,87 +365,243 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
         <input id="ov-import-file" className="ov-native-file" type="file" accept=".csv,text/csv" onChange={event => setFile(event.target.files?.[0])} />
       </Field>
       <TextInput label="Consent evidence" description="Used for opted_in rows without their own evidence. Record the source and date of consent." isOptional value={evidence} onChange={setEvidence} />
-      <Feedback error={action.error} notice={result ? `${number(result.imported)} contacts imported. ${number(result.failed.length)} rows failed.` : undefined} />
-      {result?.failed.length ? <Rows>{result.failed.slice(0, 25).map(item => <li key={item.row}><Text type="supporting">Row {item.row} · {item.message}</Text></li>)}</Rows> : null}
+      <Feedback error={action.error} />
       <FormActions>
-        <Button label={result ? 'Close' : 'Cancel'} onClick={onClose} />
-        <Button type="submit" variant="primary" label="Import contacts" isLoading={action.busy} />
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label="Continue" isLoading={action.busy} />
       </FormActions>
-    </form>
+    </form> : <div className="ov-stack-sm">
+      <Text type="supporting" color="secondary">{number(draft.preview.rowCount)} rows in {draft.run.fileName}. Check which field each column fills.</Text>
+      <Table data={draft.preview.headers.map((header, index) => ({ header, index }))} idKey="header" columns={[
+        { key: 'header', header: 'CSV column', renderCell: item => <span className="ov-cell">
+          <Text weight="semibold">{item.header}</Text>
+          <Text type="supporting" color="secondary">{draft.preview.rows.map(row => row[item.index]).filter(Boolean).slice(0, 2).join(', ') || '—'}</Text>
+        </span> },
+        { key: 'target', header: 'Fills', renderCell: item => <Selector label={`Field for ${item.header}`} isLabelHidden width={230}
+          value={mapping[item.header] ?? 'skip'} options={draft.preview.targets}
+          onChange={value => setMapping(current => ({ ...current, [item.header]: value ?? 'skip' }))} isDisabled={!!run && run.status !== 'draft' && !run.dryRun && run.status !== 'done'} /> },
+      ]} />
+      <Switch label="Update contacts that already exist" description="Off leaves existing contacts untouched and reports them as skipped." value={updateExisting} onChange={setUpdateExisting} />
+      {run ? <div className="ov-stack-sm" role="status">
+        <Text weight="semibold">{run.dryRun ? 'Dry run' : 'Import'} {run.status === 'done' ? 'finished' : run.status === 'failed' ? 'failed' : `running, ${number(run.processed)} of ${number(run.total)} rows (${percent}%)`}</Text>
+        <Text type="supporting" color="secondary">
+          {run.dryRun ? 'Would create' : 'Created'} {number(run.created)} · {run.dryRun ? 'would update' : 'updated'} {number(run.updated)} · skipped {number(run.skipped)} · errors {number(run.errors)}
+        </Text>
+        {issues && run.status === 'done' ? <Button size="sm" label="Download skipped and failed rows" icon={<Download size={14} />}
+          onClick={() => void action.run(async () => saveFile(await api<string>(`/contacts/imports/${run.id}/issues`), 'ovelio-import-issues.csv', 'text/csv'))} /> : null}
+      </div> : null}
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label={run?.status === 'done' && !run.dryRun ? 'Close' : 'Cancel'} onClick={onClose} />
+        <Button label="Dry run" isLoading={action.busy} isDisabled={!emailMapped || !!watching}
+          onClick={() => void action.run(() => start(true))} />
+        <Button variant="primary" label="Import contacts" isLoading={action.busy} isDisabled={!emailMapped || !!watching || (run?.status === 'done' && !run.dryRun)}
+          onClick={() => void action.run(() => start(false))} />
+      </FormActions>
+    </div>}
   </Modal>;
+}
+
+function TimelinePanel({ contactId }: { contactId: number }) {
+  const [page, setPage] = useState(1);
+  const [type, setType] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [search, setSearch] = useState('');
+  const params = new URLSearchParams({ page: String(page), limit: '25' });
+  if (type) params.append('include', type);
+  if (search) params.set('q', search);
+  const timeline = useResource<ContactTimeline>(`${contactsPath}/${contactId}/timeline?${params}`);
+  const [known, setKnown] = useState<Record<string, string>>({});
+  const types = timeline.data?.types;
+  if (types && Object.keys(types).length > Object.keys(known).length) setKnown(types);
+  return <Panel title="Activity" description="Everything the audience engine has recorded for this contact, newest first.">
+    <div className="ov-toolbar">
+      <form onSubmit={event => { event.preventDefault(); setSearch(query.trim()); setPage(1); }}>
+        <TextInput label="Search activity" isLabelHidden type="search" startIcon="search" placeholder="Search activity" value={query} onChange={setQuery} width={240} />
+      </form>
+      <Selector label="Event type" isLabelHidden width={220} placeholder="All event types" hasClear value={type}
+        options={Object.entries(known).sort((a, b) => a[1].localeCompare(b[1])).map(([value, label]) => ({ value, label }))}
+        onChange={value => { setType(value); setPage(1); }} />
+    </div>
+    {!timeline.data ? <AsyncState loading={timeline.loading} error={timeline.error} retry={timeline.refresh} /> : <>
+      {timeline.data.events.length ? <Rows>{timeline.data.events.map(item => <li key={item.id}>
+        <span className="ov-cell">
+          <Text>{item.href ? <Link href={item.href}>{item.label}</Link> : item.label}</Text>
+          <Text type="supporting" color="secondary">{item.typeLabel}</Text>
+        </span>
+        <Timestamp value={item.at} format="date_time" />
+      </li>)}</Rows> : <Empty title={type || search ? 'No activity matches' : 'No recorded activity'} />}
+      <Pager {...timeline.data} onPage={setPage} />
+    </>}
+  </Panel>;
 }
 
 /* ── Segments & Mailing Lists Modals ───────────────────────────────────────── */
 
-type FilterRow = {
-  key: number;
-  glue: 'and' | 'or';
-  field: string;
-  operator: string;
-  value: string;
-};
+type Choice = { value: string; label: string };
+type ValuePatch = Partial<Pick<SegmentRule, 'text' | 'text2' | 'list' | 'interval' | 'unit'>>;
+
+const yesNoChoices: Choice[] = [{ value: '1', label: 'Yes' }, { value: '0', label: 'No' }];
+const offsetUnitChoices = segmentOffsetUnits.map(unit => ({ value: unit, label: unit }));
+const dateModeChoices: Choice[] = [
+  { value: 'absolute', label: 'A specific date' },
+  { value: 'relative', label: 'A named period (today, this month…)' },
+  { value: 'offset', label: 'A number of days, weeks, months or years from today' },
+];
+
+function ChoiceChecklist({ label, choices, selected, onChange }: {
+  label: string; choices: Choice[]; selected: string[]; onChange: (next: string[]) => void;
+}) {
+  // Values saved earlier but no longer in the list stay visible so they are not dropped silently.
+  const extra = selected.filter(value => !choices.some(choice => choice.value === value)).map(value => ({ value, label: value }));
+  const all = [...choices, ...extra];
+  return <fieldset className="ov-stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
+    <Text weight="semibold">{label}</Text>
+    {all.length ? <div className="ov-stack-sm" style={{ maxHeight: 180, overflowY: 'auto' }}>
+      {all.map(choice => <CheckboxInput key={choice.value} label={choice.label} value={selected.includes(choice.value)}
+        onChange={on => onChange(on ? [...selected, choice.value] : selected.filter(entry => entry !== choice.value))} />)}
+    </div> : <Text type="supporting" color="secondary">Nothing to choose from yet.</Text>}
+  </fieldset>;
+}
+
+function DateValueInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const parsed = parseSegmentDate(value);
+  const [mode, setMode] = useState(value ? parsed.mode : 'absolute');
+  const offset = parsed.mode === 'offset' ? parsed : { amount: 7, unit: 'days' as const, direction: 'ago' as const };
+  function pick(next: string | null) {
+    const chosen = next === 'relative' || next === 'offset' ? next : 'absolute';
+    setMode(chosen);
+    onChange(chosen === 'relative' ? 'today' : chosen === 'offset' ? formatSegmentOffset(7, 'days', 'ago') : '');
+  }
+  return <div className="ov-stack-sm">
+    <Selector label={`${label} type`} value={mode} options={dateModeChoices} onChange={pick} />
+    {mode === 'relative'
+      ? <Selector label={label} value={parsed.mode === 'relative' ? parsed.value : 'today'} options={segmentRelativeDates} onChange={next => onChange(next ?? 'today')} />
+      : mode === 'offset'
+        ? <div className="ov-form-grid ov-form-grid--three">
+          <TextInput label="Amount" inputMode="numeric" value={String(offset.amount)}
+            onChange={next => onChange(formatSegmentOffset(Number(next) || 1, offset.unit, offset.direction))} />
+          <Selector label="Unit" value={offset.unit} options={offsetUnitChoices}
+            onChange={next => onChange(formatSegmentOffset(offset.amount, (next ?? 'days') as SegmentOffsetUnit, offset.direction))} />
+          <Selector label="Direction" value={offset.direction}
+            options={[{ value: 'ago', label: 'ago' }, { value: 'ahead', label: 'from now' }]}
+            onChange={next => onChange(formatSegmentOffset(offset.amount, offset.unit, next === 'ahead' ? 'ahead' : 'ago'))} />
+        </div>
+        : <TextInput label={label} placeholder="YYYY-MM-DD" description="Add a time (YYYY-MM-DD HH:MM:SS) for date and time fields." value={value}
+          onChange={onChange} />}
+  </div>;
+}
+
+function SegmentValueInput({ field, rule, choices, onChange }: {
+  field: SegmentFilterField; rule: SegmentRule; choices: Choice[]; onChange: (patch: ValuePatch) => void;
+}) {
+  const mode = segmentValueMode(rule.operator);
+  const dated = field.kind === 'date' || field.kind === 'behaviorDate';
+  if (mode === 'none') return <Text type="supporting" color="secondary">No value needed.</Text>;
+  if (mode === 'span') {
+    return <div className="ov-form-grid">
+      <TextInput label="Number" inputMode="numeric" isRequired value={rule.interval} onChange={interval => onChange({ interval })} />
+      <Selector label="Unit" value={rule.unit} options={segmentDateUnits}
+        onChange={unit => onChange({ unit: unit === 'month' || unit === 'year' ? unit : 'day' })} />
+    </div>;
+  }
+  if (mode === 'pair') {
+    return dated
+      ? <div className="ov-stack-sm">
+        <DateValueInput label="From" value={rule.text} onChange={text => onChange({ text })} />
+        <DateValueInput label="To" value={rule.text2} onChange={text2 => onChange({ text2 })} />
+      </div>
+      : <div className="ov-form-grid">
+        <TextInput label="From" isRequired value={rule.text} onChange={text => onChange({ text })} />
+        <TextInput label="To" isRequired value={rule.text2} onChange={text2 => onChange({ text2 })} />
+      </div>;
+  }
+  if (mode === 'multi') {
+    if (choices.length || field.picker) return <ChoiceChecklist label="Values" choices={choices} selected={rule.list} onChange={list => onChange({ list })} />;
+    return <TextInput label="Values" isRequired placeholder="Comma-separated values"
+      value={rule.text || rule.list.join(', ')} onChange={text => onChange({ text, list: [] })} />;
+  }
+  if (field.kind === 'boolean') return <Selector label="Value" value={rule.text === '0' ? '0' : '1'} options={yesNoChoices} onChange={text => onChange({ text: text ?? '1' })} />;
+  if ((field.kind === 'owner' || field.kind === 'stage' || choices.length) && field.kind !== 'date') {
+    return <Selector label="Value" value={rule.text} placeholder="Choose a value" hasSearch options={choices} onChange={text => onChange({ text: text ?? '' })} />;
+  }
+  if (dated) return <DateValueInput label="Value" value={rule.text} onChange={text => onChange({ text })} />;
+  const numeric = field.kind === 'number' || field.kind === 'behaviorNumber';
+  return <TextInput label="Value" isRequired inputMode={numeric ? 'decimal' : undefined}
+    placeholder={numeric ? 'e.g. 50' : rule.operator === 'regexp' || rule.operator === '!regexp' ? 'Regular expression' : 'Filter value'}
+    value={rule.text} onChange={text => onChange({ text })} />;
+}
 
 function SegmentForm({ segment, onClose, onDone }: { segment?: Segment; onClose: () => void; onDone: () => void }) {
+  const contactFields = useResource<CustomField[]>(`${fieldPath}/contact`);
+  const companyFields = useResource<CustomField[]>(`${fieldPath}/company`);
+  const lookups = useResource<SegmentOptions>('/segment-options');
+  const segments = useResource<Segment[]>(segmentPath);
+  const tags = useResource<Tag[]>(tagPath);
+  const stages = useResource<Stage[]>(stagePath);
+  const emails = useResource<JourneyEmail[]>('/journey-emails');
+  const assets = useResource<{ id: number; title: string }[]>('/assets');
+  const campaigns = useResource<Workflow[]>('/workflows');
+  const categories = useResource<{ id: number; title: string }[]>('/categories?bundle=global');
+  const error = contactFields.error || companyFields.error || lookups.error;
+  if (!contactFields.data || !companyFields.data || !lookups.data) {
+    return <Modal title={segment ? 'Edit segment' : 'Create segment'} onClose={onClose} size="large">
+      <AsyncState loading={!error} error={error} retry={() => { contactFields.refresh(); companyFields.refresh(); lookups.refresh(); }} />
+    </Modal>;
+  }
+  // Stored rows are read once the field definitions are known, so custom fields resolve to their real type.
+  const catalogue = segmentFieldCatalogue({ contactFields: contactFields.data, companyFields: companyFields.data, pointGroups: lookups.data.pointGroups });
+  const picker: Record<SegmentPicker, Choice[]> = {
+    segments: (segments.data ?? []).filter(item => item.id !== segment?.id).map(item => ({ value: String(item.id), label: item.name })),
+    tags: (tags.data ?? []).map(item => ({ value: String(item.id), label: item.tag })),
+    stages: optionsOf(stages.data),
+    owners: optionsOf(lookups.data.owners),
+    campaigns: optionsOf(campaigns.data),
+    emails: optionsOf(emails.data),
+    assets: (assets.data ?? []).map(item => ({ value: String(item.id), label: item.title })),
+    categories: (categories.data ?? []).map(item => ({ value: String(item.id), label: item.title })),
+  };
+  return <SegmentEditor segment={segment} catalogue={catalogue} picker={picker} onClose={onClose} onDone={onDone} />;
+}
+
+type RuleRow = { key: number; rule: SegmentRule };
+
+function SegmentEditor({ segment, catalogue, picker, onClose, onDone }: {
+  segment?: Segment; catalogue: SegmentFilterField[]; picker: Record<SegmentPicker, Choice[]>; onClose: () => void; onDone: () => void;
+}) {
   const action = useAction();
   const { values, field } = useFields({ name: segment?.name ?? '', description: segment?.description ?? '' });
   const [published, setPublished] = useState(segment?.published ?? true);
-  const [rules, setRules] = useState<FilterRow[]>(() =>
-    (segment?.filters ?? []).map((entry, index) => ({
-      key: index,
-      glue: entry.glue,
-      field: entry.field,
-      operator: entry.operator,
-      value: Array.isArray(entry.filter) ? entry.filter.join(', ') : String(entry.filter ?? ''),
-    })),
-  );
-  const nextKey = useRef(rules.length);
+  const [rows, setRows] = useState<RuleRow[]>(() =>
+    (segment?.filters ?? []).map((entry, key) => ({ key, rule: segmentRuleFromFilter(entry, resolveSegmentField(catalogue, entry)) })));
+  const nextKey = useRef(rows.length);
+  const byId = (id: string) => catalogue.find(entry => entry.id === id)
+    ?? resolveSegmentField(catalogue, { field: id.slice(id.indexOf(':') + 1), object: id.startsWith('company:') ? 'company' : id.startsWith('behaviors:') ? 'behaviors' : 'lead', operator: '=', filter: '' });
+  const fieldChoices = (entry: SegmentFilterField): Choice[] =>
+    entry.picker ? picker[entry.picker] : (entry.options ?? []).map(option => ({ value: option, label: option }));
+  const fieldOptions: SelectorOptionType[] = [...new Set(catalogue.map(entry => entry.group))].map(group => ({
+    type: 'section' as const, title: group,
+    options: catalogue.filter(entry => entry.group === group).map(entry => ({ value: entry.id, label: entry.label })),
+  }));
 
   function addRule() {
-    setRules(items => [...items, { key: nextKey.current++, glue: 'and', field: 'email', operator: 'like', value: '' }]);
+    const first = catalogue.find(entry => entry.id === 'lead:email') ?? catalogue[0];
+    setRows(items => [...items, { key: nextKey.current++, rule: emptySegmentRule(first) }]);
   }
 
-  function updateRule(ruleKey: number, patch: Partial<FilterRow>) {
-    setRules(items => items.map(item => item.key === ruleKey ? { ...item, ...patch } : item));
+  function updateRule(key: number, patch: Partial<SegmentRule>) {
+    setRows(items => items.map(item => item.key === key ? { ...item, rule: { ...item.rule, ...patch } } : item));
   }
 
-  function fieldOptionsFor(current: string) {
-    return segmentFieldOptions.some(opt => opt.value === current)
-      ? segmentFieldOptions
-      : [...segmentFieldOptions, { value: current, label: prettifyKey(current) }];
-  }
-
-  function operatorOptionsFor(current: string) {
-    return segmentOperatorOptions.some(opt => opt.value === current)
-      ? segmentOperatorOptions
-      : [...segmentOperatorOptions, { value: current, label: prettifyKey(current) }];
+  function changeField(key: number, id: string) {
+    setRows(items => items.map(item => item.key === key ? { ...item, rule: emptySegmentRule(byId(id), item.rule.glue) } : item));
   }
 
   return <Modal title={segment ? 'Edit segment' : 'Create segment'} onClose={onClose} size="large">
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
-        const filters: SegmentFilter[] = rules.map((rule, index) => {
-          const raw = rule.value.trim();
-          if (!raw) throw new Error(`Enter a value for filter rule ${index + 1}.`);
-          if (rule.field === 'points') {
-            const numeric = Number(raw);
-            if (!Number.isFinite(numeric)) throw new Error(`Enter a numeric score for filter rule ${index + 1}.`);
-            return { glue: index === 0 ? 'and' : rule.glue, field: rule.field, type: 'number', operator: rule.operator, filter: numeric };
-          }
-          if (rule.operator === 'in' || rule.field === 'tags') {
-            const list = raw.split(',').map(item => item.trim()).filter(Boolean);
-            if (!list.length) throw new Error(`Enter at least one value for filter rule ${index + 1}.`);
-            return {
-              glue: index === 0 ? 'and' : rule.glue,
-              field: rule.field,
-              type: rule.field === 'tags' ? 'tags' : 'text',
-              operator: rule.operator,
-              filter: list,
-            };
-          }
-          return { glue: index === 0 ? 'and' : rule.glue, field: rule.field, type: 'text', operator: rule.operator, filter: raw };
-        });
-
+        const filters: SegmentFilter[] = rows.map(({ rule }, index) => segmentFilterFromRule(rule, byId(rule.field), index));
         await api(segment ? `${segmentPath}/${segment.id}` : segmentPath, segment ? 'PATCH' : 'POST', {
           name: values.name.trim(),
           description: values.description.trim(),
@@ -435,29 +618,34 @@ function SegmentForm({ segment, onClose, onDone }: { segment?: Segment; onClose:
         <div className="ov-actions ov-actions--between">
           <div>
             <Text weight="semibold">Filter rules</Text>
-            <Text type="supporting" color="secondary">Automatically include contacts matching these conditions, or leave empty for manual membership.</Text>
+            <Text type="supporting" color="secondary">Automatically include contacts matching these conditions, or leave empty for manual membership. Rules join with AND first, then OR.</Text>
           </div>
-          {rules.length < 20 ? <Button size="sm" label="Add rule" icon={<Plus size={14} />} onClick={addRule} /> : null}
+          {rows.length < 20 ? <Button size="sm" label="Add rule" icon={<Plus size={14} />} onClick={addRule} /> : null}
         </div>
-        {rules.map((rule, index) => <div key={rule.key} className="ov-step">
-          <div className="ov-step-heading">
-            <Text weight="medium">Rule {index + 1}</Text>
-            <IconButton variant="ghost" size="sm" label={`Remove rule ${index + 1}`} icon={<Trash2 size={15} />}
-              onClick={() => setRules(items => items.filter(item => item.key !== rule.key))} />
-          </div>
-          <div className={index > 0 ? 'ov-form-grid' : 'ov-form-grid ov-form-grid--three'}>
-            {index > 0 ? <Selector label="Match" value={rule.glue}
-              options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]}
-              onChange={value => updateRule(rule.key, { glue: value === 'or' ? 'or' : 'and' })} /> : null}
-            <Selector label="Field" value={rule.field} options={fieldOptionsFor(rule.field)}
-              onChange={value => updateRule(rule.key, { field: value ?? 'email' })} />
-            <Selector label="Operator" value={rule.operator} options={operatorOptionsFor(rule.operator)}
-              onChange={value => updateRule(rule.key, { operator: value ?? 'like' })} />
-            <TextInput label="Value" isRequired value={rule.value}
-              placeholder={rule.field === 'points' ? 'e.g. 50' : rule.operator === 'in' || rule.field === 'tags' ? 'Comma-separated values' : 'Filter value'}
-              onChange={value => updateRule(rule.key, { value })} />
-          </div>
-        </div>)}
+        {rows.map(({ key, rule }, index) => {
+          const entry = byId(rule.field);
+          const operators = segmentOperatorsFor(entry, rule.operator);
+          return <div key={key} className="ov-step">
+            <div className="ov-step-heading">
+              <Text weight="medium">Rule {index + 1}</Text>
+              <IconButton variant="ghost" size="sm" label={`Remove rule ${index + 1}`} icon={<Trash2 size={15} />}
+                onClick={() => setRows(items => items.filter(item => item.key !== key))} />
+            </div>
+            <div className="ov-stack-sm">
+              <div className={index > 0 ? 'ov-form-grid ov-form-grid--three' : 'ov-form-grid'}>
+                {index > 0 ? <Selector label="Match" value={rule.glue}
+                  options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]}
+                  onChange={value => updateRule(key, { glue: value === 'or' ? 'or' : 'and' })} /> : null}
+                <Selector label="Field" value={rule.field} hasSearch
+                  options={catalogue.some(item => item.id === rule.field) ? fieldOptions : [...fieldOptions, { value: rule.field, label: entry.label }]}
+                  onChange={value => value && changeField(key, value)} />
+                <Selector label="Operator" value={canonicalSegmentOperator(rule.operator)} options={operators.map(({ value, label }) => ({ value, label }))}
+                  onChange={value => value && updateRule(key, { operator: value })} />
+              </div>
+              <SegmentValueInput field={entry} rule={rule} choices={fieldChoices(entry)} onChange={patch => updateRule(key, patch)} />
+            </div>
+          </div>;
+        })}
       </div>
       <Feedback error={action.error} />
       <FormActions>
@@ -465,6 +653,30 @@ function SegmentForm({ segment, onClose, onDone }: { segment?: Segment; onClose:
         <Button type="submit" variant="primary" label={segment ? 'Save segment' : 'Create segment'} isLoading={action.busy} isDisabled={!values.name.trim()} />
       </FormActions>
     </form>
+  </Modal>;
+}
+
+function SegmentPreview({ segment, onClose }: { segment: Segment; onClose: () => void }) {
+  const members = useResource<Page<Contact>>(`${contactsPath}?segmentId=${segment.id}&limit=50`);
+  return <Modal title={`Members of “${segment.name}”`} onClose={onClose} size="large">
+    <div className="ov-stack-sm">
+      <Text type="supporting" color="secondary">
+        {segment.contactCount == null ? 'Member count not reported yet.' : `${number(segment.contactCount)} member${segment.contactCount === 1 ? '' : 's'} counted by the engine.`}
+        {' '}Rebuilds run on the engine’s schedule, so recent rule or contact changes may not show until its next run.
+      </Text>
+      {!members.data ? <AsyncState loading={members.loading} error={members.error} retry={members.refresh} />
+        : members.data.items.length ? <>
+          <Rows>{members.data.items.map(item => <li key={item.id}>
+            <span className="ov-cell">
+              <Text>{[item.firstName, item.lastName].filter(Boolean).join(' ') || item.email || `Contact ${item.id}`}</Text>
+              {item.email ? <Text type="supporting" color="secondary">{item.email}</Text> : null}
+            </span>
+          </li>)}</Rows>
+          {members.data.total > members.data.items.length
+            ? <Text type="supporting" color="secondary">Showing the first {number(members.data.items.length)} of {number(members.data.total)} identified members.</Text> : null}
+        </> : <Empty title="No members yet" description="Nobody is in this segment as of the engine’s last rebuild." />}
+      <FormActions><Button label="Close" onClick={onClose} /></FormActions>
+    </div>
   </Modal>;
 }
 
@@ -634,11 +846,19 @@ function CompanyForm({ company, onClose, onDone }: { company?: Company; onClose:
   </Modal>;
 }
 
+const pointPickers: Record<string, { key: string; label: string; path: string; empty: string } | undefined> = {
+  'email.open': { key: 'emails', label: 'Only these emails', path: '/journey-emails', empty: 'Any email' },
+  'email.send': { key: 'emails', label: 'Only these emails', path: '/journey-emails', empty: 'Any email' },
+  'form.submit': { key: 'forms', label: 'Only these forms', path: '/forms', empty: 'Any form' },
+  'page.hit': { key: 'pages', label: 'Only these landing pages', path: '/pages', empty: 'Any landing page' },
+  'asset.download': { key: 'assets', label: 'Only these assets', path: '/assets', empty: 'Any asset' },
+};
+
 function PointActionForm({
   rule, typeMap, onClose, onDone,
 }: { rule?: PointAction; typeMap: Record<string, string>; onClose: () => void; onDone: () => void }) {
   const action = useAction();
-  const mergedTypes = Object.keys(typeMap).length ? typeMap : fallbackPointActionTypes;
+  const mergedTypes = { ...fallbackPointActionTypes, ...typeMap };
   const options = Object.entries(mergedTypes).map(([value, label]) => ({ value, label: cleanLabel(label) || prettifyKey(value) }));
   if (rule?.type && !options.some(option => option.value === rule.type)) {
     options.push({ value: rule.type, label: prettifyKey(rule.type) });
@@ -647,6 +867,16 @@ function PointActionForm({
   const [type, setType] = useState<string>(rule?.type || options[0]?.value || 'email.open');
   const [delta, setDelta] = useState(rule?.delta ?? 10);
   const [published, setPublished] = useState(rule?.published ?? true);
+  const [repeatable, setRepeatable] = useState(rule?.repeatable ?? false);
+  const [groupId, setGroupId] = useState<string | null>(rule?.groupId ? String(rule.groupId) : null);
+  const [properties, setProperties] = useState<Record<string, unknown>>(rule?.properties ?? {});
+  const picker = pointPickers[type];
+  const choices = useResource<{ id: number; name?: string; title?: string; subject?: string }[]>(picker?.path ?? null);
+  const groups = useResource<{ id: number; name: string }[]>('/point-groups');
+  const chosen = picker && Array.isArray(properties[picker.key]) ? (properties[picker.key] as unknown[]).map(String) : [];
+  const text = (key: string) => String(properties[key] ?? '');
+  const patch = (key: string, value: unknown) => setProperties(current => ({ ...current, [key]: value }));
+  const needsUrl = type === 'url.hit';
 
   return <Modal title={rule ? 'Edit scoring rule' : 'Create scoring rule'} onClose={onClose}>
     <form className="ov-stack-sm" onSubmit={event => {
@@ -658,21 +888,40 @@ function PointActionForm({
           type,
           delta,
           published,
+          repeatable,
+          groupId: groupId ? Number(groupId) : null,
+          properties: picker ? { [picker.key]: chosen.map(Number) } : needsUrl ? properties : {},
         });
         onDone();
       });
     }}>
       <TextInput label="Rule name" isRequired {...field('name')} />
       <div className="ov-form-grid">
-        <Selector label="Action type" value={type} options={options} onChange={value => setType(value ?? options[0]?.value ?? 'email.open')} />
+        <Selector label="Action type" value={type} options={options} onChange={value => { setType(value ?? options[0]?.value ?? 'email.open'); setProperties({}); }} />
         <NumberInput label="Points delta" description="Positive to add, negative to deduct." min={-10000} max={10000} isIntegerOnly value={delta} onChange={setDelta} />
+      </div>
+      {picker ? <fieldset className="ov-stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
+        <Text weight="semibold">{picker.label}</Text>
+        <Text type="supporting" color="secondary">{chosen.length ? `${number(chosen.length)} selected.` : `${picker.empty}: leave everything unticked.`}</Text>
+        {(choices.data ?? []).map(item => <CheckboxInput key={item.id} label={item.name || item.title || item.subject || `#${item.id}`}
+          value={chosen.includes(String(item.id))}
+          onChange={on => patch(picker.key, on ? [...chosen, String(item.id)] : chosen.filter(entry => entry !== String(item.id)))} />)}
+      </fieldset> : null}
+      {needsUrl ? <div className="ov-stack-sm">
+        <TextInput label="URL" description="The tracked page address that earns points. Use * as a wildcard." isRequired value={text('page_url')} onChange={value => patch('page_url', value)} />
+        <NumberInput label="Hits needed" description="0 awards points on every hit." min={0} isIntegerOnly value={Number(properties.page_hits ?? 0)} onChange={value => patch('page_hits', value)} />
+        <Switch label="First visit only" value={properties.first_time === true} onChange={value => patch('first_time', value)} />
+      </div> : null}
+      <div className="ov-form-grid">
+        <Selector label="Point group" placeholder="No group" hasClear value={groupId} options={(groups.data ?? []).map(item => ({ value: String(item.id), label: item.name }))} onChange={setGroupId} />
+        <Switch label="Repeatable" description="Award the points each time, not only the first time." value={repeatable} onChange={setRepeatable} />
       </div>
       <TextArea label="Description" rows={2} isOptional {...field('description')} />
       <Switch label="Published" value={published} onChange={setPublished} />
       <Feedback error={action.error} />
       <FormActions>
         <Button label="Cancel" onClick={onClose} />
-        <Button type="submit" variant="primary" label={rule ? 'Save rule' : 'Create rule'} isLoading={action.busy} isDisabled={!values.name.trim() || !type} />
+        <Button type="submit" variant="primary" label={rule ? 'Save rule' : 'Create rule'} isLoading={action.busy} isDisabled={!values.name.trim() || !type || (needsUrl && !text('page_url').trim())} />
       </FormActions>
     </form>
   </Modal>;
@@ -893,6 +1142,72 @@ function SuppressAddressForm({ onClose, onDone }: { onClose: () => void; onDone:
       </FormActions>
     </form>
   </Modal>;
+}
+
+/* ── Do not contact (AUD-08) ─────────────────────────────────────────────── */
+
+const dncReasonChoices = [
+  { value: 'unsubscribed', label: 'Unsubscribed' },
+  { value: 'bounced', label: 'Bounced' },
+  { value: 'manual', label: 'Manual' },
+];
+const dncChannelChoices = [{ value: 'email', label: 'Email' }, { value: 'sms', label: 'SMS' }];
+const dncReasonLabel: Record<string, string> = { unsubscribed: 'Unsubscribed', bounced: 'Bounced', manual: 'Manual' };
+
+function DncPanel({ contact, path, busy, mutate }: {
+  contact: ContactDetail; path: string; busy: boolean; mutate: (task: () => Promise<unknown>, success: string) => void;
+}) {
+  const [channel, setChannel] = useState('email');
+  const [reason, setReason] = useState('manual');
+  const [comment, setComment] = useState('');
+  const [removing, setRemoving] = useState<string>();
+  const [evidence, setEvidence] = useState('');
+  const [fixed, setFixed] = useState(false);
+  const entries = contact.dnc ?? [];
+  const hasEntry = entries.some(entry => entry.channel === channel);
+  return <Panel title="Do not contact" description="One entry per channel. Email entries are kept in OVELIO and mirrored to the audience and newsletter engines; text messages go straight to the audience engine.">
+    {entries.length ? <Rows>{entries.map(entry => <li key={entry.channel}>
+      <span>
+        <span className="ov-actions">
+          <StatusBadge label={entry.channel.toUpperCase()} tone="neutral" />
+          <StatusBadge label={dncReasonLabel[entry.reason] ?? entry.reason} tone={entry.reason === 'bounced' ? 'error' : 'warning'} />
+        </span>
+        <Text type="supporting" color="secondary">{entry.comment || 'No comment'}</Text>
+      </span>
+      <span className="ov-actions">
+        {entry.at ? <Timestamp value={entry.at} format="date_time" /> : null}
+        <Button size="sm" variant="ghost" label="Remove" isDisabled={busy} onClick={() => { setRemoving(entry.channel); setFixed(false); setEvidence(''); }} />
+      </span>
+    </li>)}</Rows> : <Text color="secondary">This contact can be contacted on every channel.</Text>}
+    {removing ? <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      if (!evidence.trim()) return;
+      mutate(() => api(`${path}/dnc/${removing}/remove`, 'POST', { evidence: evidence.trim(), ...(removing === 'email' ? { confirmFixed: fixed } : {}) }), 'Do-not-contact removed.');
+      setRemoving(undefined);
+    }}>
+      <TextInput label={`Why can this contact be reached by ${removing === 'sms' ? 'text message' : 'email'} again?`} placeholder="Source and date" isRequired value={evidence} onChange={setEvidence} />
+      {removing === 'email' ? <>
+        <CheckboxInput label="The address has been fixed (required after a bounce or complaint)" value={fixed} onChange={setFixed} />
+        <Text type="supporting" color="secondary">Removing the entry does not record consent. Consent stays unknown until you record an opt-in.</Text>
+      </> : null}
+      <FormActions>
+        <Button label="Cancel" onClick={() => setRemoving(undefined)} />
+        <Button type="submit" variant="destructive" label="Remove do-not-contact" isDisabled={busy || !evidence.trim()} />
+      </FormActions>
+    </form> : <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      if (!comment.trim() || hasEntry) return;
+      mutate(() => api(`${path}/dnc/${channel}`, 'POST', { reason, comment: comment.trim() }), 'Do-not-contact added.');
+      setComment('');
+    }}>
+      <div className="ov-form-grid">
+        <Selector label="Channel" value={channel} options={dncChannelChoices} onChange={value => setChannel(value ?? 'email')} />
+        <Selector label="Reason" value={reason} options={dncReasonChoices} onChange={value => setReason(value ?? 'manual')} />
+      </div>
+      <TextInput label="Comment" placeholder="Why, and where the request came from" isRequired value={comment} onChange={setComment} />
+      <FormActions><Button type="submit" label="Add do-not-contact" isDisabled={busy || !comment.trim() || hasEntry} /></FormActions>
+    </form>}
+  </Panel>;
 }
 
 /* ── Custom Fields & Direct Email Modals ───────────────────────────────────── */
@@ -1231,6 +1546,11 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const [page, setPage] = useState(1);
   const [segmentId, setSegmentId] = useState('');
   const [tagFilter, setTagFilter] = useState('');
+  const [sortBy, setSortBy] = useState<ContactSortKey>('createdAt');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [pageSize, setPageSize] = useState(25);
+  const [viewId, setViewId] = useState<string | null>(null);
+  const [viewName, setViewName] = useState('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [bulkAction, setBulkAction] = useState<BulkActionType>('add_tag');
   const [bulkTag, setBulkTag] = useState('');
@@ -1247,6 +1567,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const [contactModal, setContactModal] = useState(false);
   const [importModal, setImportModal] = useState(false);
   const [segmentModal, setSegmentModal] = useState<'new' | Segment>();
+  const [previewSegment, setPreviewSegment] = useState<Segment>();
   const [listModal, setListModal] = useState<'new' | MailingList>();
   const [tagModal, setTagModal] = useState(false);
   const [stageModal, setStageModal] = useState<'new' | Stage>();
@@ -1260,10 +1581,14 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   // Resources
   const contacts = useResource<Page<Contact>>(tab === 'Contacts' ? `${contactsPath}?${new URLSearchParams({
     page: String(page),
+    limit: String(pageSize),
+    orderBy: sortBy,
+    orderByDir: sortDir,
     ...(search ? { q: search } : {}),
     ...(segmentId ? { segmentId } : {}),
     ...(tagFilter ? { tag: tagFilter } : {}),
   })}` : null);
+  const views = useResource<ContactView[]>(tab === 'Contacts' ? '/contact-views' : null);
   const segments = useResource<Segment[]>(tab === 'Contacts' || tab === 'Segments' ? segmentPath : null);
   const lists = useResource<MailingList[]>(tab === 'Mailing lists' ? listPath : null);
   const tags = useResource<Tag[]>(tab === 'Contacts' || tab === 'Tags & stages' ? tagPath : null);
@@ -1373,10 +1698,17 @@ export function Audience({ initialTab }: { initialTab?: string }) {
     {tab === 'Contacts' ? <Panel title="Contact directory" description={contacts.data ? `${number(contacts.data.total)} contacts` : undefined}>
       <div className="ov-toolbar">
         <form onSubmit={event => { event.preventDefault(); setSearch(query.trim()); setPage(1); setSelectedIds([]); }}>
-          <TextInput label="Search contacts" isLabelHidden type="search" startIcon="search" placeholder="Name or email" value={query} onChange={setQuery} width={260} />
+          <TextInput label="Search contacts" isLabelHidden type="search" startIcon="search" placeholder="Name, email or tag:vip is:unowned" value={query} onChange={setQuery} width={300} />
           <Button type="submit" label="Search" icon={<Search size={15} />} />
         </form>
         <div className="ov-actions">
+          <Selector label="Sort by" isLabelHidden width={160} value={sortBy} options={sortChoices}
+            onChange={value => { setSortBy((value as ContactSortKey) || 'createdAt'); setPage(1); }} />
+          <Selector label="Sort direction" isLabelHidden width={130} value={sortDir} options={[{ value: 'desc', label: 'Newest first' }, { value: 'asc', label: 'Oldest first' }]}
+            onChange={value => { setSortDir(value === 'asc' ? 'asc' : 'desc'); setPage(1); }} />
+          <Selector label="Contacts per page" isLabelHidden width={120} value={String(pageSize)}
+            options={['25', '50', '100', '250', '500'].map(value => ({ value, label: `${value} per page` }))}
+            onChange={value => { setPageSize(Number(value) || 25); setPage(1); setSelectedIds([]); }} />
           <Selector label="Segment filter" isLabelHidden width={210} value={segmentId || 'all'}
             options={[{ value: 'all', label: 'All segments' }, ...optionsOf(segments.data)]}
             onChange={value => { setSegmentId(value && value !== 'all' ? value : ''); setPage(1); setSelectedIds([]); }} />
@@ -1385,6 +1717,27 @@ export function Audience({ initialTab }: { initialTab?: string }) {
             onChange={value => { setTagFilter(value && value !== 'all' ? value : ''); setPage(1); setSelectedIds([]); }} />
           {filtered ? <Button size="sm" variant="ghost" label="Clear filters" onClick={clearContactFilters} /> : null}
         </div>
+      </div>
+
+      <div className="ov-toolbar">
+        <Selector label="Saved views" isLabelHidden width={220} placeholder="Saved views" hasClear value={viewId}
+          options={(views.data ?? []).map(item => ({ value: item.id, label: item.name }))}
+          onChange={value => {
+            setViewId(value);
+            const chosen = views.data?.find(item => item.id === value);
+            if (!chosen) return;
+            setSearch(chosen.search); setQuery(chosen.search); setSortBy(chosen.sortBy); setSortDir(chosen.sortDir);
+            setSegmentId(''); setTagFilter(''); setPage(1); setSelectedIds([]);
+          }} />
+        <TextInput label="View name" isLabelHidden placeholder="Name this view" value={viewName} onChange={setViewName} width={180} />
+        <Button size="sm" label="Save view" isLoading={action.busy} isDisabled={!viewName.trim()}
+          onClick={() => void action.run(async () => {
+            const saved = await api<ContactView>('/contact-views', 'POST', { name: viewName.trim(), search, sortBy, sortDir });
+            setViewId(saved.id); setViewName(''); views.refresh(); setNotice('View saved for the team.');
+          })} />
+        {viewId ? <Button size="sm" variant="ghost" label="Delete view" icon={<Trash2 size={14} />}
+          onClick={() => void action.run(async () => { await api(`/contact-views/${viewId}`, 'DELETE'); setViewId(null); views.refresh(); })} /> : null}
+        <Text type="supporting" color="secondary">Search commands: {contactSearchCommands.slice(0, 8).map(item => item.example).join(', ')} and more.</Text>
       </div>
 
       <FilterBar items={activeFilters} onRemove={removeContactFilter} onClear={clearContactFilters} />
@@ -1461,7 +1814,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
       </>}
     </Panel> : null}
 
-    {tab === 'Segments' ? <Panel title="Segments" description="Build dynamic or manual groups for automations and synchronise opted-in members for newsletters.">
+    {tab === 'Segments' ? <Panel title="Segments" description="Build dynamic or manual groups for automations and synchronise opted-in members for newsletters. Rebuilds run on the engine's schedule, so counts and members can lag behind recent changes.">
       {!segments.data ? <AsyncState loading={segments.loading} error={segments.error} retry={segments.refresh} />
         : <Table data={segments.data} idKey="id" hasHover emptyState={<Empty title="No segments yet" description="Create a segment to target automations and newsletters." />}
           columns={[
@@ -1481,12 +1834,24 @@ export function Audience({ initialTab }: { initialTab?: string }) {
                 return count ? <StatusBadge label={`${number(count)} rule${count === 1 ? '' : 's'}`} tone="info" /> : <StatusBadge label="Manual" />;
               },
             },
+            {
+              key: 'contactCount',
+              header: 'Members',
+              align: 'end',
+              renderCell: group => group.contactCount == null ? <Text color="secondary">—</Text> : <Text>{number(group.contactCount)}</Text>,
+            },
+            {
+              key: 'lastBuiltAt',
+              header: 'Last built',
+              renderCell: group => group.lastBuiltAt ? <Timestamp value={group.lastBuiltAt} /> : <Text color="secondary">Not reported</Text>,
+            },
             { key: 'published', header: 'Status', renderCell: group => <StatusBadge label={group.published ? 'Published' : 'Draft'} tone={group.published ? 'success' : 'neutral'} /> },
             {
               key: 'alias',
               header: 'Actions',
               align: 'end',
               renderCell: group => <span className="ov-actions ov-actions--end">
+                <Button size="sm" variant="ghost" label="Preview" icon={<Search size={14} />} onClick={() => setPreviewSegment(group)} />
                 <Button size="sm" label="Sync subscribers" icon={<ListFilter size={14} />} isDisabled={action.busy || !group.published}
                   tooltip={!group.published ? 'Publish this segment before synchronising it.' : undefined}
                   onClick={() => void action.run(async () => { await api(`${segmentPath}/${group.id}/sync`, 'POST'); setNotice(''); }, `Sync queued for ${group.name}.`)} />
@@ -1795,6 +2160,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
                   return <StatusBadge label={label} tone={tone} />;
                 },
               },
+              { key: 'comment', header: 'Comment', renderCell: record => record.comment || '—' },
               { key: 'at', header: 'Recorded', renderCell: record => date(record.at) },
             ]} />}
       </Panel>
@@ -1863,6 +2229,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
 
     {contactModal ? <ContactForm onClose={() => setContactModal(false)} onDone={contact => router.push(`/audience/${contact.id}`)} /> : null}
     {importModal ? <ImportForm onClose={() => setImportModal(false)} onImported={() => { contacts.refresh(); setNotice('Import processed.'); }} /> : null}
+    {previewSegment ? <SegmentPreview segment={previewSegment} onClose={() => setPreviewSegment(undefined)} /> : null}
     {segmentModal ? <SegmentForm segment={segmentModal === 'new' ? undefined : segmentModal} onClose={() => setSegmentModal(undefined)} onDone={() => {
       setNotice(segmentModal === 'new' ? 'Segment created.' : 'Segment updated.');
       setSegmentModal(undefined);
@@ -2073,13 +2440,19 @@ export function ContactView({ id }: { id: string }) {
             {contact.consentHistory?.length ? <Rows>{contact.consentHistory.map(entry => <li key={entry.id}>
               <span>
                 <span className="ov-actions">
-                  <StatusBadge label={entry.action === 'opted_in' ? 'Opted in' : 'Suppressed'} tone={entry.action === 'opted_in' ? 'success' : 'error'} />
+                  <StatusBadge label={entry.action === 'opted_in' ? 'Opted in' : entry.action === 'unsuppressed' ? 'Do-not-contact removed' : 'Suppressed'} tone={entry.action === 'opted_in' ? 'success' : entry.action === 'unsuppressed' ? 'warning' : 'error'} />
                 </span>
                 <Text type="supporting" color="secondary">{entry.evidence}</Text>
               </span>
               <Timestamp value={entry.at} format="date_time" />
             </li>)}</Rows> : <Text type="supporting" color="secondary">No consent events recorded yet.</Text>}
           </div>
+        </Panel>
+
+        <DncPanel contact={contact} path={path} busy={action.busy} mutate={mutate} />
+
+        <Panel title="Workflows" description="Where this contact is in each workflow, and why.">
+          <WorkflowRunLog contactId={contact.id} />
         </Panel>
 
         <Panel title="Segments">
@@ -2219,11 +2592,7 @@ export function ContactView({ id }: { id: string }) {
         </Panel>
       </div>
 
-      <Panel title="Activity">
-        {contact.activity.length ? <Rows>{contact.activity.map((item, index) => <li key={item.at + item.type + index}>
-          <Text>{item.label}</Text><Timestamp value={item.at} format="date_time" />
-        </li>)}</Rows> : <Empty title="No recorded activity" />}
-      </Panel>
+      <TimelinePanel contactId={contact.id} />
     </div>}
 
     {modal === 'edit' && contact ? <ContactForm contact={contact} onClose={() => setModal(undefined)} onDone={() => {

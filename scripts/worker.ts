@@ -1,8 +1,8 @@
 import { setTimeout as wait } from 'node:timers/promises';
-import { checkRecipient, eraseContact, propagateSuppression, syncContact, syncSegment } from '../src/server/audience';
+import { applySuppressionRemoval, checkRecipient, eraseContact, propagateSuppression, runContactImport, sweepEngineSuppressions, syncContact, syncSegment } from '../src/server/audience';
 import { appOrigin, logError, requiredEnv } from '../src/server/config';
 import { db } from '../src/server/db';
-import { createRelay } from '../src/server/delivery';
+import { createRelay, runCampaignRefresh, sweepScheduledRefreshes } from '../src/server/delivery';
 import { claimJob, enqueueReconciliation, finishJob, maintainJobs } from '../src/server/jobs';
 import type { Job } from '../src/server/jobs';
 import { listmonk } from '../src/server/listmonk';
@@ -24,7 +24,10 @@ async function run(job: Job) {
     case 'contact_sync': return syncContact(job.payload.contactId);
     case 'segment_sync': return syncSegment(job.payload.segmentId, job.payload.page);
     case 'suppress': return propagateSuppression(job.payload.contactId, job.payload.reason);
+    case 'unsuppress': return applySuppressionRemoval(job.payload.contactId, job.payload.emailKey);
     case 'erase': return eraseContact(job.payload.contactId);
+    case 'contact_import': return runContactImport(job.payload.importId);
+    case 'campaign_refresh': return runCampaignRefresh(job.payload.campaignId, job.payload.runId);
   }
 }
 
@@ -57,6 +60,17 @@ async function housekeeping() {
   if (delivery && !priorDelivery) console.info('Newsletter delivery connection is ready.');
   priorDelivery = delivery;
   await maintainJobs();
+  // Opens, holds and resumes pre-send refreshes for scheduled newsletters (DEL-22).
+  try {
+    await sweepScheduledRefreshes();
+  } catch (error) {
+    logError('campaign-refresh-sweep', error);
+  }
+  try {
+    await sweepEngineSuppressions();
+  } catch (error) {
+    logError('suppression-sweep', error);
+  }
   const records = await db.query<{ contact_id: string }>(
     "SELECT contact_id FROM contact_state WHERE consent = 'opted_in' AND contact_id > $1 ORDER BY contact_id LIMIT 20",
     [cursor],

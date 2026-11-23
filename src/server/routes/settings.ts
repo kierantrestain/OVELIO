@@ -3,12 +3,25 @@ import { addUser, changeUser, rateLimit } from '@/server/auth';
 import { testSmtpRelay } from '@/server/delivery';
 import { json, readBody } from '@/server/http';
 import { retryDeadJob } from '@/server/jobs';
-import { listmonk } from '@/server/listmonk';
+import { recordActivity } from '@/server/activity';
+import { deliveryLimits, listmonk } from '@/server/listmonk';
 import { saveCompany, senderDomain, settings } from '@/server/reporting';
 import { name, email, address, siteId, company, route } from './shared';
 import type { Entry } from './shared';
 
 const roles = z.enum(['admin', 'marketer', 'analyst']);
+const limited = (name: keyof typeof deliveryLimits) => z.number().int().min(deliveryLimits[name].min).max(deliveryLimits[name].max).optional();
+const deliverySettings = z.object({
+  concurrency: limited('concurrency'),
+  messageRate: limited('messageRate'),
+  batchSize: limited('batchSize'),
+  maxSendErrors: limited('maxSendErrors'),
+  slidingWindow: z.boolean().optional(),
+  slidingWindowDuration: z.string().trim().max(10).optional(),
+  slidingWindowRate: limited('slidingWindowRate'),
+  trackingMode: z.enum(['off', 'anonymous', 'individual']).optional(),
+  recordOptinIp: z.boolean().optional(),
+});
 
 export const settingsEndpoints: Entry[] = [
   /* ── Settings, Team, SMTP Diagnostics & Maintenance ─────────────────────── */
@@ -17,6 +30,12 @@ export const settingsEndpoints: Entry[] = [
     const input = await readBody(request, z.object({ company }));
     await saveCompany(input.company);
     return settings(true);
+  }, 'admin'),
+  route('GET', /^settings\/delivery$/, async () => listmonk.deliverySettings(), 'admin'),
+  route('PATCH', /^settings\/delivery$/, async ({ request }) => {
+    const saved = await listmonk.saveDeliverySettings(await readBody(request, deliverySettings));
+    await recordActivity('Delivery settings changed', '/settings?view=connections');
+    return saved;
   }, 'admin'),
   route('GET', /^settings\/sender-domain$/, senderDomain, 'admin'),
   route('POST', /^settings\/smtp\/test$/, async ({ request, user }) => {

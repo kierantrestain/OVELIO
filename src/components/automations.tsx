@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  Code2, Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Trash2, Users,
+  Code2, Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Route, Trash2, Users,
 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core/Button';
@@ -11,7 +11,6 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Link } from '@astryxdesign/core/Link';
 import { MetadataList, MetadataListItem } from '@astryxdesign/core/MetadataList';
-import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
@@ -20,15 +19,16 @@ import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
-import { Token } from '@astryxdesign/core/Token';
 import type {
-  Asset, Category, DynamicContent, FocusItem, FocusItemInput, FormSubmission, JourneyEmail,
-  LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
-  WorkflowInput, WorkflowStep, WorkflowStepKind,
+  Asset, Category, DynamicContent, FocusItem, FocusItemInput, FormActionSpec, FormField, FormFieldOptions, FormFieldPropertySpec,
+  FormFieldTypeSpec, FormPostAction, FormSubmission, JourneyEmail, LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
+  WorkflowStep,
 } from '@/contracts';
-import { maxWorkflowSteps } from '@/contracts';
+import { formActionSpecs, formFieldSpecs } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
+import { describeSources, WorkflowCanvasEditor, WorkflowOutline, workflowGraphOf } from './workflow-canvas';
+import { WorkflowRunModal } from './workflow-run-log';
 import {
   AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal,
   PageHeader, Pager, Panel, SlideDrawer, Snippet, StatusBadge, Tabs,
@@ -39,8 +39,6 @@ const tabs = [
   'Dynamic content', 'Popups & bars', 'Categories', 'Webhooks',
 ] as const;
 type AutomationsTab = typeof tabs[number];
-type TriggerType = 'segment' | 'form';
-type FormFieldType = NonNullable<LeadFormInput['fields']>[number]['type'];
 type FocusType = FocusItemInput['type'];
 type FocusStyle = FocusItemInput['style'];
 type FocusWhen = NonNullable<FocusItemInput['when']>;
@@ -102,36 +100,6 @@ type CategoryFilter = 'all' | CategoryBundle;
 
 const categoryBundleLabels: Record<string, string> = Object.fromEntries(categoryBundles.map(item => [item.value, item.label]));
 const validCategoryBundles = new Set<string>(categoryBundles.map(item => item.value));
-
-const recipes = [
-  { id: 'blank', name: 'Blank workflow', delays: [0] },
-  { id: 'welcome', name: 'Welcome sequence', delays: [0, 1440] },
-  { id: 'nurture', name: 'Lead nurturing', delays: [0, 2880, 4320] },
-  { id: 'follow-up', name: 'Follow-up email', delays: [1440] },
-  { id: 're-engage', name: 'Re-engagement', delays: [0, 10080] },
-];
-
-const stepKindOptions: { value: WorkflowStepKind; label: string; description: string }[] = [
-  { value: 'email', label: 'Send journey email', description: 'Deliver a published automation email' },
-  { value: 'tags', label: 'Modify tags', description: 'Add or remove contact tags' },
-  { value: 'points', label: 'Adjust lead score', description: 'Add or subtract contact points' },
-  { value: 'segment', label: 'Change segments', description: 'Add to or remove from segments' },
-  { value: 'stage', label: 'Change lifecycle stage', description: 'Move contact to a lifecycle stage' },
-];
-
-const conditions = [
-  { value: 'none', label: 'Continue without a condition' },
-  { value: 'opened_previous', label: 'Previous email was opened' },
-  { value: 'clicked_previous', label: 'Previous email link was clicked' },
-];
-
-const formFieldTypes: { value: FormFieldType; label: string }[] = [
-  { value: 'text', label: 'Short text' },
-  { value: 'email', label: 'Email address' },
-  { value: 'textarea', label: 'Long text' },
-  { value: 'select', label: 'Dropdown' },
-  { value: 'checkboxgrp', label: 'Checkboxes' },
-];
 
 const mappedContactFields = [
   { value: 'none', label: 'Not mapped' },
@@ -279,325 +247,41 @@ function HtmlPreviewModal({ title, html, onClose }: { title: string; html: strin
   </Modal>;
 }
 
-/* ── Workflow Step Editor & Enrolled Contacts Drawer ───────────────────────── */
-
-type EditableStep = {
-  key: number;
-  kind: WorkflowStepKind;
-  emailId: number;
-  delayMinutes: number;
-  condition?: 'opened_previous' | 'clicked_previous';
-  addTagsText: string;
-  removeTagsText: string;
-  pointsDelta: number;
-  addSegmentIds: number[];
-  removeSegmentIds: number[];
-  stageId: number;
-};
-
-function makeEmptyStep(key: number, delayMinutes = 0): EditableStep {
-  return {
-    key,
-    kind: 'email',
-    emailId: 0,
-    delayMinutes,
-    addTagsText: '',
-    removeTagsText: '',
-    pointsDelta: 10,
-    addSegmentIds: [],
-    removeSegmentIds: [],
-    stageId: 0,
-  };
-}
-
-function toEditableStep(step: WorkflowStep, key: number): EditableStep {
-  return {
-    key,
-    kind: step.kind ?? 'email',
-    emailId: step.emailId ?? 0,
-    delayMinutes: step.delayMinutes ?? 0,
-    condition: step.condition,
-    addTagsText: (step.addTags ?? []).join(', '),
-    removeTagsText: (step.removeTags ?? []).join(', '),
-    pointsDelta: step.pointsDelta ?? 10,
-    addSegmentIds: step.addSegmentIds ?? [],
-    removeSegmentIds: step.removeSegmentIds ?? [],
-    stageId: step.stageId ?? 0,
-  };
-}
-
-function parseCsvList(text: string) {
-  return [...new Set(text.split(',').map(item => item.trim()).filter(Boolean))];
-}
-
-function stepIsValid(step: EditableStep) {
-  switch (step.kind) {
-    case 'email':
-      return step.emailId > 0;
-    case 'tags': {
-      const add = parseCsvList(step.addTagsText);
-      const remove = parseCsvList(step.removeTagsText);
-      return (add.length > 0 || remove.length > 0) && ![...add, ...remove].some(tag => tag.startsWith('-'));
-    }
-    case 'points':
-      return Number.isSafeInteger(step.pointsDelta) && step.pointsDelta !== 0;
-    case 'segment':
-      return step.addSegmentIds.length > 0 || step.removeSegmentIds.length > 0;
-    case 'stage':
-      return step.stageId > 0;
-  }
-}
-
-function WorkflowForm({ workflow, onClose, onDone }: { workflow?: Workflow; onClose: () => void; onDone: () => void }) {
-  const emails = useResource<JourneyEmail[]>(emailPath);
-  const segments = useResource<Segment[]>('/segments');
-  const forms = useResource<LeadForm[]>(formPath);
-  const stages = useResource<Stage[]>('/stages');
-  const action = useAction();
-
-  const { values, field, setValues } = useFields({ name: workflow?.name ?? '', description: workflow?.description ?? '' });
-  const [triggerType, setTriggerType] = useState<TriggerType>(workflow && !workflow.segmentId && workflow.formId ? 'form' : 'segment');
-  const [segmentId, setSegmentId] = useState<string | null>(workflow?.segmentId ? String(workflow.segmentId) : null);
-  const [formId, setFormId] = useState<string | null>(workflow?.formId ? String(workflow.formId) : null);
-  const [recipe, setRecipe] = useState('blank');
-  const [steps, setSteps] = useState<EditableStep[]>(() =>
-    workflow?.steps.length ? workflow.steps.map((step, index) => toEditableStep(step, index)) : [makeEmptyStep(0)],
-  );
-  const nextKey = useRef(steps.length);
-
-  const publishedSegments = segments.data?.filter(segment => segment.published) ?? [];
-  const allSegments = segments.data ?? [];
-  const publishedForms = forms.data?.filter(form => form.published) ?? [];
-  const publishedEmails = emails.data?.filter(email => email.published) ?? [];
-  const stageList = stages.data ?? [];
-
-  const emailOptions = publishedEmails.map(email => ({ value: String(email.id), label: email.name, description: email.subject }));
-  const segmentOptions = allSegments.map(segment => ({ value: String(segment.id), label: segment.name }));
-  const stageOptions = stageList.map(stage => ({ value: String(stage.id), label: stage.name }));
-
-  const hasTrigger = triggerType === 'segment' ? Boolean(segmentId) : Boolean(formId);
-  const ready = hasTrigger && steps.length > 0 && steps.every(stepIsValid);
-
-  function applyRecipe(id: string) {
-    const chosen = recipes.find(item => item.id === id);
-    if (!chosen) return;
-    setRecipe(id);
-    if (id !== 'blank') setValues(current => ({ ...current, name: chosen.name }));
-    setSteps(chosen.delays.map(delayMinutes => makeEmptyStep(nextKey.current++, delayMinutes)));
-  }
-
-  function updateStep(stepKey: number, parts: Partial<EditableStep>) {
-    setSteps(items => items.map(step => step.key === stepKey ? { ...step, ...parts } : step));
-  }
-
-  function buildPayload(): WorkflowInput {
-    const builtSteps: WorkflowStep[] = steps.map((step, index) => {
-      const canCondition = index > 0 && steps[index - 1].kind === 'email';
-      const condition = canCondition && step.condition ? { condition: step.condition } : {};
-      switch (step.kind) {
-        case 'email':
-          return { kind: 'email', emailId: step.emailId, delayMinutes: step.delayMinutes, ...condition };
-        case 'tags':
-          return {
-            kind: 'tags',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            addTags: parseCsvList(step.addTagsText),
-            removeTags: parseCsvList(step.removeTagsText),
-          };
-        case 'points':
-          return {
-            kind: 'points',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            pointsDelta: step.pointsDelta,
-          };
-        case 'segment':
-          return {
-            kind: 'segment',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            addSegmentIds: step.addSegmentIds,
-            removeSegmentIds: step.removeSegmentIds,
-          };
-        case 'stage':
-          return {
-            kind: 'stage',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            stageId: step.stageId,
-          };
-      }
-    });
-
-    return {
-      name: values.name.trim(),
-      description: values.description.trim(),
-      segmentId: triggerType === 'segment' ? Number(segmentId) : 0,
-      ...(triggerType === 'form' && formId ? { formId: Number(formId) } : {}),
-      steps: builtSteps,
-    };
-  }
-
-  return <Modal title={workflow ? 'Edit automation' : 'Create automation'} onClose={onClose} size="large">
-    <form className="ov-stack-sm" onSubmit={event => {
-      event.preventDefault();
-      void action.run(async () => {
-        const input = buildPayload();
-        await api(workflow ? `${workflowPath}/${workflow.id}` : workflowPath, workflow ? 'PATCH' : 'POST', input);
-        onDone();
-      });
-    }}>
-      {!workflow ? <Selector label="Workflow template" value={recipe} onChange={value => applyRecipe(value ?? 'blank')}
-        options={recipes.map(item => ({ value: item.id, label: item.name, description: `${item.delays.length} step${item.delays.length > 1 ? 's' : ''}` }))} /> : null}
-
-      <TextInput label="Workflow name" isRequired {...field('name')} />
-
-      <div className="ov-form-grid">
-        <div className="ov-stack-sm">
-          <Text type="label">Trigger source</Text>
-          <SegmentedControl label="Trigger source" value={triggerType}
-            onChange={value => setTriggerType(value === 'form' ? 'form' : 'segment')}>
-            <SegmentedControlItem value="segment" label="Segment" />
-            <SegmentedControlItem value="form" label="Lead form" />
-          </SegmentedControl>
-        </div>
-        {triggerType === 'segment' ? (
-          <Selector label="Trigger segment" description="Contacts entering this segment start the workflow." placeholder="Select a published segment"
-            isLoading={segments.loading} value={segmentId} hasClear onChange={setSegmentId}
-            options={publishedSegments.map(segment => ({ value: String(segment.id), label: segment.name }))} />
-        ) : (
-          <Selector label="Trigger lead form" description="Contacts submitting this form start the workflow." placeholder="Select a published lead form"
-            isLoading={forms.loading} value={formId} hasClear onChange={setFormId}
-            options={publishedForms.map(form => ({ value: String(form.id), label: form.name }))} />
-        )}
-      </div>
-
-      <TextArea label="Description" isOptional rows={2} {...field('description')} />
-      <Feedback error={segments.error || emails.error || forms.error || stages.error} />
-      {triggerType === 'segment' && segments.data && !publishedSegments.length ? <Text color="secondary">Create and publish a segment in Audience first.</Text> : null}
-      {triggerType === 'form' && forms.data && !publishedForms.length ? <Text color="secondary">Create and publish a lead form in the Lead forms tab first.</Text> : null}
-
-      {steps.map((step, index) => {
-        const canCondition = index > 0 && steps[index - 1].kind === 'email';
-        return <div key={step.key} className="ov-step">
-          <div className="ov-step-heading">
-            <Text weight="semibold">Step {index + 1}</Text>
-            {steps.length > 1 ? <IconButton variant="ghost" size="sm" label={`Remove step ${index + 1}`} icon={<Trash2 size={15} />}
-              onClick={() => setSteps(items => items.filter(item => item.key !== step.key))} /> : null}
-          </div>
-
-          <div className="ov-form-grid">
-            <Selector label={`Step ${index + 1} action`} value={step.kind} options={stepKindOptions}
-              onChange={value => updateStep(step.key, { kind: (value as WorkflowStepKind) || 'email' })} />
-            <NumberInput label={`Step ${index + 1} delay`} units="minutes" min={0} max={525600} isIntegerOnly value={step.delayMinutes}
-              description={delayLabel(step.delayMinutes)} onChange={value => updateStep(step.key, { delayMinutes: value })} />
-          </div>
-
-          {step.kind === 'email' ? (
-            <>
-              <Selector label={`Step ${index + 1} email`} placeholder="Choose a published journey email"
-                value={step.emailId ? String(step.emailId) : null} hasClear
-                onChange={value => updateStep(step.key, { emailId: Number(value) || 0 })} options={emailOptions} />
-              {emails.data && !publishedEmails.length ? <Text type="supporting" color="secondary">Create and publish a journey email first.</Text> : null}
-            </>
-          ) : null}
-
-          {step.kind === 'tags' ? (
-            <div className="ov-form-grid">
-              <TextInput label="Add tags" description="Comma-separated" placeholder="engaged, prospect"
-                value={step.addTagsText} onChange={value => updateStep(step.key, { addTagsText: value })} />
-              <TextInput label="Remove tags" description="Comma-separated" placeholder="cold"
-                value={step.removeTagsText} onChange={value => updateStep(step.key, { removeTagsText: value })} />
-            </div>
-          ) : null}
-
-          {step.kind === 'points' ? (
-            <NumberInput label="Score change" description="Positive to add points, negative to deduct (non-zero)."
-              min={-10000} max={10000} isIntegerOnly value={step.pointsDelta}
-              onChange={value => updateStep(step.key, { pointsDelta: value })} />
-          ) : null}
-
-          {step.kind === 'segment' ? (
-            <div className="ov-form-grid">
-              <div className="ov-stack-sm">
-                <Selector label="Add to segment" placeholder="Select segment to add" value={null} hasClear
-                  options={segmentOptions.filter(opt => !step.addSegmentIds.includes(Number(opt.value)))}
-                  onChange={value => {
-                    const id = Number(value);
-                    if (id) updateStep(step.key, { addSegmentIds: [...step.addSegmentIds, id] });
-                  }} />
-                {step.addSegmentIds.length ? <div className="ov-tags">
-                  {step.addSegmentIds.map(id => <Token key={id} size="sm" color="green"
-                    label={allSegments.find(s => s.id === id)?.name || `Segment ${id}`}
-                    onRemove={() => updateStep(step.key, { addSegmentIds: step.addSegmentIds.filter(item => item !== id) })} />)}
-                </div> : null}
-              </div>
-              <div className="ov-stack-sm">
-                <Selector label="Remove from segment" placeholder="Select segment to remove" value={null} hasClear
-                  options={segmentOptions.filter(opt => !step.removeSegmentIds.includes(Number(opt.value)))}
-                  onChange={value => {
-                    const id = Number(value);
-                    if (id) updateStep(step.key, { removeSegmentIds: [...step.removeSegmentIds, id] });
-                  }} />
-                {step.removeSegmentIds.length ? <div className="ov-tags">
-                  {step.removeSegmentIds.map(id => <Token key={id} size="sm" color="red"
-                    label={allSegments.find(s => s.id === id)?.name || `Segment ${id}`}
-                    onRemove={() => updateStep(step.key, { removeSegmentIds: step.removeSegmentIds.filter(item => item !== id) })} />)}
-                </div> : null}
-              </div>
-            </div>
-          ) : null}
-
-          {step.kind === 'stage' ? (
-            <>
-              <Selector label="Target lifecycle stage" placeholder="Select a lifecycle stage"
-                value={step.stageId ? String(step.stageId) : null} hasClear options={stageOptions}
-                onChange={value => updateStep(step.key, { stageId: Number(value) || 0 })} />
-              {stages.data && !stageList.length ? <Text type="supporting" color="secondary">Create lifecycle stages in Audience → Tags &amp; stages first.</Text> : null}
-            </>
-          ) : null}
-
-          {canCondition ? (
-            <Selector label={`Step ${index + 1} condition`} value={step.condition ?? 'none'} options={conditions}
-              onChange={value => updateStep(step.key, { condition: value === 'opened_previous' || value === 'clicked_previous' ? value : undefined })} />
-          ) : null}
-        </div>;
-      })}
-
-      {steps.length < maxWorkflowSteps ? <div>
-        <Button label="Add step" icon={<Plus size={15} />} onClick={() => setSteps(items => [...items, makeEmptyStep(nextKey.current++)])} />
-      </div> : null}
-      <Feedback error={action.error} />
-      <FormActions>
-        <Button label="Cancel" onClick={onClose} />
-        <Button type="submit" variant="primary" label={workflow ? 'Save changes' : 'Save workflow'} isLoading={action.busy} isDisabled={!ready || !values.name.trim()} />
-      </FormActions>
-    </form>
-  </Modal>;
-}
+/* ── Enrolled Contacts Drawer (the editor lives in workflow-canvas.tsx) ────── */
 
 function WorkflowContactsDrawer({ workflow, onClose }: { workflow: Workflow; onClose: () => void }) {
   const enrolled = useResource<WorkflowContact[]>(`${workflowPath}/${workflow.id}/contacts`);
-  return <SlideDrawer title={workflow.name} subtitle="Enrolled contacts in this automation" onClose={onClose} width={540}>
-    {!enrolled.data ? <AsyncState loading={enrolled.loading} error={enrolled.error} retry={enrolled.refresh} />
-      : enrolled.data.length ? <Table data={enrolled.data} idKey="contactId" hasHover columns={[
-        {
-          key: 'contactId',
-          header: 'Contact',
-          renderCell: item => <Link href={`/audience/${item.contactId}`}>Contact #{item.contactId}</Link>,
-        },
-        { key: 'dateAdded', header: 'Enrolled', renderCell: item => date(item.dateAdded) },
-        {
-          key: 'manuallyRemoved',
-          header: 'Status',
-          renderCell: item => <StatusBadge label={item.manuallyRemoved ? 'Removed' : 'Active'} tone={item.manuallyRemoved ? 'neutral' : 'success'} />,
-        },
-      ]} /> : <Empty title="No contacts enrolled yet" description="Contacts enter this workflow when they match its trigger while active." />}
+  const [lookup, setLookup] = useState('');
+  const [viewing, setViewing] = useState<number | null>(null);
+  const lookupId = Number(lookup);
+  return <SlideDrawer title={workflow.name} subtitle="Enrolled contacts in this automation" onClose={onClose} width={600}>
+    <div className="ov-stack-sm">
+      <div className="ov-form-grid">
+        <TextInput label="Find a contact by id" description="See where any contact is in this workflow, and why." value={lookup}
+          onChange={value => setLookup(value.replace(/\D/g, '').slice(0, 10))} />
+        <Button label="Show path" icon={<Route size={14} />} isDisabled={!lookupId} onClick={() => setViewing(lookupId)} />
+      </div>
+      {!enrolled.data ? <AsyncState loading={enrolled.loading} error={enrolled.error} retry={enrolled.refresh} />
+        : enrolled.data.length ? <Table data={enrolled.data} idKey="contactId" hasHover columns={[
+          {
+            key: 'contactId',
+            header: 'Contact',
+            renderCell: item => <Link href={`/audience/${item.contactId}`}>Contact #{item.contactId}</Link>,
+          },
+          { key: 'dateAdded', header: 'Enrolled', renderCell: item => date(item.dateAdded) },
+          {
+            key: 'manuallyRemoved',
+            header: 'Status',
+            renderCell: item => <StatusBadge label={item.manuallyRemoved ? 'Removed' : 'Active'} tone={item.manuallyRemoved ? 'neutral' : 'success'} />,
+          },
+          {
+            key: 'path',
+            header: 'Where now',
+            renderCell: item => <Button size="sm" variant="ghost" label="Show path" icon={<Route size={14} />} onClick={() => setViewing(item.contactId)} />,
+          },
+        ]} /> : <Empty title="No contacts enrolled yet" description="Contacts enter this workflow when they match its trigger while active." />}
+    </div>
+    {viewing !== null ? <WorkflowRunModal workflowId={workflow.id} workflow={workflow} contactId={viewing} onClose={() => setViewing(null)} /> : null}
   </SlideDrawer>;
 }
 
@@ -646,21 +330,239 @@ function JourneyEmailForm({ email, onClose, onDone }: { email?: JourneyEmail; on
 
 type EditableFormField = {
   key: number;
+  /** The field as Mautic returned it, so properties the editor does not show are kept. */
+  base: FormField;
   label: string;
   alias: string;
-  type: FormFieldType;
+  type: string;
   mappedField: string;
   isRequired: boolean;
   optionsText: string;
+  showLabel: boolean;
+  defaultValue: string;
+  helpMessage: string;
+  validationMessage: string;
+  props: Record<string, string | boolean>;
+  open: boolean;
 };
 
-const validFieldTypes = new Set<string>(['text', 'email', 'textarea', 'select', 'checkboxgrp']);
+type EditableFormAction = {
+  key: number;
+  id?: number;
+  type: string;
+  name: string;
+  properties: Record<string, unknown>;
+};
+
+const fieldSpecByType = new Map<string, FormFieldTypeSpec>(formFieldSpecs.map(spec => [spec.type, spec]));
+const fieldTypeOptions = formFieldSpecs.filter(spec => spec.type !== 'button').map(spec => ({ value: spec.type, label: spec.label }));
+const actionSpecByType = new Map<string, FormActionSpec>(formActionSpecs.map(spec => [spec.type as string, spec]));
+const actionTypeOptions = formActionSpecs.map(spec => ({ value: spec.type as string, label: spec.label, description: spec.description }));
+
+const postActionOptions = [
+  { value: 'message', label: 'Show a message' },
+  { value: 'redirect', label: 'Go to another page' },
+  { value: 'return', label: 'Return to the form page' },
+  { value: 'hideform', label: 'Hide the form and show a message' },
+];
+
+function propKey(prop: FormFieldPropertySpec) {
+  return `${prop.store ?? 'properties'}:${prop.key}`;
+}
+
+function readFieldProp(base: FormField, prop: FormFieldPropertySpec): string | boolean {
+  const found = (prop.store === 'validation' ? base.validation : base.properties)?.[prop.key];
+  if (prop.kind === 'boolean') return found === true || found === 1 || found === '1';
+  if (Array.isArray(found)) return found.join(', ');
+  return found === undefined || found === null ? '' : String(found);
+}
+
+function editableField(item: FormField, key: number): EditableFormField {
+  const spec = fieldSpecByType.get(item.type);
+  return {
+    key,
+    base: item,
+    label: item.label || prettifyTriggerKey(item.alias),
+    alias: item.alias || slugAlias(item.label),
+    type: item.type,
+    mappedField: item.mappedField || 'none',
+    isRequired: Boolean(item.isRequired),
+    optionsText: (item.options ?? []).join(', '),
+    showLabel: item.showLabel ?? true,
+    defaultValue: item.defaultValue ?? '',
+    helpMessage: item.helpMessage ?? '',
+    validationMessage: item.validationMessage ?? '',
+    props: Object.fromEntries((spec?.props ?? []).map(prop => [propKey(prop), readFieldProp(item, prop)])),
+    open: false,
+  };
+}
 
 function defaultBuilderFields(): EditableFormField[] {
   return [
-    { key: 0, label: 'First name', alias: 'first_name', type: 'text', mappedField: 'firstname', isRequired: false, optionsText: '' },
-    { key: 1, label: 'Email address', alias: 'email', type: 'email', mappedField: 'email', isRequired: true, optionsText: '' },
+    editableField({ label: 'First name', alias: 'first_name', type: 'text', mappedField: 'firstname' }, 0),
+    editableField({ label: 'Email address', alias: 'email', type: 'email', mappedField: 'email', isRequired: true }, 1),
   ];
+}
+
+function builtField(item: EditableFormField, index: number): FormFieldOptions {
+  const label = item.label.trim();
+  const alias = item.alias.trim().toLowerCase();
+  if (!label) throw new Error(`Enter a label for field ${index + 1}.`);
+  if (!/^[a-z][a-z0-9_]{0,59}$/.test(alias) || (alias === 'submit' && !item.base.id)) {
+    throw new Error(`Field ${index + 1} alias must start with a lowercase letter and use only lowercase letters, numbers and underscores.`);
+  }
+  const spec = fieldSpecByType.get(item.type);
+  const options = spec?.choices ? item.optionsText.split(',').map(opt => opt.trim()).filter(Boolean) : undefined;
+  if (spec?.choices && item.type !== 'country' && !options?.length && !item.base.properties?.syncList) {
+    throw new Error(`Add at least one choice for field ${index + 1}.`);
+  }
+  const properties: Record<string, unknown> = { ...item.base.properties };
+  const validation: Record<string, unknown> = { ...item.base.validation };
+  for (const prop of spec?.props ?? []) {
+    const value = item.props[propKey(prop)];
+    (prop.store === 'validation' ? validation : properties)[prop.key] = value;
+  }
+  const { options: _options, ...base } = item.base;
+  void _options;
+  return {
+    ...base,
+    label,
+    alias,
+    type: item.type,
+    mappedField: item.mappedField === 'none' ? (item.base.id ? '' : undefined) : item.mappedField,
+    isRequired: item.isRequired,
+    showLabel: item.showLabel,
+    defaultValue: item.defaultValue,
+    helpMessage: item.helpMessage,
+    validationMessage: item.validationMessage,
+    ...(options?.length ? { options } : {}),
+    properties,
+    validation,
+  };
+}
+
+function LeadFormFieldEditor({ item, index, count, update, remove }: {
+  item: EditableFormField; index: number; count: number;
+  update: (patch: Partial<EditableFormField>) => void; remove: () => void;
+}) {
+  const spec = fieldSpecByType.get(item.type);
+  const existing = Boolean(item.base.id);
+  const typeOptions = spec ? fieldTypeOptions : [...fieldTypeOptions, { value: item.type, label: `${item.type} (from Mautic)` }];
+  return <div className="ov-step">
+    <div className="ov-step-heading">
+      <Text weight="medium">Field {index + 1}{spec ? ` · ${spec.label}` : ''}</Text>
+      {count > 1 ? <IconButton variant="ghost" size="sm" label={`Remove field ${index + 1}`} icon={<Trash2 size={15} />} onClick={remove} /> : null}
+    </div>
+    <div className="ov-form-grid">
+      <TextInput label="Label" isRequired value={item.label} onChange={value => {
+        const autoAlias = !existing && (!item.alias || item.alias.startsWith('field_') || item.alias === slugAlias(item.label));
+        update({ label: value, ...(autoAlias && value.trim() ? { alias: slugAlias(value) } : {}) });
+      }} />
+      <TextInput label="Field alias" description={existing ? 'Aliases cannot change after a field is saved.' : 'Lowercase letters, numbers, underscores'}
+        isRequired isDisabled={existing} value={item.alias} onChange={value => update({ alias: value })} />
+      <Selector label="Field type" value={item.type} options={typeOptions} isDisabled={existing}
+        onChange={value => {
+          const next = value || 'text';
+          const nextSpec = fieldSpecByType.get(next);
+          update({
+            type: next,
+            props: Object.fromEntries((nextSpec?.props ?? []).map(prop => [propKey(prop), readFieldProp({ ...item.base, type: next }, prop)])),
+            ...(nextSpec?.mappable === false ? { mappedField: 'none' } : {}),
+            ...(nextSpec?.required === false ? { isRequired: false } : {}),
+          });
+        }} />
+      {spec?.mappable !== false ? <Selector label="Map to contact field" value={item.mappedField} options={mappedContactFields}
+        onChange={value => update({ mappedField: value ?? 'none' })} /> : null}
+    </div>
+    {spec?.choices && item.type !== 'country' ? (
+      <TextInput label="Choices" description="Separate options with commas." placeholder="Option A, Option B, Option C" isRequired
+        value={item.optionsText} onChange={value => update({ optionsText: value })} />
+    ) : null}
+    {(spec?.props ?? []).length ? <div className="ov-form-grid">
+      {spec!.props.map(prop => {
+        const id = propKey(prop);
+        const value = item.props[id];
+        const set = (next: string | boolean) => update({ props: { ...item.props, [id]: next } });
+        if (prop.kind === 'boolean') return <CheckboxInput key={id} label={prop.label} value={value === true} onChange={set} />;
+        if (prop.kind === 'textarea') return <TextArea key={id} label={prop.label} rows={3} isOptional value={String(value ?? '')} onChange={set} />;
+        return <TextInput key={id} label={prop.label} description={prop.hint} isOptional value={String(value ?? '')} onChange={set} />;
+      })}
+    </div> : null}
+    <div className="ov-actions">
+      {spec?.required !== false ? <CheckboxInput label="Required field" value={item.isRequired} onChange={checked => update({ isRequired: checked })} /> : null}
+      {spec?.showLabel !== false ? <CheckboxInput label="Show label" value={item.showLabel} onChange={checked => update({ showLabel: checked })} /> : null}
+    </div>
+    {spec?.defaultValue !== false || spec?.helpMessage !== false || item.isRequired ? <div className="ov-form-grid">
+      {spec?.defaultValue !== false ? <TextInput label="Default value" isOptional value={item.defaultValue} onChange={value => update({ defaultValue: value })} /> : null}
+      {spec?.helpMessage !== false ? <TextInput label="Help text" isOptional value={item.helpMessage} onChange={value => update({ helpMessage: value })} /> : null}
+      {item.isRequired ? <TextInput label="Required message" isOptional placeholder="This is required." value={item.validationMessage}
+        onChange={value => update({ validationMessage: value })} /> : null}
+    </div> : null}
+  </div>;
+}
+
+function readActionList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function LeadFormActionEditor({ item, index, update, remove, emails, segments, assets, users }: {
+  item: EditableFormAction; index: number; update: (patch: Partial<EditableFormAction>) => void; remove: () => void;
+  emails: JourneyEmail[]; segments: Segment[]; assets: Asset[]; users: { id: number; name: string; email: string }[];
+}) {
+  const spec = actionSpecByType.get(item.type);
+  const setProp = (key: string, value: unknown) => update({ properties: { ...item.properties, [key]: value } });
+  const sourceOptions = (source?: string) => source === 'emails' ? emails.map(email => ({ value: String(email.id), label: email.name }))
+    : source === 'assets' ? assets.map(asset => ({ value: String(asset.id), label: asset.title }))
+    : [];
+  return <div className="ov-step">
+    <div className="ov-step-heading">
+      <Text weight="medium">Action {index + 1}</Text>
+      <IconButton variant="ghost" size="sm" label={`Remove action ${index + 1}`} icon={<Trash2 size={15} />} onClick={remove} />
+    </div>
+    <div className="ov-form-grid">
+      <Selector label="Action" value={item.type} isDisabled={Boolean(item.id)} options={spec ? actionTypeOptions : [...actionTypeOptions, { value: item.type, label: item.type, description: 'From Mautic' }]}
+        onChange={value => update({ type: value ?? item.type, properties: {} })} />
+      <TextInput label="Action name" isOptional placeholder={spec?.label} value={item.name} onChange={value => update({ name: value })} />
+    </div>
+    {spec ? <Text type="supporting" color="secondary">{spec.description}</Text> : null}
+    <div className="ov-form-grid">
+      {(spec?.props ?? []).map(prop => {
+        const raw = item.properties[prop.key];
+        if (prop.kind === 'boolean') {
+          const checked = raw === undefined ? prop.key === 'set_replyto' : raw === true || raw === 1 || raw === '1';
+          return <CheckboxInput key={prop.key} label={prop.label} value={checked} onChange={value => setProp(prop.key, value)} />;
+        }
+        if (prop.kind === 'textarea') {
+          return <TextArea key={prop.key} label={prop.label} description={prop.hint} rows={3} isOptional={!prop.required} value={String(raw ?? '')} onChange={value => setProp(prop.key, value)} />;
+        }
+        if (prop.kind === 'select') {
+          const options = prop.choices ?? sourceOptions(prop.source);
+          const current = prop.key === 'useremail' ? (raw as { email?: unknown } | undefined)?.email : raw;
+          return <Selector key={prop.key} label={prop.label} value={current === undefined || current === null ? null : String(current)} options={options} hasClear
+            placeholder={prop.source === 'emails' ? 'Choose a published email' : 'Choose'}
+            onChange={value => setProp(prop.key, prop.key === 'useremail' ? { email: value } : value)} />;
+        }
+        if (prop.kind === 'ids') {
+          const chosen = readActionList(raw).map(String);
+          const options = prop.source === 'users' ? users.map(user => ({ value: String(user.id), label: `${user.name} (${user.email})` }))
+            : segments.map(segment => ({ value: String(segment.id), label: segment.name }));
+          return <div key={prop.key} className="ov-stack-sm">
+            <Text weight="medium">{prop.label}</Text>
+            {options.length ? options.map(option => <CheckboxInput key={option.value} label={option.label} value={chosen.includes(option.value)}
+              onChange={checked => setProp(prop.key, checked ? [...chosen, option.value] : chosen.filter(entry => entry !== option.value))} />)
+              : <Text type="supporting" color="secondary">Nothing to choose from yet.</Text>}
+          </div>;
+        }
+        const display = prop.kind === 'tags' ? readActionList(raw).join(', ') : String(raw ?? '');
+        return <TextInput key={prop.key} label={prop.label} description={prop.hint ?? (prop.kind === 'tags' ? 'Separate tags with commas.' : undefined)}
+          isRequired={prop.required} isOptional={!prop.required} value={display}
+          onChange={value => setProp(prop.key, prop.kind === 'tags' ? value.split(',').map(tag => tag.trim()).filter(Boolean) : value)} />;
+      })}
+    </div>
+    {item.type === 'lead.updatelead' ? <TextArea label="Contact fields to set" rows={4} description="One per line as field_alias=value, for example city=Austin."
+      value={Object.entries(item.properties).map(([key, value]) => `${key}=${String(value ?? '')}`).join('\n')}
+      onChange={value => update({ properties: Object.fromEntries(value.split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)).filter(([key]) => key?.trim()).map(([key, entry]) => [key.trim(), entry ?? ''])) })} /> : null}
+  </div>;
 }
 
 function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: () => void; onDone: () => void }) {
@@ -668,23 +570,24 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
   const { values, field } = useFields({
     name: form?.name ?? '',
     description: form?.description ?? '',
-    message: '',
+    message: form?.postAction === 'message' || form?.postAction === 'hideform' ? form.postActionProperty ?? '' : '',
+    redirectUrl: form?.postAction === 'redirect' ? form.postActionProperty ?? '' : '',
   });
   const [published, setPublished] = useState(form?.published ?? true);
+  const [postAction, setPostAction] = useState<string>(form?.postAction || 'message');
+  const emails = useResource<JourneyEmail[]>(emailPath);
+  const segments = useResource<Segment[]>('/segments');
+  const assets = useResource<Asset[]>(assetPath);
+  const users = useResource<{ id: number; name: string; email: string }[]>(`${formPath}/users`);
   const [fields, setFields] = useState<EditableFormField[]>(() => {
-    const existing = form?.fields?.filter(item => item.type !== 'button' && item.type !== 'hidden') ?? [];
-    if (!existing.length) return defaultBuilderFields();
-    return existing.map((item, index) => ({
-      key: index,
-      label: item.label || prettifyTriggerKey(item.alias),
-      alias: item.alias || slugAlias(item.label),
-      type: validFieldTypes.has(item.type) ? item.type as FormFieldType : 'text',
-      mappedField: item.mappedField || 'none',
-      isRequired: Boolean(item.isRequired),
-      optionsText: (item.options ?? []).join(', '),
-    }));
+    const existing = form?.fields?.filter(item => item.type !== 'button') ?? [];
+    return existing.length ? existing.map(editableField) : defaultBuilderFields();
   });
+  const [formActions, setFormActions] = useState<EditableFormAction[]>(() => (form?.actions ?? []).map((item, index) => ({
+    key: index, id: item.id, type: item.type, name: item.name, properties: item.properties,
+  })));
   const nextKey = useRef(fields.length);
+  const nextActionKey = useRef(formActions.length);
 
   function updateField(fieldKey: number, patch: Partial<EditableFormField>) {
     setFields(items => items.map(item => item.key === fieldKey ? { ...item, ...patch } : item));
@@ -692,15 +595,12 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
 
   function addField() {
     const idx = nextKey.current++;
-    setFields(items => [...items, {
-      key: idx,
-      label: '',
-      alias: `field_${idx + 1}`,
-      type: 'text',
-      mappedField: 'none',
-      isRequired: false,
-      optionsText: '',
-    }]);
+    setFields(items => [...items, editableField({ label: '', alias: `field_${idx + 1}`, type: 'text' }, idx)]);
+  }
+
+  function addAction() {
+    const idx = nextActionKey.current++;
+    setFormActions(items => [...items, { key: idx, type: 'lead.changetags', name: '', properties: {} }]);
   }
 
   return <Modal title={form ? 'Edit lead form' : 'Create lead form'} onClose={onClose} size="large">
@@ -709,46 +609,38 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
       void action.run(async () => {
         const seen = new Set<string>();
         const built = fields.map((item, index) => {
-          const label = item.label.trim();
-          const alias = item.alias.trim().toLowerCase();
-          if (!label) throw new Error(`Enter a label for field ${index + 1}.`);
-          if (!/^[a-z][a-z0-9_]{0,59}$/.test(alias) || alias === 'submit') {
-            throw new Error(`Field ${index + 1} alias must start with a lowercase letter and use only lowercase letters, numbers and underscores.`);
-          }
-          if (seen.has(alias)) throw new Error(`Duplicate field alias “${alias}”.`);
-          seen.add(alias);
-          const options = item.type === 'select' || item.type === 'checkboxgrp'
-            ? item.optionsText.split(',').map(opt => opt.trim()).filter(Boolean)
-            : undefined;
-          if ((item.type === 'select' || item.type === 'checkboxgrp') && !options?.length) {
-            throw new Error(`Add at least one choice for field ${index + 1}.`);
-          }
-          return {
-            label,
-            alias,
-            type: item.type,
-            mappedField: item.mappedField === 'none' ? undefined : item.mappedField,
-            isRequired: item.isRequired,
-            ...(options?.length ? { options } : {}),
-          };
+          const result = builtField(item, index);
+          if (seen.has(result.alias)) throw new Error(`Duplicate field alias “${result.alias}”.`);
+          seen.add(result.alias);
+          return result;
         });
+        const builtActions = formActions.map(item => ({
+          ...(item.id ? { id: item.id } : {}), type: item.type, name: item.name.trim(), properties: item.properties,
+        }));
 
         const payload: LeadFormInput = {
           name: values.name.trim(),
           description: values.description.trim(),
+          postAction: postAction as FormPostAction,
+          ...(postAction === 'redirect' ? { redirectUrl: values.redirectUrl.trim() } : {}),
           ...(values.message.trim() ? { message: values.message.trim() } : {}),
           published,
           fields: built,
+          actions: builtActions,
         };
         await api(form ? `${formPath}/${form.id}` : formPath, form ? 'PATCH' : 'POST', payload);
         onDone();
       });
     }}>
       <TextInput label="Form name" isRequired {...field('name')} />
+      <TextArea label="Description" rows={2} isOptional {...field('description')} />
       <div className="ov-form-grid">
-        <TextArea label="Description" rows={2} isOptional {...field('description')} />
-        <TextArea label="Confirmation message" rows={2} isOptional
-          placeholder={form ? 'Leave blank to keep existing message' : 'Thank you for getting in touch.'} {...field('message')} />
+        <Selector label="After the form is sent" value={postAction} options={postActionOptions} onChange={value => setPostAction(value ?? 'message')} />
+        {postAction === 'redirect'
+          ? <TextInput label="Redirect address" placeholder="https://example.com/thanks" isRequired {...field('redirectUrl')} />
+          : postAction === 'return' ? null
+          : <TextArea label="Confirmation message" rows={2} isOptional
+              placeholder={form ? 'Leave blank to keep existing message' : 'Thank you for getting in touch.'} {...field('message')} />}
       </div>
       <Switch label="Published" description="Published forms can be embedded and trigger workflows." value={published} onChange={setPublished} />
 
@@ -758,32 +650,25 @@ function LeadFormEditor({ form, onClose, onDone }: { form?: LeadForm; onClose: (
             <Text weight="semibold">Form fields</Text>
             <Text type="supporting" color="secondary">An email field mapped to the contact email is required and preserved automatically.</Text>
           </div>
-          {fields.length < 20 ? <Button size="sm" label="Add field" icon={<Plus size={14} />} onClick={addField} /> : null}
+          {fields.length < 60 ? <Button size="sm" label="Add field" icon={<Plus size={14} />} onClick={addField} /> : null}
         </div>
-        {fields.map((item, index) => <div key={item.key} className="ov-step">
-          <div className="ov-step-heading">
-            <Text weight="medium">Field {index + 1}</Text>
-            {fields.length > 1 ? <IconButton variant="ghost" size="sm" label={`Remove field ${index + 1}`} icon={<Trash2 size={15} />}
-              onClick={() => setFields(current => current.filter(entry => entry.key !== item.key))} /> : null}
+        {fields.map((item, index) => <LeadFormFieldEditor key={item.key} item={item} index={index} count={fields.length}
+          update={patch => updateField(item.key, patch)}
+          remove={() => setFields(current => current.filter(entry => entry.key !== item.key))} />)}
+      </div>
+
+      <div className="ov-stack-sm">
+        <div className="ov-actions ov-actions--between">
+          <div>
+            <Text weight="semibold">When the form is sent</Text>
+            <Text type="supporting" color="secondary">Actions run in order each time someone submits the form.</Text>
           </div>
-          <div className="ov-form-grid">
-            <TextInput label="Label" isRequired value={item.label} onChange={value => {
-              const autoAlias = !item.alias || item.alias.startsWith('field_') || item.alias === slugAlias(item.label);
-              updateField(item.key, { label: value, ...(autoAlias && value.trim() ? { alias: slugAlias(value) } : {}) });
-            }} />
-            <TextInput label="Field alias" description="Lowercase letters, numbers, underscores" isRequired value={item.alias}
-              onChange={value => updateField(item.key, { alias: value })} />
-            <Selector label="Field type" value={item.type} options={formFieldTypes}
-              onChange={value => updateField(item.key, { type: (value as FormFieldType) || 'text' })} />
-            <Selector label="Map to contact field" value={item.mappedField} options={mappedContactFields}
-              onChange={value => updateField(item.key, { mappedField: value ?? 'none' })} />
-          </div>
-          {item.type === 'select' || item.type === 'checkboxgrp' ? (
-            <TextInput label="Choices" description="Separate options with commas." placeholder="Option A, Option B, Option C" isRequired
-              value={item.optionsText} onChange={value => updateField(item.key, { optionsText: value })} />
-          ) : null}
-          <CheckboxInput label="Required field" value={item.isRequired} onChange={checked => updateField(item.key, { isRequired: checked })} />
-        </div>)}
+          {formActions.length < 30 ? <Button size="sm" label="Add action" icon={<Plus size={14} />} onClick={addAction} /> : null}
+        </div>
+        {formActions.map((item, index) => <LeadFormActionEditor key={item.key} item={item} index={index}
+          emails={emails.data ?? []} segments={segments.data ?? []} assets={assets.data ?? []} users={users.data ?? []}
+          update={patch => setFormActions(current => current.map(entry => entry.key === item.key ? { ...entry, ...patch } : entry))}
+          remove={() => setFormActions(current => current.filter(entry => entry.key !== item.key))} />)}
       </div>
 
       <Text type="supporting" color="secondary">Record marketing consent separately before sending marketing emails to new leads.</Text>
@@ -1750,15 +1635,7 @@ export function Automations({ initialTab }: { initialTab?: string }) {
   }
 
   function describeTrigger(workflow: Workflow) {
-    if (workflow.formId && !workflow.segmentId) {
-      const formName = forms.data?.find(item => item.id === workflow.formId)?.name || `Lead form #${workflow.formId}`;
-      return `Lead form: ${formName}`;
-    }
-    if (workflow.segmentId) {
-      const segName = segments.data?.find(item => item.id === workflow.segmentId)?.name || `Segment #${workflow.segmentId}`;
-      return `Segment: ${segName}`;
-    }
-    return 'Managed trigger';
+    return describeSources(workflowGraphOf(workflow), { segments: segments.data, forms: forms.data });
   }
 
   const createAction: Record<AutomationsTab, [string, () => void]> = {
@@ -1782,7 +1659,16 @@ export function Automations({ initialTab }: { initialTab?: string }) {
       notice={notice || action.notice}
     />
 
-    {tab === 'Workflows' ? <Panel title="Workflows" description="A workflow shows as Active only after the automation engine confirms it is enabled.">
+    {tab === 'Workflows' && workflowEditor ? <WorkflowCanvasEditor key={workflowEditor === 'new' ? 'new' : workflowEditor.id}
+      workflow={workflowEditor === 'new' ? undefined : workflowEditor}
+      onClose={() => setWorkflowEditor(undefined)}
+      onDone={() => {
+        setNotice(workflowEditor === 'new' ? 'Workflow saved. Enable it to start enrolling contacts.' : 'Changes saved.');
+        setWorkflowEditor(undefined);
+        workflows.refresh();
+      }} /> : null}
+
+    {tab === 'Workflows' && !workflowEditor ? <Panel title="Workflows" description="A workflow shows as Active only after the automation engine confirms it is enabled.">
       {!workflows.data ? <AsyncState loading={workflows.loading} error={workflows.error} retry={workflows.refresh} />
         : workflows.data.length ? <div className="ov-stack-sm">{workflows.data.map(workflow => <article className="ov-step" key={workflow.id}>
           <div className="ov-step-heading">
@@ -1801,7 +1687,10 @@ export function Automations({ initialTab }: { initialTab?: string }) {
               </Text> : null}
             </span>
             <Text type="supporting" color="secondary">{delayLabel(step.delayMinutes)}</Text>
-          </li>)}</ol> : null}
+          </li>)}</ol> : workflow.graph?.nodes.length ? <WorkflowOutline graph={workflow.graph}
+            lookups={{ emails: emails.data, segments: segments.data, forms: forms.data, stages: stages.data }} /> : null}
+          {workflow.editable === false && workflow.readOnlyReason ? <Text type="supporting" color="secondary">{workflow.readOnlyReason}</Text> : null}
+          {workflow.enabled ? <Text type="supporting" color="secondary">Pause the workflow to edit it.</Text> : null}
           <div className="ov-actions">
             {!workflow.enabled && workflow.editable !== false ? <Button size="sm" label="Edit workflow" icon={<Pencil size={14} />}
               onClick={() => setWorkflowEditor(workflow)} /> : null}
@@ -2085,14 +1974,6 @@ export function Automations({ initialTab }: { initialTab?: string }) {
             },
           ]} />}
     </Panel> : null}
-
-    {workflowEditor ? <WorkflowForm workflow={workflowEditor === 'new' ? undefined : workflowEditor}
-      onClose={() => setWorkflowEditor(undefined)}
-      onDone={() => {
-        setNotice(workflowEditor === 'new' ? 'Workflow saved. Enable it to start enrolling contacts.' : 'Changes saved.');
-        setWorkflowEditor(undefined);
-        workflows.refresh();
-      }} /> : null}
 
     {workflowContacts ? <WorkflowContactsDrawer workflow={workflowContacts} onClose={() => setWorkflowContacts(undefined)} /> : null}
 

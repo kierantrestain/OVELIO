@@ -28,8 +28,12 @@ import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
   Annotation,
+  ApiKeySummary,
   AttributionResult,
   BreakdownRow,
+  ChannelReport,
+  ChannelRule,
+  CreatedApiKey,
   Campaign,
   Dashboard,
   DateRange,
@@ -55,7 +59,11 @@ import type {
   RetentionRow,
   RevenueMetricType,
   RevenueReport,
+  RevenueUtmDimension,
+  RevenueUtmReport,
   SavedFunnel,
+  SnippetOptions,
+  SnippetPreferences,
   SessionActivityItem,
   SessionPropertyEntry,
   SessionPropertyStat,
@@ -71,7 +79,12 @@ import type {
   WebsiteShare,
   WeeklyTraffic,
 } from '@/contracts';
-import { SEGMENT_DIMENSION_OPERATORS, UNFILTERABLE_DIMENSIONS, operatorLabel } from '@/contracts/analytics';
+import {
+  ANALYTICS_LIMITS, CHANNEL_FIELDS, CHANNEL_OPERATORS, DEFAULT_SNIPPET_OPTIONS, FILTER_DIMENSIONS, FILTER_DIMENSION_LABELS, PROPERTY_OPERATORS, SEGMENT_DIMENSION_OPERATORS,
+  UNFILTERABLE_DIMENSIONS, describeFilterRule, describePropertyFilter, equalityRule, filterQueryParams, goalMatchKind,
+  hasFilters, operatorLabel,
+} from '@/contracts/analytics';
+import type { DimensionOperator, FilterDimension, FilterRule, PropertyDataType, PropertyFilter } from '@/contracts/analytics';
 
 // ANA-04: Umami 3.5.0 has no filter column for these report dimensions, so their rows are not clickable filters.
 const isFilterable = (dimension: ReportDimension) => !(UNFILTERABLE_DIMENSIONS as readonly string[]).includes(dimension);
@@ -79,7 +92,7 @@ import { api, date, duration, message, number, saveFile, useAction, useFields, u
 import { EmailMetrics } from './overview';
 import { useUser } from './shell';
 import {
-  AsyncState, Bars, ConfirmDialog, Distribution, Empty, Feedback, FilterBar,
+  AsyncState, Bars, ConfirmDialog, Distribution, Empty, Feedback,
   FormActions, Metric, Modal, PageHeader, Pager, Panel, Rows, SlideDrawer,
   Snippet, StatusBadge, Tabs, WeeklyHeatmap,
 } from './ui';
@@ -191,26 +204,8 @@ const stepTypes = [
   { value: 'event', label: 'Custom event' },
 ];
 
-const segmentFilterDimensionOptions: { value: ReportDimension; label: string }[] = [
-  { value: 'path', label: 'Path' },
-  { value: 'referrer', label: 'Referrer' },
-  { value: 'country', label: 'Country' },
-  { value: 'region', label: 'Region' },
-  { value: 'city', label: 'City' },
-  { value: 'device', label: 'Device' },
-  { value: 'browser', label: 'Browser' },
-  { value: 'os', label: 'OS' },
-  { value: 'event', label: 'Event' },
-  { value: 'utmSource', label: 'UTM source' },
-  { value: 'utmMedium', label: 'UTM medium' },
-  { value: 'utmCampaign', label: 'UTM campaign' },
-  { value: 'utmContent', label: 'UTM content' },
-  { value: 'utmTerm', label: 'UTM term' },
-  { value: 'title', label: 'Page title' },
-  { value: 'query', label: 'Query' },
-  { value: 'hostname', label: 'Hostname' },
-  { value: 'language', label: 'Language' },
-];
+const segmentFilterDimensionOptions: { value: string; label: string }[] = FILTER_DIMENSIONS
+  .map(value => ({ value, label: FILTER_DIMENSION_LABELS[value] }));
 
 const segmentOperatorOptions = SEGMENT_DIMENSION_OPERATORS.map(value => ({ value, label: operatorLabel(value) }));
 
@@ -265,10 +260,6 @@ const performanceBreakdownOptions: { value: PerformanceBreakdownType; label: str
   { value: 'browser', label: 'Browser' },
 ];
 
-const validFilterDimensions = new Set<ReportDimension>(
-  Object.keys(dimensionLabels) as ReportDimension[],
-);
-
 const campaignStatusTone: Record<string, Tone> = {
   finished: 'success',
   running: 'success',
@@ -296,10 +287,10 @@ function resolveOrigin(trackingOrigin?: string) {
 
 function rangeQuery(range: DateRange, filters?: ReportFilters, extra?: Record<string, string | undefined>) {
   const params = new URLSearchParams({ startAt: String(range.startAt), endAt: String(range.endAt) });
-  if (filters) {
-    for (const [key, val] of Object.entries(filters)) {
-      if (val?.trim()) params.set(key, val.trim());
-    }
+  try {
+    for (const [key, val] of Object.entries(filterQueryParams(filters))) params.set(key, val);
+  } catch {
+    // The filter editor validates every filter before it is kept, so this only guards against a stale state.
   }
   if (extra) {
     for (const [key, val] of Object.entries(extra)) {
@@ -374,31 +365,13 @@ function avgDurationInfo(current?: WebsiteReport['current'], previous?: WebsiteR
   };
 }
 
-function filterKeyForDimension(dimension: ReportDimension): ReportDimension {
-  if (dimension === 'entry' || dimension === 'exit') return 'path';
-  return dimension;
+/** Applying a saved segment or cohort sends its id; Umami reads the stored rules itself. */
+function savedFilters(segment: WebsiteSegment, current: ReportFilters): ReportFilters {
+  return segment.type === 'cohort' ? { ...current, cohort: segment.id } : { ...current, segment: segment.id };
 }
 
-function segmentToReportFilters(segment: WebsiteSegment): ReportFilters {
-  const next: ReportFilters = {};
-  if (segment.action?.value?.trim()) {
-    next[segment.action.type] = segment.action.value.trim();
-  }
-  for (const item of segment.filters) {
-    const val = item.value.trim();
-    if (!val) continue;
-    if (validFilterDimensions.has(item.name as ReportDimension)) {
-      next[filterKeyForDimension(item.name as ReportDimension)] = val;
-    }
-  }
-  return next;
-}
-
-function filtersMatch(a: ReportFilters, b: ReportFilters) {
-  const aEntries = Object.entries(a).filter(([, val]) => Boolean(val?.trim()));
-  const bEntries = Object.entries(b).filter(([, val]) => Boolean(val?.trim()));
-  if (!aEntries.length || aEntries.length !== bEntries.length) return false;
-  return aEntries.every(([key, val]) => b[key as ReportDimension]?.trim() === val?.trim());
+function isSavedApplied(segment: WebsiteSegment, filters: ReportFilters) {
+  return (segment.type === 'cohort' ? filters.cohort : filters.segment) === segment.id;
 }
 
 function sumPoints(points?: Point[] | null) {
@@ -498,21 +471,86 @@ function CustomRange({ range, onClose, onDone }: { range: DateRange; onClose: ()
 
 function TrackingCode({ website, origin, onClose }: { website: Website; origin: string; onClose: () => void }) {
   const action = useAction();
-  const snippet = `<script defer src="${origin.replace(/\/$/, '')}/script.js" data-website-id="${website.id}"></script>`;
+  const base = `${websitesPath}/${website.id}/snippet`;
+  const saved = useResource<SnippetPreferences & { snippet: string }>(`${base}?origin=${encodeURIComponent(origin)}`);
+  const [draft, setDraft] = useState<SnippetOptions>();
+  const [snippet, setSnippet] = useState<string>();
+  const options = draft ?? saved.data?.options ?? DEFAULT_SNIPPET_OPTIONS;
+  const code = snippet ?? saved.data?.snippet ?? '';
+  const set = (patch: Partial<SnippetOptions>) => setDraft({ ...options, ...patch });
   return <Modal title="Tracking code" size="large" onClose={onClose}>
     <Text>Place this script in the &lt;head&gt; of each page on <strong>{website.domain}</strong> you want to measure.</Text>
-    <Snippet code={snippet} />
+    <AsyncState loading={saved.loading} error={saved.error} retry={saved.refresh} />
+    <Snippet code={code} />
+    <Heading level={3}>Options</Heading>
+    <div className="ov-form-grid">
+      <TextInput label="Only track these domains" placeholder="example.com, shop.example.com" value={options.domains.join(', ')}
+        onChange={value => set({ domains: value.split(',').map(item => item.trim()).filter(Boolean) })} />
+      <TextInput label="Tag" placeholder="spring-test" value={options.tag} onChange={tag => set({ tag })} />
+      <TextInput label="Send data to another address" placeholder="https://analytics.example.com" value={options.hostUrl} onChange={hostUrl => set({ hostUrl })} />
+      <TextInput label="Before-send function name" placeholder="beforeSend" value={options.beforeSend} onChange={beforeSend => set({ beforeSend })} />
+    </div>
+    <Switch label="Respect Do Not Track" value={options.doNotTrack} onChange={doNotTrack => set({ doNotTrack })} />
+    <Switch label="Leave out the query string from page URLs" value={options.excludeSearch} onChange={excludeSearch => set({ excludeSearch })} />
+    <Switch label="Leave out the #hash from page URLs" value={options.excludeHash} onChange={excludeHash => set({ excludeHash })} />
+    <Switch label="Track page views and clicks automatically" value={options.autoTrack} onChange={autoTrack => set({ autoTrack })} />
+    <Switch label="Record page speed (Core Web Vitals)" value={options.performance} onChange={performance => set({ performance })} />
+    <Switch label="Wait for consent before loading" value={options.consentMode} onChange={consentMode => set({ consentMode })} />
+    {options.consentMode ? <Banner
+      status="info"
+      title="Consent mode"
+      description="This snippet loads nothing and stores nothing until your site calls ovelioConsent.grant(), for example from your cookie banner's Accept button. Call ovelioConsent.revoke() when a visitor withdraws consent. Use it if you want consent before any measurement, which is the safer choice for UK PECR and EU GDPR if you cannot show your analytics is strictly necessary or exempt. Visitors who never consent are not counted at all."
+    /> : null}
     <Text type="supporting" color="secondary">Track a custom event by adding <Text type="code">{'data-umami-event="signed_up"'}</Text> to a button or link.</Text>
     <Text type="supporting" color="secondary">Website visitors are anonymous. OVELIO does not link visits to contacts unless an attribution has been established.</Text>
     <Feedback error={action.error} notice={action.notice} />
     <FormActions>
+      <Button label="Save options" isLoading={action.busy} onClick={() => void action.run(async () => {
+        const result = await api<SnippetPreferences & { snippet: string }>(base, 'PUT', { options, origin });
+        setDraft(result.options);
+        setSnippet(result.snippet);
+      }, 'Tracking options saved.')} />
       <Button
         label="Copy tracking code"
         icon={<Copy size={15} />}
-        onClick={() => void action.run(async () => navigator.clipboard.writeText(snippet), 'Tracking code copied.')}
+        onClick={() => void action.run(async () => navigator.clipboard.writeText(code), 'Tracking code copied. Save options first if you changed them.')}
       />
     </FormActions>
   </Modal>;
+}
+
+function ApiKeysSection() {
+  const keys = useResource<ApiKeySummary[]>('/api-keys');
+  const action = useAction();
+  const [name, setName] = useState('');
+  const [created, setCreated] = useState<CreatedApiKey>();
+  return <div className="ov-stack-sm">
+    <Heading level={3}>Server events API keys</Heading>
+    <Text type="supporting" color="secondary">Send purchases and sign-ups from your server with POST /api/v1/events and an Authorization: Bearer key. Each event needs an idempotency key so a retry is never counted twice. Keys are shown once.</Text>
+    {created ? <Banner status="warning" title="Copy this key now" description={created.key} /> : null}
+    <AsyncState loading={keys.loading} error={keys.error} retry={keys.refresh} />
+    {keys.data?.length ? <Rows>{keys.data.map(key => <li key={key.id}>
+      <span><strong>{key.name}</strong> <Text type="code">{key.prefix}…</Text> {key.revokedAt ? <Badge label="Revoked" variant="neutral" /> : null}</span>
+      <span>{key.rateLimitPerMinute}/min
+        {key.revokedAt ? null : <IconButton label={`Revoke ${key.name}`} icon={<Trash2 size={14} />} onClick={() => void action.run(async () => {
+          await api(`/api-keys/${key.id}`, 'DELETE');
+          keys.refresh();
+        }, 'API key revoked.')} />}
+      </span>
+    </li>)}</Rows> : null}
+    <form className="ov-actions" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        setCreated(await api<CreatedApiKey>('/api-keys', 'POST', { name: name.trim() }));
+        setName('');
+        keys.refresh();
+      }, 'API key created.');
+    }}>
+      <TextInput label="Key name" placeholder="Checkout server" value={name} onChange={setName} isRequired />
+      <Button type="submit" label="Create key" icon={<Plus size={14} />} isDisabled={!name.trim()} />
+    </form>
+    <Feedback error={action.error} notice={action.notice} />
+  </div>;
 }
 
 function WebsiteSettingsModal({
@@ -599,6 +637,8 @@ function WebsiteSettingsModal({
             </li>;
           })}</Rows> : <Text type="supporting" color="secondary">No active share links for this website.</Text>}
       </div>
+
+      {isAdmin ? <ApiKeysSection /> : null}
 
       {isAdmin ? <div className="ov-stack-sm">
         <Heading level={3}>Administration</Heading>
@@ -729,6 +769,211 @@ function EventPropertiesInspector({
 
 type ExpandedMetricTableRow = ExpandedMetricRow & { _id: string };
 
+const propertyTypeOptions: { value: PropertyDataType; label: string }[] = [
+  { value: 'string', label: 'Text' },
+  { value: 'number', label: 'Number' },
+  { value: 'boolean', label: 'True or false' },
+  { value: 'date', label: 'Date' },
+  { value: 'array', label: 'List' },
+];
+
+type FilterEdit =
+  | { kind: 'rule'; index?: number; rule?: FilterRule }
+  | { kind: 'property'; index?: number; property?: PropertyFilter };
+
+/** Add or change one filter: a traffic dimension rule, or a session or event property rule. */
+function FilterEditorModal({ edit, onClose, onSave }: {
+  edit: FilterEdit;
+  onClose: () => void;
+  onSave: (next: { rule: FilterRule } | { property: PropertyFilter }) => void;
+}) {
+  const [kind, setKind] = useState<'rule' | 'session' | 'event'>(
+    edit.kind === 'rule' ? 'rule' : edit.property?.scope ?? 'session',
+  );
+  const initialRule = edit.kind === 'rule' ? edit.rule : undefined;
+  const initialProperty = edit.kind === 'property' ? edit.property : undefined;
+  const [dimension, setDimension] = useState<FilterDimension>(initialRule?.dimension ?? 'path');
+  const [operator, setOperator] = useState<string>(initialRule?.operator ?? initialProperty?.operator ?? 'eq');
+  const [value, setValue] = useState(initialRule?.values.join(', ') ?? initialProperty?.value ?? '');
+  const [propertyName, setPropertyName] = useState(initialProperty?.name ?? '');
+  const [dataType, setDataType] = useState<PropertyDataType>(initialProperty?.dataType ?? 'string');
+  const [error, setError] = useState<string>();
+
+  const operators = kind === 'rule' ? [...SEGMENT_DIMENSION_OPERATORS] : [...PROPERTY_OPERATORS[dataType]];
+  const listValue = kind === 'rule' && (operator === 'eq' || operator === 'neq');
+  const isNew = edit.index === undefined;
+
+  function submit() {
+    try {
+      if (kind === 'rule') {
+        const values = operator === 'eq' || operator === 'neq'
+          ? value.split(',').map(item => item.trim()).filter(Boolean)
+          : [value.trim()].filter(Boolean);
+        const rule: FilterRule = { dimension, operator: operator as DimensionOperator, values };
+        filterQueryParams({ rules: [rule] });
+        onSave({ rule });
+      } else {
+        const property: PropertyFilter = { scope: kind, name: propertyName.trim(), dataType, operator, value: value.trim() };
+        filterQueryParams({ properties: [property] });
+        onSave({ property });
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'This filter is not valid.');
+    }
+  }
+
+  return <Modal title={isNew ? 'Add filter' : 'Edit filter'} onClose={onClose}>
+    <form className="ov-stack-sm" onSubmit={event => { event.preventDefault(); submit(); }}>
+      {isNew ? <SegmentedControl
+        label="Filter on"
+        size="sm"
+        value={kind}
+        onChange={next => {
+          const target = next === 'session' || next === 'event' ? next : 'rule';
+          setKind(target);
+          setOperator('eq');
+          setError(undefined);
+        }}
+      >
+        <SegmentedControlItem value="rule" label="Traffic" />
+        <SegmentedControlItem value="session" label="Session property" />
+        <SegmentedControlItem value="event" label="Event property" />
+      </SegmentedControl> : null}
+
+      {kind === 'rule' ? <Selector
+        label="Dimension"
+        value={dimension}
+        options={segmentFilterDimensionOptions}
+        onChange={next => next && setDimension(next as FilterDimension)}
+      /> : <div className="ov-form-grid">
+        <TextInput
+          label="Property name"
+          placeholder={kind === 'session' ? 'plan' : 'order_value'}
+          isRequired
+          value={propertyName}
+          onChange={setPropertyName}
+        />
+        <Selector
+          label="Value type"
+          value={dataType}
+          options={propertyTypeOptions}
+          onChange={next => {
+            const type = (next ?? 'string') as PropertyDataType;
+            setDataType(type);
+            if (!PROPERTY_OPERATORS[type].includes(operator)) setOperator(PROPERTY_OPERATORS[type][0]);
+          }}
+        />
+      </div>}
+
+      <Selector
+        label="Condition"
+        value={operator}
+        options={operators.map(item => ({ value: item, label: operatorLabel(item) }))}
+        onChange={next => next && setOperator(next)}
+      />
+
+      {kind !== 'rule' && dataType === 'boolean' ? <Selector
+        label="Value"
+        value={value === 'false' ? 'false' : 'true'}
+        options={[{ value: 'true', label: 'True' }, { value: 'false', label: 'False' }]}
+        onChange={next => setValue(next ?? 'true')}
+      /> : <TextInput
+        label="Value"
+        description={listValue
+          ? 'Separate several values with commas to match any of them.'
+          : kind !== 'rule' && dataType === 'date' ? 'Use the form YYYY-MM-DD.' : undefined}
+        placeholder={kind === 'rule' ? (dimension === 'path' ? '/blog' : 'Value') : 'Value'}
+        isRequired
+        value={value}
+        onChange={setValue}
+      />}
+
+      {kind === 'rule' && (operator === 'c' || operator === 'dnc') ? <Text type="supporting" color="secondary">
+        Matching ignores upper and lower case.
+      </Text> : null}
+      <Feedback error={error} />
+      <FormActions>
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label={isNew ? 'Add filter' : 'Save filter'} />
+      </FormActions>
+    </form>
+  </Modal>;
+}
+
+/** Active filters as plain sentences ("Path contains /blog") that can be edited, removed, or combined with OR. */
+function ReportFilterBar({ filters, savedNames, onChange }: {
+  filters: ReportFilters;
+  savedNames: Record<string, string>;
+  onChange: (next: ReportFilters) => void;
+}) {
+  const [edit, setEdit] = useState<FilterEdit>();
+  const rules = filters.rules ?? [];
+  const properties = filters.properties ?? [];
+  const active = hasFilters(filters);
+
+  function patch(next: ReportFilters) {
+    const cleaned: ReportFilters = { ...next };
+    if (!cleaned.rules?.length) delete cleaned.rules;
+    if (!cleaned.properties?.length) delete cleaned.properties;
+    if (!cleaned.segment) delete cleaned.segment;
+    if (!cleaned.cohort) delete cleaned.cohort;
+    if ((cleaned.rules?.length ?? 0) < 2) delete cleaned.match;
+    onChange(cleaned);
+  }
+
+  function save(next: { rule: FilterRule } | { property: PropertyFilter }) {
+    if ('rule' in next) {
+      const index = edit?.index;
+      patch({
+        ...filters,
+        rules: index === undefined ? [...rules, next.rule] : rules.map((item, pos) => pos === index ? next.rule : item),
+      });
+    } else {
+      const index = edit?.index;
+      patch({
+        ...filters,
+        properties: index === undefined ? [...properties, next.property] : properties.map((item, pos) => pos === index ? next.property : item),
+      });
+    }
+    setEdit(undefined);
+  }
+
+  const chip = (key: string, label: string, onRemove: () => void, onEdit?: () => void) => <span className="ov-actions" key={key}>
+    <Token label={label} color="blue" size="sm" onRemove={onRemove} />
+    {onEdit ? <IconButton size="sm" variant="ghost" label={`Edit filter: ${label}`} icon={<Pencil size={12} />} onClick={onEdit} /> : null}
+  </span>;
+
+  return <div className="ov-filter-bar" role="region" aria-label="Active filters">
+    <Text type="label" color="secondary">Filters:</Text>
+    {rules.map((rule, index) => chip(
+      `rule-${index}`,
+      describeFilterRule(rule),
+      () => patch({ ...filters, rules: rules.filter((_, pos) => pos !== index) }),
+      () => setEdit({ kind: 'rule', index, rule }),
+    ))}
+    {properties.map((property, index) => chip(
+      `property-${index}`,
+      describePropertyFilter(property),
+      () => patch({ ...filters, properties: properties.filter((_, pos) => pos !== index) }),
+      () => setEdit({ kind: 'property', index, property }),
+    ))}
+    {filters.segment ? chip('segment', `Segment: ${savedNames[filters.segment] ?? 'saved segment'}`, () => patch({ ...filters, segment: undefined })) : null}
+    {filters.cohort ? chip('cohort', `Cohort: ${savedNames[filters.cohort] ?? 'saved cohort'}`, () => patch({ ...filters, cohort: undefined })) : null}
+    {rules.length > 1 ? <SegmentedControl
+      label="How filters combine"
+      size="sm"
+      value={filters.match === 'any' ? 'any' : 'all'}
+      onChange={next => patch({ ...filters, match: next === 'any' ? 'any' : 'all' })}
+    >
+      <SegmentedControlItem value="all" label="Match all" />
+      <SegmentedControlItem value="any" label="Match any" />
+    </SegmentedControl> : null}
+    <Button size="sm" label="Add filter" icon={<Filter size={14} />} onClick={() => setEdit({ kind: 'rule' })} />
+    {active ? <Button size="sm" variant="ghost" label="Clear all" onClick={() => onChange({})} /> : null}
+    {edit ? <FilterEditorModal key={`${edit.kind}:${edit.index ?? 'new'}`} edit={edit} onClose={() => setEdit(undefined)} onSave={save} /> : null}
+  </div>;
+}
+
 function WebsiteSegmentModal({
   websiteId,
   initialType,
@@ -744,15 +989,18 @@ function WebsiteSegmentModal({
 }) {
   const action = useAction();
   const activeFilterRules = useMemo<WebsiteSegmentFilter[]>(
-    () => (Object.entries(activeFilters) as [ReportDimension, string][])
-      .filter(([, value]) => Boolean(value?.trim()))
-      .map(([name, value]) => ({ name, operator: 'eq', value: value.trim() })),
+    () => (activeFilters.rules ?? []).map(rule => ({ name: rule.dimension, operator: rule.operator, value: rule.values.join(',') })),
+    [activeFilters],
+  );
+  const activeSessionProperties = useMemo(
+    () => (activeFilters.properties ?? []).filter(item => item.scope === 'session'),
     [activeFilters],
   );
 
   const [kind, setKind] = useState<'segment' | 'cohort'>(initialType);
   const [name, setName] = useState('');
-  const [match, setMatch] = useState<'all' | 'any'>('all');
+  const [match, setMatch] = useState<'all' | 'any'>(activeFilters.match ?? 'all');
+  const [includeProperties, setIncludeProperties] = useState(activeSessionProperties.length > 0);
   const [rules, setRules] = useState<WebsiteSegmentFilter[]>(() =>
     activeFilterRules.length ? activeFilterRules : [{ name: 'country', operator: 'eq', value: '' }],
   );
@@ -782,6 +1030,9 @@ function WebsiteSegmentModal({
             type: 'segment',
             match,
             filters: cleanRules,
+            ...(includeProperties && activeSessionProperties.length
+              ? { sessionPropertyFilters: activeSessionProperties.map(item => ({ scope: 'session' as const, name: item.name, dataType: item.dataType, operator: item.operator, value: item.value })) }
+              : {}),
           });
           onDone('segment');
           return;
@@ -850,6 +1101,7 @@ function WebsiteSegmentModal({
             />
             <TextInput
               label="Value"
+              description={rule.operator === 'eq' || rule.operator === 'neq' ? 'Separate several values with commas.' : undefined}
               placeholder={rule.name === 'path' ? '/pricing' : rule.name === 'country' ? 'GB' : 'Value'}
               isRequired
               value={rule.value}
@@ -857,7 +1109,12 @@ function WebsiteSegmentModal({
             />
           </div>
         </div>)}
-        {rules.length < 20 ? <div>
+        {activeSessionProperties.length ? <Switch
+          label={`Include ${activeSessionProperties.length} active session ${activeSessionProperties.length === 1 ? 'property filter' : 'property filters'}`}
+          value={includeProperties}
+          onChange={setIncludeProperties}
+        /> : null}
+        {rules.length < ANALYTICS_LIMITS.filterRules ? <div>
           <Button
             size="sm"
             label="Add filter rule"
@@ -915,7 +1172,7 @@ function SavedSegmentsPanel({
   websiteId: string;
   filters: ReportFilters;
   canEdit: boolean;
-  onApplyFilters: (next: ReportFilters) => void;
+  onApplyFilters: (next: ReportFilters, savedName?: { id: string; name: string }) => void;
 }) {
   const segments = useResource<WebsiteSegment[]>(`${websitesPath}/${websiteId}/segments?type=segment`);
   const cohorts = useResource<WebsiteSegment[]>(`${websitesPath}/${websiteId}/segments?type=cohort`);
@@ -925,7 +1182,7 @@ function SavedSegmentsPanel({
   const [createKind, setCreateKind] = useState<'segment' | 'cohort'>();
   const [deleteTarget, setDeleteTarget] = useState<WebsiteSegment>();
 
-  const activeFilterCount = Object.values(filters).filter(v => Boolean(v?.trim())).length;
+  const activeFilterCount = (filters.rules?.length ?? 0) + (filters.properties?.length ?? 0);
   const activeResource = view === 'cohort' ? cohorts : segments;
 
   function refreshAll() {
@@ -939,10 +1196,11 @@ function SavedSegmentsPanel({
       parts.push(`${item.action.type === 'event' ? 'Event' : 'Path'}: ${item.action.value}`);
     }
     for (const rule of item.filters) {
-      const dim = dimensionLabels[rule.name as ReportDimension] ?? rule.name;
+      const dim = FILTER_DIMENSION_LABELS[rule.name as FilterDimension] ?? dimensionLabels[rule.name as ReportDimension] ?? rule.name;
       const op = operatorLabel(rule.operator);
-      parts.push(`${dim} ${op} ${rule.value}`);
+      parts.push(`${dim} ${op} ${rule.value.split(',').join(' or ')}`);
     }
+    for (const property of item.sessionPropertyFilters ?? []) parts.push(describePropertyFilter(property));
     return parts.join(' · ') || 'No filter rules recorded';
   }
 
@@ -980,15 +1238,12 @@ function SavedSegmentsPanel({
     <Feedback error={deleteAction.error} notice={deleteAction.notice} />
     {!activeResource.data ? <AsyncState loading={activeResource.loading} error={activeResource.error} retry={activeResource.refresh} />
       : activeResource.data.length ? <Rows>{activeResource.data.map(item => {
-        const mapped = segmentToReportFilters(item);
-        const applicable = Object.keys(mapped).length > 0;
-        const isApplied = filtersMatch(mapped, filters);
+        const isApplied = isSavedApplied(item, filters);
+        const apply = () => onApplyFilters(savedFilters(item, filters), { id: item.id, name: item.name });
         return <li key={item.id}>
           <span>
             <span className="ov-actions">
-              {applicable
-                ? <Link onClick={() => onApplyFilters(mapped)} weight={isApplied ? 'semibold' : 'medium'}>{item.name}</Link>
-                : <Text weight="medium">{item.name}</Text>}
+              <Link onClick={apply} weight={isApplied ? 'semibold' : 'medium'}>{item.name}</Link>
               {isApplied ? <StatusBadge label="Active" tone="info" /> : null}
               {item.dateRange ? <Badge variant="neutral" label={cohortDateRangeLabels[item.dateRange] ?? item.dateRange} /> : null}
               {item.type === 'segment' && item.match ? <Badge variant="neutral" label={item.match === 'any' ? 'Match any' : 'Match all'} /> : null}
@@ -1000,8 +1255,8 @@ function SavedSegmentsPanel({
               size="sm"
               variant="ghost"
               label={isApplied ? 'Applied' : 'Apply'}
-              isDisabled={!applicable || isApplied}
-              onClick={() => onApplyFilters(mapped)}
+              isDisabled={isApplied}
+              onClick={apply}
             />
             {canEdit ? <IconButton
               size="sm"
@@ -1156,7 +1411,7 @@ function TrafficTab({
   filters: ReportFilters;
   canEdit: boolean;
   onAddFilter: (dimension: ReportDimension, value: string) => void;
-  onApplyFilters: (next: ReportFilters) => void;
+  onApplyFilters: (next: ReportFilters, savedName?: { id: string; name: string }) => void;
   refreshRange?: () => void;
 }) {
   const report = useResource<WebsiteReport>(`${websitesPath}/${website.id}/report?${rangeQuery(range, filters)}`);
@@ -1458,15 +1713,27 @@ function RealtimeTab({ website }: { website: Website }) {
 
 /* ── Tab 3: Sessions & Weekly Heatmap ──────────────────────────────────────── */
 
+const dataTypeByCode: Record<number, PropertyDataType> = { 1: 'string', 2: 'number', 3: 'boolean', 4: 'date', 5: 'array' };
+
+/** "Filter by this" for a recorded session property: an `is` filter, or `contains` for list values. */
+function sessionPropertyFilter(entry: SessionPropertyEntry): PropertyFilter | undefined {
+  const dataType = dataTypeByCode[entry.dataType] ?? 'string';
+  if (entry.value === '' || (dataType === 'string' && entry.value.includes(','))) return undefined;
+  const value = dataType === 'date' ? entry.value.slice(0, 10) : entry.value;
+  return { scope: 'session', name: entry.propertyName, dataType, operator: dataType === 'array' ? 'c' : 'eq', value };
+}
+
 function SessionActivityDrawer({
   websiteId,
   session,
   range,
+  onAddProperty,
   onClose,
 }: {
   websiteId: string;
   session: WebsiteSession;
   range: DateRange;
+  onAddProperty: (property: PropertyFilter) => void;
   onClose: () => void;
 }) {
   const activity = useResource<SessionActivityItem[]>(
@@ -1491,11 +1758,24 @@ function SessionActivityDrawer({
 
     <div className="ov-stack-sm">
       <Heading level={3}>Session properties</Heading>
+      <Text type="supporting" color="secondary">Custom details sent with identify calls, shown as recorded.</Text>
       {!properties.data ? <AsyncState loading={properties.loading} error={properties.error} retry={properties.refresh} />
         : properties.data.length ? <MetadataList>
           {properties.data.map((entry, idx) => (
             <MetadataListItem key={`${entry.propertyName}-${idx}`} label={entry.propertyName}>
-              {entry.value || '—'}
+              <span className="ov-actions">
+                <Text>{entry.value || '—'}</Text>
+                {sessionPropertyFilter(entry) ? <Button
+                  size="sm"
+                  variant="ghost"
+                  label="Filter by this"
+                  icon={<Filter size={12} />}
+                  onClick={() => {
+                    const filter = sessionPropertyFilter(entry);
+                    if (filter) onAddProperty(filter);
+                  }}
+                /> : null}
+              </span>
             </MetadataListItem>
           ))}
         </MetadataList> : <Text type="supporting" color="secondary">No custom properties recorded for this anonymous session.</Text>}
@@ -1526,14 +1806,23 @@ function SessionActivityDrawer({
   </SlideDrawer>;
 }
 
-function SessionPropertiesPanel({ websiteId, range }: { websiteId: string; range: DateRange }) {
+function SessionPropertiesPanel({ websiteId, range, filters, onAddProperty }: {
+  websiteId: string;
+  range: DateRange;
+  filters: ReportFilters;
+  onAddProperty: (property: PropertyFilter) => void;
+}) {
   const properties = useResource<SessionPropertyStat[]>(
-    `${websitesPath}/${websiteId}/sessions/properties?${rangeQuery(range)}`,
+    `${websitesPath}/${websiteId}/sessions/properties?${rangeQuery(range, filters)}`,
   );
   const [selectedProperty, setSelectedProperty] = useState<string>();
+  const selectedType = dataTypeByCode[properties.data?.find(item => item.propertyName === selectedProperty)?.dataType ?? 1] ?? 'string';
   const values = useResource<EventPropertyValue[]>(
     selectedProperty
-      ? `${websitesPath}/${websiteId}/sessions/properties/values?${rangeQuery(range, undefined, { propertyName: selectedProperty })}`
+      ? `${websitesPath}/${websiteId}/sessions/properties/values?${rangeQuery(range, filters, {
+        propertyName: selectedProperty,
+        dataType: selectedType === 'array' ? '5' : undefined,
+      })}`
       : null,
   );
 
@@ -1569,7 +1858,24 @@ function SessionPropertiesPanel({ websiteId, range }: { websiteId: string; range
                 <Button size="sm" variant="ghost" label="Clear" onClick={() => setSelectedProperty(undefined)} />
               </div>
               {!values.data ? <AsyncState loading={values.loading} error={values.error} retry={values.refresh} />
-                : <Distribution points={values.data.map(entry => ({ label: entry.value || 'Empty', value: entry.total }))} />}
+                : <>
+                  <Distribution points={values.data.map(entry => ({ label: entry.value || 'Empty', value: entry.total }))} />
+                  <div className="ov-actions">
+                    {selectedType !== 'date' ? values.data.filter(entry => entry.value && !entry.value.includes(',')).slice(0, 6).map(entry => <Button
+                      key={entry.value}
+                      size="sm"
+                      label={`Only ${entry.value}`}
+                      icon={<Filter size={12} />}
+                      onClick={() => onAddProperty({
+                        scope: 'session',
+                        name: selectedProperty,
+                        dataType: selectedType,
+                        operator: selectedType === 'array' ? 'c' : 'eq',
+                        value: entry.value,
+                      })}
+                    />) : null}
+                  </div>
+                </>}
             </> : <Empty title="Select a property" description="Choose a session property on the left to inspect its top values." />}
           </div>
         </div>}
@@ -1580,10 +1886,12 @@ function SessionsTab({
   website,
   range,
   filters,
+  onAddProperty,
 }: {
   website: Website;
   range: DateRange;
   filters: ReportFilters;
+  onAddProperty: (property: PropertyFilter) => void;
 }) {
   const [queryInput, setQueryInput] = useState('');
   const [search, setSearch] = useState('');
@@ -1628,7 +1936,7 @@ function SessionsTab({
         : <WeeklyHeatmap matrix={weekly.data} />}
     </Panel>
 
-    <SessionPropertiesPanel websiteId={website.id} range={range} />
+    <SessionPropertiesPanel websiteId={website.id} range={range} filters={filters} onAddProperty={onAddProperty} />
 
     <Panel
       title="Anonymous sessions"
@@ -1693,6 +2001,7 @@ function SessionsTab({
       websiteId={website.id}
       session={selectedSession}
       range={range}
+      onAddProperty={property => { onAddProperty(property); setSelectedSession(undefined); }}
       onClose={() => setSelectedSession(undefined)}
     /> : null}
   </div>;
@@ -1737,7 +2046,7 @@ function GoalModal({
       />
       <TextInput
         label="Matching value"
-        description="Enter the exact event name or page path."
+        description="Enter the exact event name or page path. Use * as a wildcard, for example /blog/* matches every page under /blog."
         placeholder={type === 'event' ? 'signed_up' : '/thank-you'}
         isRequired
         {...field('value')}
@@ -1853,7 +2162,14 @@ function GoalsSection({ website, range, canEdit }: { website: Website; range: Da
             header: 'Type',
             renderCell: item => <Badge label={item.type === 'event' ? 'Custom event' : 'Page path'} variant={item.type === 'event' ? 'info' : 'neutral'} />,
           },
-          { key: 'value', header: 'Match value', renderCell: item => <Text type="code">{item.value}</Text> },
+          {
+            key: 'value',
+            header: 'Match value',
+            renderCell: item => <span className="ov-actions">
+              <Text type="code">{item.value}</Text>
+              {goalMatchKind(item.value) === 'wildcard' ? <Badge label="Wildcard" variant="neutral" /> : null}
+            </span>,
+          },
           {
             key: 'unique',
             header: 'Converting sessions',
@@ -1861,10 +2177,14 @@ function GoalsSection({ website, range, canEdit }: { website: Website; range: Da
             renderCell: item => loadingStats ? '…' : number(statsMap?.[item.id]?.unique),
           },
           {
-            key: 'total',
-            header: 'Total conversions',
+            key: 'rate',
+            header: 'Conversion rate',
             align: 'end',
-            renderCell: item => loadingStats ? '…' : number(statsMap?.[item.id]?.total),
+            renderCell: item => {
+              const stats = statsMap?.[item.id];
+              if (loadingStats) return '…';
+              return stats ? `${formatPercent(stats.rate)} of ${number(stats.total)} sessions` : '—';
+            },
           },
           ...(canEdit ? [{
             key: 'id',
@@ -2213,15 +2533,17 @@ function RetentionView({ website, range, filters }: { website: Website; range: D
   </Panel>;
 }
 
-function AttributionView({ website, range }: { website: Website; range: DateRange }) {
+function AttributionView({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
   const [model, setModel] = useState<'first-click' | 'last-click'>('first-click');
   const [type, setType] = useState<'path' | 'event'>('path');
   const [step, setStep] = useState('');
-  const [submitted, setSubmitted] = useState<{ model: 'first-click' | 'last-click'; type: 'path' | 'event'; step: string }>();
+  const [lookback, setLookback] = useState('0');
+  const [submitted, setSubmitted] = useState<{ model: 'first-click' | 'last-click'; type: 'path' | 'event'; step: string; lookback: string }>();
 
   const attribution = useResource<AttributionResult>(
     submitted
-      ? `${websitesPath}/${website.id}/attribution?${rangeQuery(range, undefined, {
+      ? `${websitesPath}/${website.id}/attribution?${rangeQuery(range, filters, {
+        lookbackDays: submitted.lookback,
         model: submitted.model,
         type: submitted.type,
         step: submitted.step,
@@ -2234,7 +2556,7 @@ function AttributionView({ website, range }: { website: Website; range: DateRang
       <form className="ov-form-grid ov-form-grid--three" onSubmit={event => {
         event.preventDefault();
         if (!step.trim()) return;
-        setSubmitted({ model, type, step: step.trim() });
+        setSubmitted({ model, type, step: step.trim(), lookback });
       }}>
         <Selector
           label="Attribution model"
@@ -2258,6 +2580,7 @@ function AttributionView({ website, range }: { website: Website; range: DateRang
           value={step}
           onChange={setStep}
         />
+        <TextInput label="Lookback days (0 to 90)" value={lookback} onChange={value => setLookback(value.replace(/\D/g, '').slice(0, 2) || '0')} />
         <div className="ov-actions">
           <Button type="submit" variant="primary" label="Run attribution" icon={<Target size={15} />} isDisabled={!step.trim()} />
         </div>
@@ -2273,6 +2596,11 @@ function AttributionView({ website, range }: { website: Website; range: DateRang
         <Metric label="Attributed visitors" value={attribution.data.total.visitors} />
         <Metric label="Attributed visits" value={attribution.data.total.visits} />
         <Metric label="Attributed page views" value={attribution.data.total.pageviews} />
+        <Metric
+          label="Revenue in range"
+          formatted={attribution.data.revenue ? formatCurrency(attribution.data.revenue.sum, attribution.data.revenue.currency) : 'None recorded'}
+          hint={attribution.data.lookbackDays ? `Visits are searched ${attribution.data.lookbackDays} days before the range start, so conversions in that stretch are included. Revenue covers the chosen range only.` : 'Revenue recorded under the same filters. Umami does not split it by source here; see Revenue by UTM.'}
+        />
       </div>
       <div className="ov-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
         <Panel title="Referrers"><Distribution points={attribution.data.referrer} /></Panel>
@@ -2310,7 +2638,7 @@ function BreakdownView({ website, range, filters }: { website: Website; range: D
 
   useEffect(() => {
     let active = true;
-    const appliedFilters = Object.keys(filters).length ? filters : undefined;
+    const appliedFilters = hasFilters(filters) ? filters : undefined;
     api<BreakdownRow[]>(`${websitesPath}/${website.id}/breakdown`, 'POST', {
       ...range,
       fields: activeFields,
@@ -2404,6 +2732,10 @@ function RevenueView({ website, range, filters }: { website: Website; range: Dat
     [revenue.data?.metrics],
   );
 
+  const [utmType, setUtmType] = useState<RevenueUtmDimension>('utmSource');
+  const utmRevenue = useResource<RevenueUtmReport>(
+    `${websitesPath}/${website.id}/revenue/utm?${rangeQuery(range, filters, { currency, type: utmType })}`,
+  );
   const breakdownLabel = revenueBreakdownOptions.find(option => option.value === breakdownType)?.label ?? 'Dimension';
   const stats = revenue.data?.stats;
   const prev = revenue.data?.comparison;
@@ -2506,6 +2838,25 @@ function RevenueView({ website, range, filters }: { website: Website; range: Dat
             },
           ]}
         />
+      </Panel>
+      <Panel
+        title="Revenue by UTM"
+        description="Revenue for the ten busiest values of the chosen UTM field, in the selected currency. Each value is a separate query, so values outside the top ten are not listed."
+      >
+        <Selector label="UTM field" value={utmType} onChange={value => setUtmType(value as RevenueUtmDimension)} options={[
+          { value: 'utmSource', label: 'UTM source' }, { value: 'utmMedium', label: 'UTM medium' }, { value: 'utmCampaign', label: 'UTM campaign' },
+        ]} />
+        <AsyncState loading={utmRevenue.loading} error={utmRevenue.error} retry={utmRevenue.refresh} />
+        {utmRevenue.data ? <Table
+          data={utmRevenue.data.rows.map(row => ({ ...row, _id: row.name }))}
+          idKey="_id"
+          emptyState={<Empty title="No revenue tied to a UTM value in this period" />}
+          columns={[
+            { key: 'name', header: 'Value', renderCell: row => <Text weight="medium">{row.name}</Text> },
+            { key: 'count', header: 'Transactions', align: 'end', renderCell: row => number(row.count) },
+            { key: 'sum', header: 'Revenue', align: 'end', renderCell: row => formatCurrency(row.sum, utmRevenue.data?.currency ?? currency) },
+          ]}
+        /> : null}
       </Panel>
     </>}
   </div>;
@@ -2624,7 +2975,126 @@ function PerformanceView({ website, range, filters }: { website: Website; range:
   </div>;
 }
 
-function InsightsTab({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
+const channelOperatorLabels: Record<string, string> = { contains: 'contains', equals: 'is', present: 'is set', absent: 'is empty' };
+const channelFieldLabels: Record<string, string> = { referrer: 'Referrer domain', utmSource: 'UTM source', utmMedium: 'UTM medium', query: 'URL query' };
+
+function ChannelsView({ website, range, filters, canEdit }: { website: Website; range: DateRange; filters: ReportFilters; canEdit: boolean }) {
+  const report = useResource<ChannelReport & { customRules: boolean }>(`${websitesPath}/${website.id}/channels?${rangeQuery(range, filters)}`);
+  const rulesResource = useResource<{ rules: ChannelRule[]; custom: boolean }>('/channel-rules');
+  const action = useAction();
+  const [draft, setDraft] = useState<ChannelRule[]>();
+  const [editing, setEditing] = useState(false);
+  const [sample, setSample] = useState({ referrer: '', utmSource: '', utmMedium: '', query: '' });
+  const [tested, setTested] = useState<{ channel: string; rule?: string }>();
+  const rules = draft ?? rulesResource.data?.rules ?? [];
+  const move = (index: number, by: number) => {
+    const next = [...rules];
+    const [item] = next.splice(index, 1);
+    next.splice(Math.max(0, Math.min(next.length, index + by)), 0, item);
+    setDraft(next);
+  };
+  return <div className="ov-stack">
+    <Panel title="Channels" description="Visits grouped by OVELIO channel rules">
+      <Text type="supporting" color="secondary">
+        Umami sorts channels with fixed rules: it counts e-mail only from webmail referrers or a medium containing &ldquo;mail&rdquo;, and does not treat fbclid as paid.
+        OVELIO classifies the referrer, UTM source, UTM medium and URL query combinations Umami reports, using the rules below, so the totals can differ from Umami&apos;s Channels list.
+        This is a breakdown-level estimate, not a per-session classification: a visitor&apos;s later pages are not re-classified.
+      </Text>
+      <AsyncState loading={report.loading} error={report.error} retry={report.refresh} />
+      {report.data ? <Table
+        data={report.data.rows.map(row => ({ ...row, _id: row.channel }))}
+        idKey="_id"
+        emptyState={<Empty title="No visits in this period" />}
+        columns={[
+          { key: 'channel', header: 'Channel', renderCell: row => <Text weight="medium">{row.channel}</Text> },
+          { key: 'visits', header: 'Visits', align: 'end', renderCell: row => number(row.visits) },
+          { key: 'visitors', header: 'Visitors', align: 'end', renderCell: row => number(row.visitors) },
+          { key: 'share', header: 'Share', align: 'end', renderCell: row => formatPercent(row.share) },
+        ]}
+      /> : null}
+    </Panel>
+    <Panel title="Channel rules" description="The first rule that matches decides the channel. Use the arrows to reorder.">
+      {rulesResource.data && !rulesResource.data.custom && !draft ? <Text type="supporting" color="secondary">Showing the default rules. Edit them to save your own.</Text> : null}
+      <Rows>{rules.map((rule, index) => <li key={rule.id ?? `${index}-${rule.name}`}>
+        <span>
+          <strong>{index + 1}. {rule.name}</strong> sends to <Badge label={rule.channel} variant="info" />{' '}
+          <Text type="supporting" color="secondary">
+            {rule.conditions.map(c => `${channelFieldLabels[c.field]} ${channelOperatorLabels[c.operator]}${c.values.length ? ` ${c.values.slice(0, 4).join(' / ')}${c.values.length > 4 ? '…' : ''}` : ''}`).join(' and ')}
+          </Text>
+        </span>
+        {editing && canEdit ? <span className="ov-actions">
+          <Button label="Up" onClick={() => move(index, -1)} isDisabled={index === 0} />
+          <Button label="Down" onClick={() => move(index, 1)} isDisabled={index === rules.length - 1} />
+          <IconButton label={`Remove ${rule.name}`} icon={<Trash2 size={14} />} onClick={() => setDraft(rules.filter((_, i) => i !== index))} />
+        </span> : null}
+      </li>)}</Rows>
+      {editing && canEdit ? <ChannelRuleForm onAdd={rule => setDraft([...rules, rule])} /> : null}
+      <Feedback error={action.error} notice={action.notice} />
+      {canEdit ? <FormActions>
+        {editing
+          ? <>
+            <Button label="Discard changes" onClick={() => { setDraft(undefined); setEditing(false); }} />
+            <Button variant="primary" label="Save rules" isLoading={action.busy} onClick={() => void action.run(async () => {
+              await api('/channel-rules', 'PUT', { rules: rules.map(({ name, channel, conditions }) => ({ name, channel, conditions })) });
+              setDraft(undefined);
+              setEditing(false);
+              rulesResource.refresh();
+              report.refresh();
+            }, 'Channel rules saved.')} />
+          </>
+          : <Button label="Edit rules" icon={<Pencil size={14} />} onClick={() => setEditing(true)} />}
+      </FormActions> : null}
+    </Panel>
+    <Panel title="Test a visit" description="See which channel a sample visit would get with the rules above, including unsaved edits.">
+      <div className="ov-form-grid">
+        <TextInput label="Referrer domain" placeholder="news.ycombinator.com" value={sample.referrer} onChange={referrer => setSample({ ...sample, referrer })} />
+        <TextInput label="UTM source" value={sample.utmSource} onChange={utmSource => setSample({ ...sample, utmSource })} />
+        <TextInput label="UTM medium" placeholder="newsletter" value={sample.utmMedium} onChange={utmMedium => setSample({ ...sample, utmMedium })} />
+        <TextInput label="URL query" placeholder="fbclid=abc" value={sample.query} onChange={query => setSample({ ...sample, query })} />
+      </div>
+      <div className="ov-actions">
+        <Button label="Test visit" onClick={() => void action.run(async () => {
+          setTested(await api<{ channel: string; rule?: string }>('/channel-rules/test', 'POST', {
+            visit: sample,
+            ...(draft ? { rules: rules.map(({ name, channel, conditions }) => ({ name, channel, conditions })) } : {}),
+          }));
+        })} />
+        {tested ? <Text>Channel: <strong>{tested.channel}</strong>{tested.rule ? ` (rule: ${tested.rule})` : ' (no rule matched)'}</Text> : null}
+      </div>
+    </Panel>
+  </div>;
+}
+
+function ChannelRuleForm({ onAdd }: { onAdd: (rule: ChannelRule) => void }) {
+  const [name, setName] = useState('');
+  const [channel, setChannel] = useState('');
+  const [field, setField] = useState<(typeof CHANNEL_FIELDS)[number]>('utmMedium');
+  const [operator, setOperator] = useState<(typeof CHANNEL_OPERATORS)[number]>('equals');
+  const [values, setValues] = useState('');
+  const needsValues = operator === 'contains' || operator === 'equals';
+  const list = values.split(',').map(item => item.trim()).filter(Boolean);
+  return <div className="ov-stack-sm">
+    <Heading level={3}>Add a rule</Heading>
+    <div className="ov-form-grid ov-form-grid--three">
+      <TextInput label="Rule name" value={name} onChange={setName} />
+      <TextInput label="Channel" placeholder="Affiliate" value={channel} onChange={setChannel} />
+      <Selector label="Field" value={field} onChange={value => setField(value as typeof field)}
+        options={CHANNEL_FIELDS.map(value => ({ value, label: channelFieldLabels[value] }))} />
+      <Selector label="Condition" value={operator} onChange={value => setOperator(value as typeof operator)}
+        options={CHANNEL_OPERATORS.map(value => ({ value, label: channelOperatorLabels[value] }))} />
+      {needsValues ? <TextInput label="Values (comma separated)" value={values} onChange={setValues} /> : null}
+    </div>
+    <div className="ov-actions">
+      <Button label="Add rule" icon={<Plus size={14} />} isDisabled={!name.trim() || !channel.trim() || (needsValues && !list.length)}
+        onClick={() => {
+          onAdd({ name: name.trim(), channel: channel.trim(), conditions: [{ field, operator, values: needsValues ? list : [] }] });
+          setName(''); setChannel(''); setValues('');
+        }} />
+    </div>
+  </div>;
+}
+
+function InsightsTab({ website, range, filters, canEdit }: { website: Website; range: DateRange; filters: ReportFilters; canEdit: boolean }) {
   const [subview, setSubview] = useState('journeys');
   return <div className="ov-stack">
     <div className="ov-actions">
@@ -2632,6 +3102,7 @@ function InsightsTab({ website, range, filters }: { website: Website; range: Dat
         <SegmentedControlItem value="journeys" label="User journeys" />
         <SegmentedControlItem value="retention" label="Retention cohorts" />
         <SegmentedControlItem value="attribution" label="Attribution" />
+        <SegmentedControlItem value="channels" label="Channels" />
         <SegmentedControlItem value="breakdown" label="Breakdown" />
         <SegmentedControlItem value="revenue" label="Revenue" />
         <SegmentedControlItem value="performance" label="Performance" />
@@ -2639,7 +3110,8 @@ function InsightsTab({ website, range, filters }: { website: Website; range: Dat
     </div>
     {subview === 'journeys' ? <JourneysView website={website} range={range} filters={filters} /> : null}
     {subview === 'retention' ? <RetentionView website={website} range={range} filters={filters} /> : null}
-    {subview === 'attribution' ? <AttributionView website={website} range={range} /> : null}
+    {subview === 'attribution' ? <AttributionView website={website} range={range} filters={filters} /> : null}
+    {subview === 'channels' ? <ChannelsView website={website} range={range} filters={filters} canEdit={canEdit} /> : null}
     {subview === 'breakdown' ? <BreakdownView website={website} range={range} filters={filters} /> : null}
     {subview === 'revenue' ? <RevenueView website={website} range={range} filters={filters} /> : null}
     {subview === 'performance' ? <PerformanceView website={website} range={range} filters={filters} /> : null}
@@ -2803,7 +3275,7 @@ function EntityTrendDrawer({
               }
             }}
           >
-            <SegmentedControlItem value="default" label="Default" />
+            <SegmentedControlItem value="default" label="Page range" />
             <SegmentedControlItem value="7" label="7d" />
             <SegmentedControlItem value="30" label="30d" />
             <SegmentedControlItem value="90" label="90d" />
@@ -2822,22 +3294,48 @@ function EntityTrendDrawer({
   </SlideDrawer>;
 }
 
+/** Click or hit counts for every link or pixel over one range; Umami's charts endpoint takes 20 ids at a time. */
+function useEntityCharts(endpoint: '/links/charts' | '/pixels/charts', ids: string[], range: DateRange) {
+  const [revision, setRevision] = useState(0);
+  const [state, setState] = useState<{ key: string; data?: EntityChartSeries; error?: string }>();
+  const key = `${endpoint}:${ids.join(',')}:${range.startAt}:${range.endAt}:${revision}`;
+
+  useEffect(() => {
+    if (!ids.length) return;
+    let active = true;
+    const chunks: string[][] = [];
+    for (let index = 0; index < ids.length; index += 20) chunks.push(ids.slice(index, index + 20));
+    const qs = rangeQuery(range).toString();
+    void Promise.all(chunks.map(chunk => api<EntityChartSeries>(`${endpoint}?ids=${encodeURIComponent(chunk.join(','))}&${qs}`)))
+      .then(parts => { if (active) setState({ key, data: Object.assign({}, ...parts) as EntityChartSeries }); })
+      .catch((caught: unknown) => { if (active) setState({ key, error: message(caught) }); });
+    return () => { active = false; };
+  }, [endpoint, ids, key, range]);
+
+  const current = state?.key === key ? state : undefined;
+  return {
+    data: current?.data,
+    error: current?.error,
+    loading: ids.length > 0 && !current,
+    refresh: () => setRevision(value => value + 1),
+  };
+}
+
 function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trackingOrigin?: string }) {
   const links = useResource<TrackedLink[]>('/links');
   const pixels = useResource<TrackingPixel[]>('/pixels');
   const action = useAction();
 
-  const linkBatchIds = useMemo(() => (links.data ?? []).slice(0, 20).map(item => item.id), [links.data]);
-  const pixelBatchIds = useMemo(() => (pixels.data ?? []).slice(0, 20).map(item => item.id), [pixels.data]);
+  const [days, setDays] = useState<7 | 30 | 90>(7);
+  const [range, setRange] = useState(() => recent(7));
+  const linkBatchIds = useMemo(() => (links.data ?? []).map(item => item.id), [links.data]);
+  const pixelBatchIds = useMemo(() => (pixels.data ?? []).map(item => item.id), [pixels.data]);
   const linkBatchSet = useMemo(() => new Set(linkBatchIds), [linkBatchIds]);
   const pixelBatchSet = useMemo(() => new Set(pixelBatchIds), [pixelBatchIds]);
 
-  const linkCharts = useResource<EntityChartSeries>(
-    linkBatchIds.length ? `/links/charts?ids=${encodeURIComponent(linkBatchIds.join(','))}` : null,
-  );
-  const pixelCharts = useResource<EntityChartSeries>(
-    pixelBatchIds.length ? `/pixels/charts?ids=${encodeURIComponent(pixelBatchIds.join(','))}` : null,
-  );
+  const linkCharts = useEntityCharts('/links/charts', linkBatchIds, range);
+  const pixelCharts = useEntityCharts('/pixels/charts', pixelBatchIds, range);
+  const windowLabel = `last ${days} days`;
 
   const [editLink, setEditLink] = useState<TrackedLink | 'new'>();
   const [editPixel, setEditPixel] = useState<TrackingPixel | 'new'>();
@@ -2857,6 +3355,23 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
 
   return <div className="ov-stack">
     <Feedback error={action.error} notice={action.notice} />
+    <div className="ov-actions">
+      <SegmentedControl
+        label="Counting window"
+        size="sm"
+        value={String(days)}
+        onChange={value => {
+          const next = value === '90' ? 90 : value === '30' ? 30 : 7;
+          setDays(next);
+          setRange(recent(next));
+        }}
+      >
+        <SegmentedControlItem value="7" label="7 days" />
+        <SegmentedControlItem value="30" label="30 days" />
+        <SegmentedControlItem value="90" label="90 days" />
+      </SegmentedControl>
+      <Text type="supporting" color="secondary">Clicks and impressions are counted over the {windowLabel}.</Text>
+    </div>
     <div className="ov-grid">
       <Panel
         title="Tracked short links"
@@ -2879,10 +3394,10 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
                 header: 'Destination URL',
                 renderCell: item => <Link href={item.url} isExternalLink>{item.url}</Link>,
               },
-              { key: 'slug', header: 'Slug', renderCell: item => <Text type="code">{item.slug}</Text> },
+              { key: 'slug', header: 'Short URL', renderCell: item => <Text type="code">{`/q/${item.slug}`}</Text> },
               {
                 key: 'hits',
-                header: 'Clicks',
+                header: `Clicks (${days}d)`,
                 align: 'end',
                 renderCell: item => {
                   if (!linkBatchSet.has(item.id)) return '—';
@@ -2951,10 +3466,10 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
             emptyState={<Empty title="No tracking pixels yet" description="Create a tracking pixel to count impressions across external pages." />}
             columns={[
               { key: 'name', header: 'Name', renderCell: item => <Text weight="medium">{item.name}</Text> },
-              { key: 'slug', header: 'Slug', renderCell: item => <Text type="code">{item.slug}</Text> },
+              { key: 'slug', header: 'Image URL', renderCell: item => <Text type="code">{`/p/${item.slug}`}</Text> },
               {
                 key: 'hits',
-                header: 'Impressions',
+                header: `Impressions (${days}d)`,
                 align: 'end',
                 renderCell: item => {
                   if (!pixelBatchSet.has(item.id)) return '—';
@@ -2974,6 +3489,16 @@ function LinksAndPixelsTab({ canEdit, trackingOrigin }: { canEdit: boolean; trac
                     label="Trend"
                     icon={<TrendingUp size={14} />}
                     onClick={() => setTrendTarget({ kind: 'pixel', item })}
+                  />
+                  <IconButton
+                    size="sm"
+                    variant="ghost"
+                    label={`Copy pixel URL ${item.name}`}
+                    icon={<Link2 size={14} />}
+                    onClick={() => {
+                      const imageUrl = `${resolveOrigin(trackingOrigin)}/p/${item.slug}`;
+                      void action.run(async () => navigator.clipboard.writeText(imageUrl), 'Tracking pixel URL copied.');
+                    }}
                   />
                   <IconButton
                     size="sm"
@@ -3307,26 +3832,27 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
   const websites = useResource<Website[]>(isWebsiteScoped ? websitesPath : null);
   const website = websites.data?.find(item => item.id === selected) || websites.data?.[0];
 
-  const activeFilterItems = useMemo(
-    () => (Object.entries(filters) as [ReportDimension, string][])
-      .filter(([, value]) => Boolean(value))
-      .map(([key, value]) => ({ key, label: `${dimensionLabels[key] ?? key}: ${value}` })),
-    [filters],
-  );
+  const [savedNames, setSavedNames] = useState<Record<string, string>>({});
 
   function addFilter(dimension: ReportDimension, value: string) {
     const trimmed = value.trim();
     if (!trimmed || !isFilterable(dimension)) return;
-    const filterKey = filterKeyForDimension(dimension);
-    setFilters(current => ({ ...current, [filterKey]: trimmed }));
+    const target = (dimension === 'entry' || dimension === 'exit' ? 'path' : dimension) as FilterDimension;
+    if (!(FILTER_DIMENSIONS as readonly string[]).includes(target)) return;
+    // A clicked row replaces any earlier filter on the same dimension with a plain "is" filter.
+    setFilters(current => ({
+      ...current,
+      rules: [...(current.rules ?? []).filter(rule => rule.dimension !== target), equalityRule(target, trimmed)],
+    }));
   }
 
-  function removeFilter(key: string) {
-    setFilters(current => {
-      const next = { ...current };
-      delete next[key as ReportDimension];
-      return next;
-    });
+  function addPropertyFilter(property: PropertyFilter) {
+    setFilters(current => ({ ...current, properties: [...(current.properties ?? []), property] }));
+  }
+
+  function applySaved(next: ReportFilters, saved?: { id: string; name: string }) {
+    setFilters(next);
+    if (saved) setSavedNames(current => ({ ...current, [saved.id]: saved.name }));
   }
 
   const refreshRange = period === 'custom' ? undefined : () => setRange(recent(Number(period)));
@@ -3393,7 +3919,7 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
                 {canEdit ? <Button label="Tracking code" icon={<CodeXml size={16} />} onClick={() => setModal('tracking')} /> : null}
               </div>
 
-              <FilterBar items={activeFilterItems} onRemove={removeFilter} onClear={() => setFilters({})} />
+              <ReportFilterBar filters={filters} savedNames={savedNames} onChange={setFilters} />
 
               {tab === 'Traffic' ? <TrafficTab
                 key={`${website.id}:${siteRevision}`}
@@ -3402,13 +3928,13 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
                 filters={filters}
                 canEdit={canEdit}
                 onAddFilter={addFilter}
-                onApplyFilters={setFilters}
+                onApplyFilters={applySaved}
                 refreshRange={refreshRange}
               /> : null}
               {tab === 'Realtime' ? <RealtimeTab key={`${website.id}:${siteRevision}`} website={website} /> : null}
-              {tab === 'Sessions' ? <SessionsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
+              {tab === 'Sessions' ? <SessionsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} onAddProperty={addPropertyFilter} /> : null}
               {tab === 'Goals & Funnels' ? <GoalsAndFunnelsTab key={`${website.id}:${siteRevision}`} website={website} range={range} canEdit={canEdit} /> : null}
-              {tab === 'Insights' ? <InsightsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
+              {tab === 'Insights' ? <InsightsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} canEdit={canEdit} /> : null}
             </div>}
 
     {modal === 'website' && canEdit ? <WebsiteForm

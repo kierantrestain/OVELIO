@@ -80,12 +80,34 @@ export type CampaignArchiveInput = {
 
 export type Campaign = CampaignInput & {
   id: number;
+  /** Listmonk's public campaign identifier, used in unsubscribe links. */
+  uuid?: string;
   status: string;
   sendAt: string | null;
   createdAt: string | null;
   toSend?: number | null;
   archiveSlug?: string;
   metrics: CampaignMetrics;
+  /** Pre-send segment refresh for a scheduled send (DEL-22). Absent when the newsletter was never scheduled. */
+  preSendRefresh?: PreSendRefresh;
+};
+
+/**
+ * `waiting`: refresh has not opened yet. `refreshing`: recipients are being refreshed. `held`: the send time is too close,
+ * so the newsletter was moved back to draft until the refresh finishes. `ready`: refreshed before sending. `late`: the
+ * refresh finished after the send time and sending started immediately. `failed`: the refresh failed and the newsletter was
+ * NOT sent. `missed`: sending began before the refresh could finish.
+ */
+export type PreSendRefreshState = 'waiting' | 'refreshing' | 'held' | 'ready' | 'late' | 'failed' | 'missed';
+
+export type PreSendRefresh = {
+  state: PreSendRefreshState;
+  sendAt: string;
+  /** When the refresh opens (a fixed lead before `sendAt`). */
+  refreshFrom: string;
+  /** The reason, in plain words. Empty for waiting, refreshing and ready. */
+  message: string;
+  updatedAt: string;
 };
 
 export type RunningCampaignStat = {
@@ -133,3 +155,11 @@ export type TransactionalEmailInput = {
 export type MaintenanceResult = {
   count: number;
 };
+
+/** What a pre-send segment refresh did, shown after a newsletter starts. */
+export type SegmentSyncReport = {
+  /** `deferred`: the segment was too large to refresh inline, so it started from its last sync and refreshes in the background. */
+  segments: { segmentId: number; name: string; members: number; removed: number; deferred?: boolean }[];
+};
+
+export type CampaignStartResult = Campaign & { segmentSync?: SegmentSyncReport };

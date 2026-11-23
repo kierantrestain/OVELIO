@@ -1,7 +1,7 @@
 import type {
-  Asset, Category, Company, Contact, ContactDevice, ContactLinkedCompany,
+  Asset, Category, Company, Contact, ContactDevice, DncEntry, ContactLinkedCompany,
   ContactNote, CustomField, CustomFieldObject, DynamicContent, FocusItem,
-  FormField, FormSubmission, LandingPage, MarketingReport, MarketingReportData,
+  FormSubmission, LandingPage, MarketingReport, MarketingReportData,
   PointAction, PointTrigger, PointTriggerEvent, Segment, SegmentFilter, Stage,
   Tag, Webhook, WorkflowContact,
 } from '../../contracts';
@@ -89,6 +89,22 @@ function customFieldValues(all: ApiRecord) {
   return values;
 }
 
+// Mautic names its DNC reasons by code: 1 unsubscribed, 2 bounced, 3 manual (Entity/DoNotContact.php:17-32).
+// A legacy response can key the collection by channel; the row's own channel wins when it has one.
+export function toDncEntries(entries: unknown): DncEntry[] {
+  if (!entries || typeof entries !== 'object') return [];
+  return Object.entries(entries).map(([key, raw]) => {
+    const entry = record(raw);
+    const code = number(entry.reason);
+    return {
+      channel: text(entry.channel) || key,
+      reason: code === 1 ? 'unsubscribed' as const : code === 2 ? 'bounced' as const : 'manual' as const,
+      comment: text(entry.comments),
+      at: date(entry.dateAdded),
+    };
+  });
+}
+
 export function toContact(value: ApiRecord): Contact {
   const fields = record(record(value.fields).all);
   const tags = Object.values(record(value.tags));
@@ -117,6 +133,7 @@ export function toContact(value: ApiRecord): Contact {
       .map(tag => text(record(tag).tag)).filter(Boolean),
     suppressed: Object.entries(entries).some(([channel, entry]) =>
       channel === 'email' || text(record(entry).channel) === 'email'),
+    dnc: toDncEntries(entries),
     customFields: customFieldValues(fields),
   };
 }
@@ -135,16 +152,25 @@ function toSegmentFilter(value: unknown): SegmentFilter | null {
   const field = text(entry.field);
   const operator = text(entry.operator);
   if (!field || !operator) return null;
-  const rawFilter = entry.filter ?? record(entry.properties).filter;
+  // Mautic keeps the value in `properties.filter`; older rows carry it at the top level (Controller/Api/ListApiController.php:71-95).
+  const rawFilter = record(entry.properties).filter ?? entry.filter;
   let filter: SegmentFilter['filter'] = '';
   if (Array.isArray(rawFilter)) {
     filter = rawFilter.map(String);
   } else if (typeof rawFilter === 'number' && Number.isFinite(rawFilter)) {
     filter = rawFilter;
+  } else if (typeof rawFilter === 'boolean') {
+    filter = rawFilter ? 1 : 0;
   } else if (typeof rawFilter === 'string') {
     filter = rawFilter;
+  } else if (rawFilter && typeof rawFilter === 'object') {
+    // "In the last / next" rows store { interval, unit } (Segment/Decorator/ParseDateFilterValueTrait.php:25-31).
+    const span = record(rawFilter);
+    const interval = number(span.interval);
+    const unit = span.unit === 'day' || span.unit === 'month' || span.unit === 'year' ? span.unit : null;
+    if (interval && interval > 0 && unit) filter = { interval, unit };
   }
-  const object = entry.object === 'company' ? 'company' : entry.object === 'lead' ? 'lead' : undefined;
+  const object = entry.object === 'company' ? 'company' : entry.object === 'behaviors' ? 'behaviors' : entry.object === 'lead' ? 'lead' : undefined;
   const type = text(entry.type);
   return {
     glue: entry.glue === 'or' ? 'or' : 'and',
@@ -160,6 +186,10 @@ export function toSegment(value: ApiRecord): Segment {
   const filters = value.filters && typeof value.filters === 'object'
     ? Object.values(value.filters).map(toSegmentFilter).filter((entry): entry is SegmentFilter => entry !== null)
     : undefined;
+  // Counts come from `?withCounts`; the build fields are not in the legacy REST serializer (LeadList.php:203-224),
+  // so they stay null unless a newer engine adds them.
+  const count = number(value.contactCount);
+  const builtSeconds = number(value.lastBuiltTime);
   return {
     id: requiredId(value.id),
     name: text(value.name),
@@ -168,6 +198,9 @@ export function toSegment(value: ApiRecord): Segment {
     published: flag(value.isPublished),
     ...(filters !== undefined ? { filters } : {}),
     ...(value.isGlobal !== undefined ? { isGlobal: flag(value.isGlobal) } : {}),
+    ...(value.contactCount !== undefined ? { contactCount: count } : {}),
+    ...(value.lastBuiltDate !== undefined ? { lastBuiltAt: date(value.lastBuiltDate) } : {}),
+    ...(value.lastBuiltTime !== undefined ? { lastBuiltSeconds: builtSeconds } : {}),
   };
 }
 
@@ -211,6 +244,11 @@ export function toPointAction(value: ApiRecord): PointAction {
     type: text(value.type),
     delta: number(value.delta) ?? 0,
     published: published(value),
+    properties: value.properties && typeof value.properties === 'object' && !Array.isArray(value.properties)
+      ? value.properties as Record<string, unknown> : {},
+    repeatable: flag(value.repeatable),
+    groupId: positiveId(value.group && typeof value.group === 'object' ? record(value.group).id : value.group),
+    groupName: value.group && typeof value.group === 'object' ? text(record(value.group).name) || null : null,
   };
 }
 
@@ -238,27 +276,6 @@ export function toPointTrigger(value: ApiRecord): PointTrigger {
     published: published(value),
     triggerExistingLeads: flag(value.triggerExistingLeads),
     events,
-  };
-}
-
-export function toFormField(value: ApiRecord): FormField {
-  const id = positiveId(value.id);
-  const mappedField = text(value.mappedField);
-  const props = record(value.properties);
-  const rawList = record(props.list).list ?? props.list ?? record(props.optionlist).list ?? props.optionlist;
-  const options = rawList && typeof rawList === 'object'
-    ? Object.values(rawList)
-        .map(entry => typeof entry === 'string' ? entry : text(record(entry).label) || text(record(entry).value))
-        .filter(Boolean)
-    : undefined;
-  return {
-    ...(id ? { id } : {}),
-    label: text(value.label),
-    alias: text(value.alias),
-    type: text(value.type) || 'text',
-    ...(mappedField ? { mappedField } : {}),
-    isRequired: flag(value.isRequired),
-    ...(options?.length ? { options } : {}),
   };
 }
 

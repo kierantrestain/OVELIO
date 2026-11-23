@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { ReportDimension } from '../../src/contracts';
+import type { FilterDimension, ReportDimension, ReportFilters } from '../../src/contracts';
 import { createUmami } from '../../src/server/umami';
 import { UpstreamError } from '../../src/server/upstream';
+
+/** An `is` filter on one dimension, the shape the console sends when a report row is clicked. */
+const is = (dimension: FilterDimension, value: string): ReportFilters => ({
+  rules: [{ dimension, operator: 'eq', values: [value] }],
+});
 
 const website = { id: '22b3bfe1-b34f-4472-bc18-123994f2ef31', name: 'Example', domain: 'example.test' };
 const goalId = '61048d54-4909-4b06-a9b4-5b1e54e44b60';
@@ -122,7 +127,7 @@ test('creates native websites and goals and reads goal and funnel results', asyn
   assert.equal(registered.domain, 'localhost:3001');
   const goal = await api.createGoal(website.id, { name: 'Signup', ...steps[1] });
   assert.deepEqual(await api.goals(website.id), [goal]);
-  assert.deepEqual(await api.goalStats(website.id, goal.id, range), { unique: 2, total: 6 });
+  assert.deepEqual(await api.goalStats(website.id, goal.id, range), { unique: 2, total: 6, rate: 2 / 6 });
   assert.deepEqual(await api.funnel(website.id, range, [...steps], 45), [
     { label: '/pricing', visitors: 6 }, { label: 'signup & purchase', visitors: 2 },
   ]);
@@ -205,8 +210,8 @@ test('supports all 22 dimensions, report filters, activeVisitors, eventsSeries a
       return failOptional ? new Response(null, { status: 503 }) : Response.json({ visitors: 12 });
     }
 
-    assert.equal(url.searchParams.get('country'), 'GB');
-    assert.equal(url.searchParams.get('utmMedium'), 'email');
+    assert.equal(url.searchParams.get('country'), 'eq.GB');
+    assert.equal(url.searchParams.get('utmMedium'), 'eq.email');
     assert.equal(url.searchParams.get('entry'), null);
 
     if (url.pathname === `${path}/stats`) {
@@ -247,14 +252,15 @@ test('supports all 22 dimensions, report filters, activeVisitors, eventsSeries a
   const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
   assert.equal(await api.activeVisitors(website.id), 12);
 
-  const report = await api.report(website.id, range, allDimensions, {
-    country: ' GB ',
-    utmMedium: 'email',
-    entry: '/ignored',
-    city: '   ',
-  });
+  const filters: ReportFilters = {
+    rules: [
+      { dimension: 'country', operator: 'eq', values: [' GB '] },
+      { dimension: 'utmMedium', operator: 'eq', values: ['email'] },
+    ],
+  };
+  const report = await api.report(website.id, range, allDimensions, filters);
 
-  assert.deepEqual(report.filters, { country: 'GB', utmMedium: 'email' });
+  assert.deepEqual(report.filters, filters);
   assert.deepEqual(report.current, { pageviews: 42, visitors: 20, visits: 24, bounces: 5 });
   assert.equal('totaltime' in (report.current ?? {}), false);
   assert.equal(report.activeVisitors, 12);
@@ -270,7 +276,7 @@ test('supports all 22 dimensions, report filters, activeVisitors, eventsSeries a
   assert.deepEqual(report.dimensions.utmTerm, [{ label: 'val-utm_term', value: 7 }]);
 
   failOptional = true;
-  const degraded = await api.report(website.id, range, [], { country: 'GB', utmMedium: 'email' });
+  const degraded = await api.report(website.id, range, [], { rules: [{ dimension: 'country', operator: 'eq', values: ['GB'] }, { dimension: 'utmMedium', operator: 'eq', values: ['email'] }] });
   assert.equal(degraded.activeVisitors, null);
   assert.equal(degraded.eventsSeries, null);
 });
@@ -379,7 +385,7 @@ test('reads sessions, session activity, and weekly traffic heatmap', async () =>
       assert.equal(url.searchParams.get('page'), '2');
       assert.equal(url.searchParams.get('pageSize'), '25');
       assert.equal(url.searchParams.get('search'), 'chrome');
-      assert.equal(url.searchParams.get('country'), 'US');
+      assert.equal(url.searchParams.get('country'), 'eq.US');
       return Response.json({
         data: [{
           id: sessionId,
@@ -427,7 +433,7 @@ test('reads sessions, session activity, and weekly traffic heatmap', async () =>
       ]);
     }
     if (url.pathname === `${path}/sessions/weekly`) {
-      assert.equal(url.searchParams.get('device'), 'desktop');
+      assert.equal(url.searchParams.get('device'), 'eq.desktop');
       return Response.json(badMatrix ? [[1, 2, 3]] : matrix);
     }
     assert.fail(`Unexpected endpoint ${url.pathname}`);
@@ -439,7 +445,7 @@ test('reads sessions, session activity, and weekly traffic heatmap', async () =>
     page: 2,
     pageSize: 25,
     search: ' chrome ',
-    filters: { country: 'US' },
+    filters: is('country', 'US'),
   });
   assert.equal(page.total, 40);
   assert.equal(page.page, 2);
@@ -471,13 +477,13 @@ test('reads sessions, session activity, and weekly traffic heatmap', async () =>
     },
   ]);
 
-  const weekly = await api.weeklyTraffic(website.id, range, { device: 'desktop' });
+  const weekly = await api.weeklyTraffic(website.id, range, is('device', 'desktop'));
   assert.equal(weekly.length, 7);
   assert.equal(weekly[0]?.length, 24);
   assert.deepEqual(weekly, matrix);
 
   badMatrix = true;
-  await assert.rejects(() => api.weeklyTraffic(website.id, range, { device: 'desktop' }), (error: unknown) =>
+  await assert.rejects(() => api.weeklyTraffic(website.id, range, is('device', 'desktop')), (error: unknown) =>
     error instanceof UpstreamError && error.status === 502);
 });
 
@@ -485,7 +491,7 @@ test('reads event data properties and property values', async () => {
   const fetcher: typeof fetch = async (input) => {
     const url = new URL(String(input));
     if (url.pathname === `${path}/event-data/properties`) {
-      assert.equal(url.searchParams.get('event'), 'checkout');
+      assert.equal(url.searchParams.get('event'), 'eq.checkout');
       return Response.json([
         { eventName: 'checkout', propertyName: 'plan', dataType: 1, total: 14 },
       ]);
@@ -502,7 +508,7 @@ test('reads event data properties and property values', async () => {
   };
 
   const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
-  assert.deepEqual(await api.eventProperties(website.id, range, { event: 'checkout' }), [
+  assert.deepEqual(await api.eventProperties(website.id, range, is('event', 'checkout')), [
     { eventName: 'checkout', propertyName: 'plan', total: 14 },
   ]);
   assert.deepEqual(await api.eventPropertyValues(website.id, range, 'checkout', 'plan'), [
@@ -607,7 +613,7 @@ test('reads retention, journeys, attribution, and multi-dimensional breakdown', 
   const fetcher: typeof fetch = async (input) => {
     const url = new URL(String(input));
     if (url.pathname === `${path}/retention`) {
-      assert.equal(url.searchParams.get('country'), 'FR');
+      assert.equal(url.searchParams.get('country'), 'eq.FR');
       return Response.json([
         { date: '2026-01-01', day: 0, visitors: 20, returnVisitors: 20, percentage: 100 },
         { date: '2026-01-01', day: 1, visitors: 20, returnVisitors: 5, percentage: 25.5 },
@@ -617,7 +623,7 @@ test('reads retention, journeys, attribution, and multi-dimensional breakdown', 
       assert.equal(url.searchParams.get('steps'), '4');
       assert.equal(url.searchParams.get('startStep'), '/');
       assert.equal(url.searchParams.get('endStep'), '/signup');
-      assert.equal(url.searchParams.get('browser'), 'safari');
+      assert.equal(url.searchParams.get('browser'), 'eq.safari');
       return Response.json([
         { items: ['/', '/pricing', '/signup', null], count: 14 },
       ]);
@@ -639,7 +645,7 @@ test('reads retention, journeys, attribution, and multi-dimensional breakdown', 
     }
     if (url.pathname === `${path}/breakdown`) {
       assert.deepEqual(JSON.parse(url.searchParams.get('fields') ?? ''), ['country', 'browser']);
-      assert.equal(url.searchParams.get('device'), 'mobile');
+      assert.equal(url.searchParams.get('device'), 'eq.mobile');
       return Response.json([
         { country: 'US', browser: 'chrome', views: 30, visitors: 12, visits: 14, bounces: 3, totaltime: 400 },
       ]);
@@ -649,13 +655,13 @@ test('reads retention, journeys, attribution, and multi-dimensional breakdown', 
 
   const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
 
-  assert.deepEqual(await api.retention(website.id, range, { country: 'FR' }), [
+  assert.deepEqual(await api.retention(website.id, range, is('country', 'FR')), [
     { date: '2026-01-01', day: 0, visitors: 20, returnVisitors: 20, percentage: 100 },
     { date: '2026-01-01', day: 1, visitors: 20, returnVisitors: 5, percentage: 25.5 },
   ]);
 
   assert.deepEqual(
-    await api.journeys(website.id, range, { steps: 4, startStep: '/', endStep: '/signup', filters: { browser: 'safari' } }),
+    await api.journeys(website.id, range, { steps: 4, startStep: '/', endStep: '/signup', filters: is('browser', 'safari') }),
     [{ items: ['/', '/pricing', '/signup'], count: 14 }],
   );
 
@@ -670,11 +676,12 @@ test('reads retention, journeys, attribution, and multi-dimensional breakdown', 
       utmContent: [{ label: 'hero', value: 2 }],
       utmTerm: [{ label: 'automation', value: 1 }],
       total: { pageviews: 25, visitors: 10, visits: 12 },
+      revenue: null,
     },
   );
 
   assert.deepEqual(
-    await api.breakdown(website.id, range, ['country', 'browser', 'country'], { device: 'mobile' }),
+    await api.breakdown(website.id, range, ['country', 'browser', 'country'], is('device', 'mobile')),
     [{ country: 'US', browser: 'chrome', views: 30, visitors: 12, visits: 14, bounces: 3, totaltime: 400 }],
   );
 
@@ -926,7 +933,7 @@ test('reads revenue report in parallel across stats, chart, and metrics', async 
 
     if (url.pathname === `${path}/revenue/stats`) {
       if (url.searchParams.get('currency') === 'EUR') {
-        assert.equal(url.searchParams.get('country'), 'DE');
+        assert.equal(url.searchParams.get('country'), 'eq.DE');
         return Response.json({
           sum: null,
           count: 0,
@@ -1023,7 +1030,7 @@ test('reads revenue report in parallel across stats, chart, and metrics', async 
   });
 
   chartStyle = 'array';
-  const eur = await api.revenueReport(website.id, multiDayRange, ' eur ', 'referrer', { country: 'DE' });
+  const eur = await api.revenueReport(website.id, multiDayRange, ' eur ', 'referrer', is('country', 'DE'));
   assert.deepEqual(eur, {
     currency: 'EUR',
     stats: {
@@ -1075,7 +1082,7 @@ test('reads web performance report in parallel for Core Web Vitals', async () =>
         });
       }
       assert.equal(url.searchParams.get('metric'), 'cls');
-      assert.equal(url.searchParams.get('device'), 'mobile');
+      assert.equal(url.searchParams.get('device'), 'eq.mobile');
       return Response.json([
         { t: '2026-01-01T10:00:00Z', p50: 0.02, p75: 0.045, p95: 0.11 },
       ]);
@@ -1124,7 +1131,7 @@ test('reads web performance report in parallel for Core Web Vitals', async () =>
   });
 
   chartMode = 'percentiles';
-  const cls = await api.performanceReport(website.id, range, 'cls', 'browser', { device: 'mobile' });
+  const cls = await api.performanceReport(website.id, range, 'cls', 'browser', is('device', 'mobile'));
   assert.equal(cls.metric, 'cls');
   assert.deepEqual(cls.chart, [{ label: '2026-01-01T10:00:00Z', value: 0.045 }]);
   assert.deepEqual(cls.metrics, [{ name: 'chrome', count: 20, p50: 0.02, p75: 0.045, p95: 0.1 }]);
@@ -1149,7 +1156,7 @@ test('reads expanded metrics and coerces numeric strings to numbers', async () =
     }
     assert.equal(url.searchParams.get('type'), 'referrer');
     assert.equal(url.searchParams.get('limit'), '10');
-    assert.equal(url.searchParams.get('country'), 'US');
+    assert.equal(url.searchParams.get('country'), 'eq.US');
     return Response.json([
       { name: null, pageviews: '5', visitors: '3', visits: '4', bounces: '1', totaltime: '90' },
     ]);
@@ -1162,7 +1169,7 @@ test('reads expanded metrics and coerces numeric strings to numbers', async () =
     { name: '/docs', pageviews: 12, visitors: 8, visits: 9, bounces: 0, totaltime: 0 },
   ]);
 
-  assert.deepEqual(await api.expandedMetrics(website.id, range, 'referrer', { country: 'US' }, 10), [
+  assert.deepEqual(await api.expandedMetrics(website.id, range, 'referrer', is('country', 'US'), 10), [
     { name: 'Direct', pageviews: 5, visitors: 3, visits: 4, bounces: 1, totaltime: 90 },
   ]);
 
@@ -1178,7 +1185,7 @@ test('reads paginated raw events feed with search and filters', async () => {
     assert.equal(url.searchParams.get('page'), '2');
     assert.equal(url.searchParams.get('pageSize'), '15');
     assert.equal(url.searchParams.get('search'), 'checkout');
-    assert.equal(url.searchParams.get('country'), 'GB');
+    assert.equal(url.searchParams.get('country'), 'eq.GB');
 
     return Response.json({
       data: [
@@ -1215,7 +1222,7 @@ test('reads paginated raw events feed with search and filters', async () => {
     page: 2,
     pageSize: 15,
     search: ' checkout ',
-    filters: { country: 'GB' },
+    filters: is('country', 'GB'),
   });
 
   assert.deepEqual(feed, {
@@ -1260,7 +1267,7 @@ test('reads session stats and session data properties', async () => {
     const url = new URL(String(input));
 
     if (url.pathname === `${path}/sessions/stats`) {
-      assert.equal(url.searchParams.get('device'), 'desktop');
+      assert.equal(url.searchParams.get('device'), 'eq.desktop');
       if (wrappedStats) {
         return Response.json({
           pageviews: { value: '120' },
@@ -1307,7 +1314,7 @@ test('reads session stats and session data properties', async () => {
 
   const api = createUmami({ url: 'http://tracking.test', token: 'test-key', fetch: fetcher });
 
-  assert.deepEqual(await api.sessionStats(website.id, range, { device: 'desktop' }), {
+  assert.deepEqual(await api.sessionStats(website.id, range, is('device', 'desktop')), {
     pageviews: 120,
     visitors: 45,
     visits: 52,
@@ -1316,7 +1323,7 @@ test('reads session stats and session data properties', async () => {
   });
 
   wrappedStats = true;
-  assert.deepEqual(await api.sessionStats(website.id, range, { device: 'desktop' }), {
+  assert.deepEqual(await api.sessionStats(website.id, range, is('device', 'desktop')), {
     pageviews: 120,
     visitors: 45,
     visits: 52,

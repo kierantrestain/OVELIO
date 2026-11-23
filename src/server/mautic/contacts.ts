@@ -1,24 +1,29 @@
 import type {
   Company, CompanyInput, Contact, ContactDetail, ContactDevice, ContactInput, ContactLinkedCompany,
   ContactNote, ContactNoteInput, CustomField, CustomFieldInput, CustomFieldObject, DateRange, Page,
-  Point, Segment, Stage, StageInput, Tag,
+  Point, Segment, Stage, StageInput, Tag, ContactTimeline, TimelineQuery,
 } from '../../contracts';
 import { UpstreamError } from '../upstream';
 import {
-  date, flag, item, items, positiveId, record, requiredId, service, text, toCompany,
+  date, flag, item, items, number, positiveId, record, requiredId, service, text, toCompany,
   toContact, toContactDevice, toContactLinkedCompany, toContactNote, toCustomField, toStage, toTag,
   total, type ApiRecord,
 } from './normalize';
-import { day, maxPage, suppressionCodes, queryPath, conditions, dates, sortContacts, requiredText, contactPayload, companyPayload, wantedTags, fieldObject, customValues } from './helpers';
-import type { SuppressionReason, ContactQuery, Where } from './helpers';
+import { day, maxPage, maxContactPage, contactSortColumns, contactSearch, suppressionCodes, queryPath, conditions, dates, sortContacts, requiredText, contactPayload, companyPayload, wantedTags, fieldObject, customValues } from './helpers';
+import type { SuppressionReason, ContactQuery, Where, DncChange } from './helpers';
 import type { Client } from './client';
 
 export function contactsApi(client: Client) {
   const { request, list, write, remove, contact, segment, memberships, tally } = client;
 
+  // Field definitions rarely change, so a long import reads them once every few seconds instead of once per row.
+  let definitions: { at: number; fields: CustomField[] } | undefined;
   async function contactFieldDefinitions() {
+    if (definitions && Date.now() - definitions.at < 10_000) return definitions.fields;
     const response = await request('/fields/contact?limit=200');
-    return items(response.fields).map(entry => toCustomField(entry, 'contact')).filter(field => field.published);
+    const fields = items(response.fields).map(entry => toCustomField(entry, 'contact')).filter(field => field.published);
+    definitions = { at: Date.now(), fields };
+    return fields;
   }
 
   async function checkedCustomFields(input: ContactInput) {
@@ -27,15 +32,56 @@ export function contactsApi(client: Client) {
     return customValues(values, await contactFieldDefinitions());
   }
 
+  // Mautic's full activity feed: every event type the timeline subscribers report, filtered and paged by the engine.
+  async function contactTimeline(id: number, { search, include, exclude, page = 1, limit = 25, dir = 'desc' }: TimelineQuery = {}): Promise<ContactTimeline> {
+    if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(limit) || limit < 1) {
+      throw new UpstreamError(service, 400, 'Choose a valid timeline page.');
+    }
+    limit = Math.min(limit, 100);
+    const query = new URLSearchParams({ page: String(page), limit: String(limit) });
+    query.set('order[0]', 'timestamp');
+    query.set('order[1]', dir === 'asc' ? 'ASC' : 'DESC');
+    const word = search?.replace(/[<>]/g, ' ').trim();
+    if (word) query.set('filters[search]', word);
+    for (const type of include ?? []) query.append('filters[includeEvents][]', type);
+    for (const type of exclude ?? []) query.append('filters[excludeEvents][]', type);
+    const response = await request(queryPath(`/contacts/${requiredId(id)}/activity`, query));
+    if (!Array.isArray(response.events)) throw new UpstreamError(service, 502);
+    const types: Record<string, string> = {};
+    for (const [key, value] of Object.entries(record(response.types))) if (typeof value === 'string') types[key] = value;
+    const events = response.events.map(record).flatMap((event, index) => {
+      const at = date(event.timestamp);
+      const type = text(event.event);
+      const label = text(event.eventLabel) || text(record(event.eventLabel).label) || text(event.eventType) || type;
+      const href = text(record(event.eventLabel).href);
+      const key = `${type}:${text(event.eventId) || number(event.eventId) || index}:${event.timestamp}`;
+      return at && label ? [{ id: key, type, typeLabel: types[type] || text(event.eventType) || type, label, at, ...(/^https?:/.test(href) ? { href } : {}) }] : [];
+    });
+    return { events, types, total: total(response), page, limit };
+  }
+
+  // Writes a DNC row through Mautic's `/dnc/{channel}/add` and checks the contact shows it afterwards.
+  // Mautic keeps an existing "unsubscribed" row as it is (Model/DoNotContact.php:97-111), so the row may keep its older reason.
+  async function addDnc(id: number, channel: string, reason: SuppressionReason, comment = '') {
+    const code = suppressionCodes[reason];
+    if (!code) throw new UpstreamError(service, 400, 'Choose a valid suppression reason.');
+    if (!/^[a-z]{2,20}$/.test(channel)) throw new UpstreamError(service, 400, 'Choose a valid channel.');
+    await request(`/contacts/${requiredId(id)}/dnc/${channel}/add`, 'POST', new URLSearchParams({
+      reason: String(code), comments: comment.slice(0, 500) || `OVELIO suppression: ${reason}`,
+    }));
+    if (!(await contact(id)).dnc?.some(entry => entry.channel === channel)) {
+      throw new UpstreamError(service, 502, 'The audience engine did not confirm the do-not-contact entry.');
+    }
+  }
+
   return {
-    async contacts({ page = 1, limit = 25, search, segmentId, tag }: ContactQuery = {}): Promise<Page<Contact>> {
+    async contacts({ page = 1, limit = 25, search, segmentId, tag, orderBy, orderByDir }: ContactQuery = {}): Promise<Page<Contact>> {
       if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(limit) || limit < 1) {
         throw new UpstreamError(service, 400, 'Choose a valid contact page.');
       }
-      limit = Math.min(limit, maxPage);
-      const query = new URLSearchParams({
-        start: String((page - 1) * limit), limit: String(limit), orderBy: 'l.date_added,l.id', orderByDir: 'DESC',
-      });
+      limit = Math.min(limit, maxContactPage);
+      const column = orderBy ? contactSortColumns[orderBy] : undefined;
+      if (orderBy && !column) throw new UpstreamError(service, 400, 'Choose a column that can be sorted.');
       const filters = [];
       if (segmentId !== undefined) {
         const source = await segment(segmentId);
@@ -44,15 +90,39 @@ export function contactsApi(client: Client) {
       }
       const cleanTag = tag?.replace(/["<>]/g, ' ').trim();
       if (cleanTag) filters.push(`tag:"${cleanTag}"`);
-      const term = search?.replace(/["<>]/g, ' ').trim();
-      if (term) filters.push(`"${term}"`);
-      if (filters.length) query.set('search', filters.join(' '));
-      conditions(query, [['l.date_identified', 'isNotNull']]);
-      const response = await request(queryPath('/contacts', query));
-      return { items: items(response.contacts).map(toContact).sort(sortContacts), total: total(response), page, limit };
+      const term = contactSearch(search);
+      if (term) filters.push(term);
+      // Anonymous visitors stay hidden unless the search asks for them.
+      const wantsAnonymous = /(^|\s)is:anonymous(\s|$)/i.test(term) && !/(^|\s)!is:anonymous/i.test(term);
+      const base = new URLSearchParams({
+        orderBy: column ?? 'l.date_added,l.id', orderByDir: (orderByDir ?? 'desc').toUpperCase(),
+      });
+      if (filters.length) base.set('search', filters.join(' '));
+      if (!wantsAnonymous) conditions(base, [['l.date_identified', 'isNotNull']]);
+      // The engine may cap one response, so a large page is read in chunks of maxPage.
+      const found: Contact[] = [];
+      let count = 0;
+      const first = (page - 1) * limit;
+      while (found.length < limit) {
+        const size = Math.min(maxPage, limit - found.length);
+        const query = new URLSearchParams(base);
+        query.set('start', String(first + found.length));
+        query.set('limit', String(size));
+        const response = await request(queryPath('/contacts', query));
+        const batch = items(response.contacts).map(toContact);
+        count = total(response);
+        found.push(...batch);
+        if (batch.length < size) break;
+      }
+      return { items: column ? found : found.sort(sortContacts), total: count, page, limit };
     },
 
     contact,
+
+    // Checks a contact's custom field values against the field definitions without saving anything (used by import dry runs).
+    async checkContactFields(input: ContactInput) {
+      await checkedCustomFields(input);
+    },
 
     async findContact(email: string): Promise<Contact | null> {
       const normalized = email.trim().toLowerCase();
@@ -87,15 +157,51 @@ export function contactsApi(client: Client) {
       await remove(`/contacts/${requiredId(id)}/delete`);
     },
 
-    async setSuppressed(id: number, reason: SuppressionReason) {
-      const code = suppressionCodes[reason];
-      if (!code) throw new UpstreamError(service, 400, 'Choose a valid suppression reason.');
-      await request(`/contacts/${requiredId(id)}/dnc/email/add`, 'POST', new URLSearchParams({
-        reason: String(code), comments: `OVELIO suppression: ${reason}`,
-      }));
-      if (!(await contact(id)).suppressed) {
-        throw new UpstreamError(service, 502, 'The audience engine did not confirm the suppression.');
+    addDnc,
+
+    // The DNC change feed. Mautic's stats API serves `lead_donotcontact` (LeadBundle/EventListener/StatsSubscriber.php:27-37,
+    // route /stats/{table}, Controller/Api/StatsApiController.php:25-38). A new row always takes a higher id and a removal
+    // deletes the row, so rows after the last seen id are exactly the DNC changes. Rows come back under `stats`.
+    async dncChanges(afterId: number, limit: number, direction: 'ASC' | 'DESC' = 'ASC'): Promise<DncChange[]> {
+      const query = conditions(new URLSearchParams({
+        limit: String(Math.min(limit, maxPage)), 'order[0][col]': 'id', 'order[0][dir]': direction,
+      }), [['id', 'gt', afterId], ['channel', 'eq', 'email']]);
+      const response = await request(queryPath('/stats/lead_donotcontact', query));
+      if (!Array.isArray(response.stats)) throw new UpstreamError(service, 502);
+      return response.stats.map(record).flatMap(row => {
+        const id = positiveId(row.id);
+        const leadId = positiveId(row.lead_id);
+        if (!id || !leadId) return [];
+        const code = number(row.reason);
+        return [{
+          id, leadId, channel: text(row.channel) || 'email', comment: text(row.comments), at: date(row.date_added),
+          reason: code === 1 ? 'unsubscribed' as const : code === 2 ? 'bounced' as const : 'manual' as const,
+        }];
+      });
+    },
+
+    async setSuppressed(id: number, reason: SuppressionReason, comment = '') {
+      await addDnc(id, 'email', reason, comment);
+    },
+
+    // Mautic removes the first row it finds for the channel (Model/DoNotContact.php:32-62) and answers with a recordFound flag.
+    async removeDnc(id: number, channel: string) {
+      if (!/^[a-z]{2,20}$/.test(channel)) throw new UpstreamError(service, 400, 'Choose a valid channel.');
+      await request(`/contacts/${requiredId(id)}/dnc/${channel}/remove`, 'POST', new URLSearchParams());
+      if ((await contact(id)).dnc?.some(entry => entry.channel === channel)) {
+        throw new UpstreamError(service, 502, 'The audience engine did not confirm the removal.');
       }
+    },
+
+    // One page of contacts that carry an email DNC row, after a contact id. Mautic has no "DNC changed since" query,
+    // so the reconciliation sweep walks this set in id order (search command: LeadRepository.php:951-966).
+    async dncContacts(channel: string, afterId: number, limit: number): Promise<Contact[]> {
+      if (!/^[a-z]{2,20}$/.test(channel)) throw new UpstreamError(service, 400, 'Choose a valid channel.');
+      const query = conditions(new URLSearchParams({
+        search: `dnc:${channel}`, orderBy: 'l.id', orderByDir: 'ASC', limit: String(Math.min(limit, maxPage)),
+      }), [['l.id', 'gt', afterId]]);
+      const response = await request(queryPath('/contacts', query));
+      return items(response.contacts).map(toContact).sort((a, b) => a.id - b.id);
     },
 
     async adjustPoints(contactId: number, delta: number): Promise<Contact> {
@@ -148,15 +254,11 @@ export function contactsApi(client: Client) {
     },
 
     async contactActivity(id: number): Promise<ContactDetail['activity']> {
-      const response = await request(`/contacts/${requiredId(id)}/activity?limit=25`);
-      if (!Array.isArray(response.events)) throw new UpstreamError(service, 502);
-      return response.events.map(record).flatMap(event => {
-        const at = date(event.timestamp);
-        const type = text(event.event);
-        const label = text(event.eventLabel) || text(record(event.eventLabel).label) || text(event.eventType) || type;
-        return at && label ? [{ at, label, type }] : [];
-      });
+      const { events } = await contactTimeline(id, { limit: 25 });
+      return events.map(event => ({ at: event.at, label: event.label, type: event.type }));
     },
+
+    contactTimeline,
 
     async tags(): Promise<Tag[]> {
       return (await list('/tags', 'tags')).map(toTag).sort((a, b) => a.tag.localeCompare(b.tag));

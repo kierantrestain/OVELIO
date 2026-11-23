@@ -1,8 +1,8 @@
-import type { LeadForm, MarketingReport } from '../../contracts';
+import type { MarketingReport } from '../../contracts';
 import { appOrigin } from '../config';
 import { basic, upstream, UpstreamError } from '../upstream';
 import {
-  item, items, published, record, requiredId, service, text, toContact, toFormField,
+  item, items, requiredId, service, toContact,
   toMarketingReport, toSegment, total, type ApiRecord,
 } from './normalize';
 import { maxPage, queryPath, conditions } from './helpers';
@@ -85,25 +85,6 @@ export function createClient(config: Config) {
     return total(await request(queryPath(path, conditions(new URLSearchParams({ limit: '1' }), where))));
   }
 
-  async function toForm(dto: ApiRecord): Promise<LeadForm> {
-    const id = requiredId(dto.id);
-    const submissions = await tally('/stats/form_submissions', [['form_id', 'eq', id]]).catch(() => null);
-    const fields = dto.fields && typeof dto.fields === 'object'
-      ? Object.values(dto.fields)
-          .map(record)
-          .filter(field => text(field.type) !== 'button' && text(field.alias))
-          .map(toFormField)
-      : [];
-    return {
-      id,
-      name: text(dto.name),
-      description: text(dto.description),
-      submissions,
-      published: published(dto),
-      fields,
-    };
-  }
-
   return {
     config,
     baseUrl,
@@ -118,7 +99,6 @@ export function createClient(config: Config) {
     reports,
     memberships,
     tally,
-    toForm,
   };
 }
 

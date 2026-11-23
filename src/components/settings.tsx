@@ -8,12 +8,13 @@ import { Field } from '@astryxdesign/core/Field';
 import { Link } from '@astryxdesign/core/Link';
 import { MetadataList, MetadataListItem } from '@astryxdesign/core/MetadataList';
 import { Selector } from '@astryxdesign/core/Selector';
+import { Switch } from '@astryxdesign/core/Switch';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
 import { Table } from '@astryxdesign/core/Table';
 import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
-import type { CompanySettings, MaintenanceResult, Role, Settings as SettingsData, User } from '@/contracts';
+import type { CompanySettings, DeliverySettingsResult, MaintenanceResult, Role, Settings as SettingsData, TrackingMode, User } from '@/contracts';
 import { api, date, number, saveFile, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, Rows, Snippet, StatusBadge, Tabs } from './ui';
@@ -245,12 +246,85 @@ function Team({ members, onSaved }: { members: User[]; onSaved: () => void }) {
   </div>;
 }
 
+const trackingModes = [
+  { value: 'anonymous', label: 'Anonymous totals', description: 'Counts opens and clicks without recording who did them. The per-contact activity list stays empty.' },
+  { value: 'individual', label: 'Per contact', description: 'Records which contact opened or clicked. Use only where your privacy policy and consent cover it.' },
+  { value: 'off', label: 'Off', description: 'No open or click tracking. Links are sent unchanged.' },
+] satisfies { value: TrackingMode; label: string; description: string }[];
+
+const throughputFields = [
+  { key: 'concurrency', label: 'Concurrent workers', description: 'Messages prepared and sent at the same time. 1 to 10,000.' },
+  { key: 'messageRate', label: 'Messages per second', description: 'Per worker, so total speed is workers times this rate. 1 to 100,000.' },
+  { key: 'batchSize', label: 'Batch size', description: 'Subscribers read from the database at a time. 1 to 100,000.' },
+  { key: 'maxSendErrors', label: 'Maximum send errors', description: 'A newsletter pauses after this many failed sends. 0 to 100,000.' },
+] as const;
+
+function DeliveryTuningForm({ initial }: { initial: DeliverySettingsResult }) {
+  const action = useAction();
+  const { values, field } = useFields({
+    concurrency: String(initial.concurrency), messageRate: String(initial.messageRate), batchSize: String(initial.batchSize),
+    maxSendErrors: String(initial.maxSendErrors), slidingWindowDuration: initial.slidingWindowDuration, slidingWindowRate: String(initial.slidingWindowRate),
+  });
+  const [slidingWindow, setSlidingWindow] = useState(initial.slidingWindow);
+  const [trackingMode, setTrackingMode] = useState<TrackingMode>(initial.trackingMode);
+  const [recordOptinIp, setRecordOptinIp] = useState(initial.recordOptinIp);
+  const [restart, setRestart] = useState(false);
+  return <form className="ov-stack-sm" onSubmit={event => {
+    event.preventDefault();
+    void action.run(async () => {
+      const whole = (label: string, value: string) => {
+        if (!/^\d+$/.test(value.trim())) throw new Error(`${label} must be a whole number.`);
+        return Number(value);
+      };
+      const saved = await api<DeliverySettingsResult>(`${path}/delivery`, 'PATCH', {
+        concurrency: whole('Concurrent workers', values.concurrency),
+        messageRate: whole('Messages per second', values.messageRate),
+        batchSize: whole('Batch size', values.batchSize),
+        maxSendErrors: whole('Maximum send errors', values.maxSendErrors),
+        slidingWindow,
+        slidingWindowDuration: values.slidingWindowDuration.trim(),
+        slidingWindowRate: whole('Sliding window message limit', values.slidingWindowRate),
+        trackingMode,
+        recordOptinIp,
+      });
+      setRestart(saved.needsRestart);
+    }, 'Delivery settings saved.');
+  }}>
+    <div className="ov-form-grid">
+      {throughputFields.map(item => <TextInput key={item.key} label={item.label} description={item.description} isRequired inputMode="numeric" {...field(item.key)} />)}
+    </div>
+    <Switch label="Limit messages in a sliding window" description="Caps the total sent over a period, for example when your provider enforces an hourly quota." value={slidingWindow} onChange={setSlidingWindow} />
+    {slidingWindow ? <div className="ov-form-grid">
+      <TextInput label="Window message limit" description="Most messages sent within one window." isRequired inputMode="numeric" {...field('slidingWindowRate')} />
+      <TextInput label="Window length" description="A number and unit: s, m or h, for example 30m or 1h." isRequired {...field('slidingWindowDuration')} />
+    </div> : null}
+    <Selector label="Open and click tracking" value={trackingMode} onChange={value => setTrackingMode((value as TrackingMode) || 'anonymous')} options={trackingModes} />
+    <Switch label="Record the IP address of opt-in confirmations" description="Stores the address a subscriber confirmed from, as evidence of consent. It does not affect open or click tracking." value={recordOptinIp} onChange={setRecordOptinIp} />
+    <Text type="supporting" color="secondary">
+      Saving restarts the delivery engine so changes apply. If a newsletter is sending, the restart waits until it finishes, and the old speed stays in force until then.
+    </Text>
+    {restart ? <Text type="supporting" color="secondary">A newsletter is sending, so these settings will apply after it finishes and the delivery engine restarts.</Text> : null}
+    <Feedback error={action.error} notice={action.notice} />
+    <FormActions><Button type="submit" variant="primary" label="Save delivery settings" isLoading={action.busy} /></FormActions>
+  </form>;
+}
+
+function DeliveryTuning() {
+  const resource = useResource<DeliverySettingsResult>(`${path}/delivery`);
+  return <Panel title="Sending speed and tracking" description="How fast newsletters go out, and what is recorded about opens and clicks.">
+    {resource.data
+      ? <DeliveryTuningForm initial={resource.data} />
+      : <AsyncState loading={resource.loading} error={resource.error} retry={resource.refresh} />}
+  </Panel>;
+}
+
 function Connections({ data, refresh, loading }: { data: SettingsData; refresh: () => void; loading: boolean }) {
   const [domain, setDomain] = useState<DomainResult>();
   const [smtpRecipient, setSmtpRecipient] = useState('');
   const dns = useAction();
   const retry = useAction();
   const smtpTest = useAction();
+  const user = useUser();
   const connections = [
     { name: 'Audience and automation', health: data.health.audience },
     { name: 'Newsletter delivery', health: data.health.delivery },
@@ -325,6 +399,8 @@ function Connections({ data, refresh, loading }: { data: SettingsData; refresh: 
         <Link href="/analytics">Manage websites</Link>
       </Panel>
     </div>
+
+    {user.role === 'admin' ? <DeliveryTuning /> : null}
 
     {data.failedJobs?.length ? <Panel title="Failed background jobs" description="Retry after checking the affected service connection.">
       <Feedback error={retry.error} notice={retry.notice} />
