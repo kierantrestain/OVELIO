@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  Annotation, Asset, BounceRecord, Campaign, Category, Company, CompanySettings, ContactDetail,
+  Annotation, Asset, BounceRecord, Campaign, Category, Company, CompanySettings, ContactDetail, ContactTimeline, TimelineEvent,
   ContactNote, CustomField, CustomFieldObject, Dashboard, DynamicContent, EntityChartSeries,
   EventPropertyStat, EventPropertyValue, ExpandedMetricRow, FocusItem, Goal, JourneyEmail,
   LandingPage, LeadForm, MailingList, MarketingReport, MarketingReportData, MediaItem, Page,
@@ -8,7 +8,7 @@ import type {
   RevenueReport, SavedFunnel, Segment, SessionActivityItem, SessionPropertyEntry,
   SessionPropertyStat, SessionStats, Settings, Stage, SuppressionRecord, Tag, Template,
   TrackedLink, TrackingPixel, User, Webhook, Website, WebsiteEventRow, WebsiteReport,
-  WebsiteSegment, WebsiteSession, Workflow,
+  WebsiteSegment, WebsiteSession, Workflow, WorkflowContactRun, WorkflowRunEntry, WorkflowRunLog,
 } from '@/contracts';
 import { AppError } from './config';
 import { json } from './http';
@@ -195,6 +195,7 @@ function createInitialStore(): PreviewStore {
       company: 'Retired Co', stageId: null, stageName: null, points: 0,
       createdAt: daysAgo(25), updatedAt: daysAgo(5), tags: [], suppressed: true, consent: 'suppressed',
       consentHistory: [{ id: '4', action: 'suppressed', evidence: 'Permanent SMTP hard bounce', at: daysAgo(5) }],
+      dnc: [{ channel: 'email', reason: 'bounced', comment: 'Permanent SMTP hard bounce', at: daysAgo(5) }],
       segments: [], mailingListIds: [], workflowIds: [],
       linkedCompanies: [], devices: [], notes: [], activity: [],
       newsletterActivity: { views: [], clicks: [] },
@@ -267,6 +268,10 @@ function createInitialStore(): PreviewStore {
         templateId: 1, archive: false, status: 'scheduled',
         sendAt: new Date(Date.now() + 2 * 86_400_000).toISOString(), createdAt: daysAgo(1), toSend: 1380,
         metrics: { sent: 0, delivered: null, opens: 0, clicks: 0, bounces: 0, unsubscribes: 0 },
+        preSendRefresh: {
+          state: 'waiting', sendAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+          refreshFrom: new Date(Date.now() + 2 * 86_400_000 - 600_000).toISOString(), message: '', updatedAt: daysAgo(1),
+        },
       },
       {
         id: 3, name: 'Summer Webinar Invite', subject: 'Live session: Connecting email and web analytics',
@@ -613,6 +618,23 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
     if (!contact) throw new AppError(404, 'Contact not found.');
     return new Response(JSON.stringify(contact, null, 2), { headers: { 'Content-Type': 'application/json' } });
   }
+  if ((m = /^contacts\/(\d+)\/timeline$/.exec(fullPath)) && method === 'GET') {
+    const contact = s.contacts.find(c => c.id === Number(m![1]));
+    if (!contact) throw new AppError(404, 'Contact not found.');
+    const query = new URL(request.url).searchParams;
+    const search = (query.get('search') ?? '').toLowerCase();
+    const include = query.getAll('include');
+    const page = Math.max(1, Number(query.get('page')) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.get('limit')) || 25));
+    const typeLabel = (type: string) => type.split('.').pop()!.replace(/^\w/, c => c.toUpperCase());
+    const all: TimelineEvent[] = (contact.activity ?? []).map((item, index) => ({
+      id: String(index + 1), type: item.type ?? 'lead.event', typeLabel: typeLabel(item.type ?? 'lead.event'), label: item.label, at: item.at,
+    }));
+    const types = Object.fromEntries(all.map(event => [event.type, event.typeLabel]));
+    const events = all.filter(event => (!include.length || include.includes(event.type)) && (!search || event.label.toLowerCase().includes(search)));
+    const timeline: ContactTimeline = { events: events.slice((page - 1) * limit, page * limit), types, total: events.length, page, limit };
+    return json(timeline);
+  }
   if ((m = /^contacts\/(\d+)\/consent$/.exec(fullPath)) && method === 'POST') {
     const contact = s.contacts.find(c => c.id === Number(m![1]));
     if (!contact) throw new AppError(404, 'Contact not found.');
@@ -620,6 +642,37 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
     contact.consent = body.action;
     contact.suppressed = body.action === 'suppressed';
     contact.consentHistory = [{ id: String(s.nextId++), action: body.action, evidence: body.evidence, at: new Date().toISOString() }, ...(contact.consentHistory ?? [])];
+    return json(contact);
+  }
+  if ((m = /^contacts\/(\d+)\/dnc\/(email|sms)$/.exec(fullPath)) && method === 'POST') {
+    const contact = s.contacts.find(c => c.id === Number(m![1]));
+    if (!contact) throw new AppError(404, 'Contact not found.');
+    const channel = m[2];
+    const body = await readJson<{ reason: 'unsubscribed' | 'bounced' | 'manual'; comment: string }>(request);
+    contact.dnc = [{ channel, reason: body.reason, comment: body.comment, at: new Date().toISOString() }, ...(contact.dnc ?? []).filter(entry => entry.channel !== channel)];
+    if (channel === 'email') {
+      contact.consent = 'suppressed';
+      contact.suppressed = true;
+      contact.consentHistory = [{ id: String(s.nextId++), action: 'suppressed', evidence: body.comment, at: new Date().toISOString() }, ...(contact.consentHistory ?? [])];
+    }
+    return json(contact);
+  }
+  if ((m = /^contacts\/(\d+)\/dnc\/(email|sms)\/remove$/.exec(fullPath)) && method === 'POST') {
+    const contact = s.contacts.find(c => c.id === Number(m![1]));
+    if (!contact) throw new AppError(404, 'Contact not found.');
+    const channel = m[2];
+    const body = await readJson<{ evidence: string; confirmFixed?: boolean }>(request);
+    const entry = (contact.dnc ?? []).find(item => item.channel === channel);
+    if (!entry && !(channel === 'email' && contact.suppressed)) throw new AppError(409, 'This contact has no ' + channel + ' do-not-contact entry.');
+    if (channel === 'email' && entry?.reason === 'bounced' && !body.confirmFixed) {
+      throw new AppError(409, 'This address was suppressed after a bounce. Confirm that the address has been fixed before removing it.');
+    }
+    contact.dnc = (contact.dnc ?? []).filter(item => item.channel !== channel);
+    if (channel === 'email') {
+      contact.consent = 'unknown';
+      contact.suppressed = false;
+      contact.consentHistory = [{ id: String(s.nextId++), action: 'unsuppressed', evidence: body.evidence, at: new Date().toISOString() }, ...(contact.consentHistory ?? [])];
+    }
     return json(contact);
   }
   if ((m = /^contacts\/(\d+)\/segments$/.exec(fullPath)) && method === 'POST') {
@@ -1016,6 +1069,7 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
   }
   if ((m = /^workflows\/(\d+)$/.exec(fullPath))) {
     const id = Number(m[1]);
+    if (method === 'GET') { const item = s.workflows.find(x => x.id === id); if (!item) throw new AppError(404, 'Not found.'); return json(item); }
     if (method === 'PATCH') { const item = s.workflows.find(x => x.id === id); if (!item) throw new AppError(404, 'Not found.'); Object.assign(item, await readJson(request)); return json(item); }
     if (method === 'DELETE') { s.workflows = s.workflows.filter(x => x.id !== id); return new Response(null, { status: 204 }); }
   }
@@ -1029,6 +1083,23 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
   if (/^workflows\/(\d+)\/contacts$/.test(fullPath) && method === 'GET') {
     return json(s.contacts.slice(0, 2).map(c => ({ contactId: c.id, dateAdded: c.createdAt, manuallyRemoved: false })));
   }
+
+  if ((m = /^workflows\/contact-log\/(\d+)$/.exec(fullPath)) && method === 'GET') {
+    return json({ contactId: Number(m[1]), entries: previewRunEntries(s, Number(m[1])), complete: true } satisfies WorkflowRunLog);
+  }
+  if ((m = /^workflows\/(\d+)\/contacts\/(\d+)\/log$/.exec(fullPath)) && method === 'GET') {
+    const workflowId = Number(m[1]);
+    const contactId = Number(m[2]);
+    const entries = previewRunEntries(s, contactId).filter(entry => entry.workflowId === workflowId);
+    const run: WorkflowContactRun = {
+      contactId, workflowId, entries, complete: true,
+      membership: entries.length ? { dateAdded: daysAgo(18), manuallyRemoved: false, manuallyAdded: false, rotation: 1, dateLastExited: null } : null,
+    };
+    return json(run);
+  }
+  if (fullPath === 'marketing-messages' && method === 'GET') return json([]);
+  if (fullPath === 'forms/users' && method === 'GET') return json([{ id: 1, name: 'Preview Admin', email: 'admin@ovelio.example' }]);
+  if (fullPath === 'point-groups' && method === 'GET') return json([{ id: 1, name: 'Engagement' }]);
 
   if (fullPath === 'assets') {
     if (method === 'GET') return json(s.assets);
@@ -1445,4 +1516,21 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
   }
 
   return json({ error: 'This action could not be found.' }, 404);
+}
+
+// Run log for the seeded welcome workflow (node ids follow graphFromSteps): contact 1 got both first steps and is
+// waiting on the open decision; contact 2's first email failed and is retried tomorrow.
+function previewRunEntries(s: PreviewStore, contactId: number): WorkflowRunEntry[] {
+  const workflow = s.workflows.find(item => item.id === 1);
+  if (!workflow || (contactId !== 1 && contactId !== 2)) return [];
+  const entry = (nodeId: string, nodeName: string, nodeType: string, state: WorkflowRunEntry['state'], extra: Partial<WorkflowRunEntry> = {}): WorkflowRunEntry => ({
+    logId: null, workflowId: 1, workflowName: workflow.name, nodeId, nodeName, nodeType, eventType: 'action', state, path: null,
+    nonAction: false, triggeredAt: daysAgo(18), scheduledFor: null, reason: null, rotation: 1, deleted: false, ...extra,
+  });
+  if (contactId === 2) {
+    return [entry('new_a1', 'Send email', 'email.send', 'failed', {
+      scheduledFor: new Date(Date.now() + 86_400_000).toISOString(), reason: 'The email was unpublished when the step ran.',
+    })];
+  }
+  return [entry('new_a1', 'Send email', 'email.send', 'executed'), entry('new_a2', 'Change tags', 'lead.changetags', 'executed', { triggeredAt: new Date(Date.parse(daysAgo(18)) + 60_000).toISOString() })];
 }

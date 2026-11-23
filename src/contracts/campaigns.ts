@@ -88,6 +88,26 @@ export type Campaign = CampaignInput & {
   toSend?: number | null;
   archiveSlug?: string;
   metrics: CampaignMetrics;
+  /** Pre-send segment refresh for a scheduled send (DEL-22). Absent when the newsletter was never scheduled. */
+  preSendRefresh?: PreSendRefresh;
+};
+
+/**
+ * `waiting`: refresh has not opened yet. `refreshing`: recipients are being refreshed. `held`: the send time is too close,
+ * so the newsletter was moved back to draft until the refresh finishes. `ready`: refreshed before sending. `late`: the
+ * refresh finished after the send time and sending started immediately. `failed`: the refresh failed and the newsletter was
+ * NOT sent. `missed`: sending began before the refresh could finish.
+ */
+export type PreSendRefreshState = 'waiting' | 'refreshing' | 'held' | 'ready' | 'late' | 'failed' | 'missed';
+
+export type PreSendRefresh = {
+  state: PreSendRefreshState;
+  sendAt: string;
+  /** When the refresh opens (a fixed lead before `sendAt`). */
+  refreshFrom: string;
+  /** The reason, in plain words. Empty for waiting, refreshing and ready. */
+  message: string;
+  updatedAt: string;
 };
 
 export type RunningCampaignStat = {

@@ -36,6 +36,7 @@ import {
 import type { SelectorOptionType } from '@astryxdesign/core/Selector';
 import { api, date, number, saveFile, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
+import { WorkflowRunLog } from './workflow-run-log';
 import {
   AsyncState, ConfirmDialog, Empty, Feedback, FilterBar, FormActions, Modal,
   PageHeader, Pager, Panel, Rows, StatusBadge, Tabs,
@@ -114,6 +115,7 @@ const suppressionReasons: { value: SuppressionReason; label: string }[] = [
   { value: 'bounce', label: 'Bounce' },
   { value: 'complaint', label: 'Complaint' },
   { value: 'erasure', label: 'Erasure' },
+  { value: 'manual', label: 'Manual' },
 ];
 
 const sortLabels: Record<ContactSortKey, string> = {
@@ -134,6 +136,7 @@ const suppressionTone: Record<SuppressionReason, [string, Tone]> = {
   bounce: ['Bounce', 'error'],
   complaint: ['Complaint', 'error'],
   erasure: ['Erasure', 'neutral'],
+  manual: ['Manual', 'warning'],
 };
 
 const bounceTone: Record<string, [string, Tone]> = {
@@ -1141,6 +1144,72 @@ function SuppressAddressForm({ onClose, onDone }: { onClose: () => void; onDone:
   </Modal>;
 }
 
+/* ── Do not contact (AUD-08) ─────────────────────────────────────────────── */
+
+const dncReasonChoices = [
+  { value: 'unsubscribed', label: 'Unsubscribed' },
+  { value: 'bounced', label: 'Bounced' },
+  { value: 'manual', label: 'Manual' },
+];
+const dncChannelChoices = [{ value: 'email', label: 'Email' }, { value: 'sms', label: 'SMS' }];
+const dncReasonLabel: Record<string, string> = { unsubscribed: 'Unsubscribed', bounced: 'Bounced', manual: 'Manual' };
+
+function DncPanel({ contact, path, busy, mutate }: {
+  contact: ContactDetail; path: string; busy: boolean; mutate: (task: () => Promise<unknown>, success: string) => void;
+}) {
+  const [channel, setChannel] = useState('email');
+  const [reason, setReason] = useState('manual');
+  const [comment, setComment] = useState('');
+  const [removing, setRemoving] = useState<string>();
+  const [evidence, setEvidence] = useState('');
+  const [fixed, setFixed] = useState(false);
+  const entries = contact.dnc ?? [];
+  const hasEntry = entries.some(entry => entry.channel === channel);
+  return <Panel title="Do not contact" description="One entry per channel. Email entries are kept in OVELIO and mirrored to the audience and newsletter engines; text messages go straight to the audience engine.">
+    {entries.length ? <Rows>{entries.map(entry => <li key={entry.channel}>
+      <span>
+        <span className="ov-actions">
+          <StatusBadge label={entry.channel.toUpperCase()} tone="neutral" />
+          <StatusBadge label={dncReasonLabel[entry.reason] ?? entry.reason} tone={entry.reason === 'bounced' ? 'error' : 'warning'} />
+        </span>
+        <Text type="supporting" color="secondary">{entry.comment || 'No comment'}</Text>
+      </span>
+      <span className="ov-actions">
+        {entry.at ? <Timestamp value={entry.at} format="date_time" /> : null}
+        <Button size="sm" variant="ghost" label="Remove" isDisabled={busy} onClick={() => { setRemoving(entry.channel); setFixed(false); setEvidence(''); }} />
+      </span>
+    </li>)}</Rows> : <Text color="secondary">This contact can be contacted on every channel.</Text>}
+    {removing ? <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      if (!evidence.trim()) return;
+      mutate(() => api(`${path}/dnc/${removing}/remove`, 'POST', { evidence: evidence.trim(), ...(removing === 'email' ? { confirmFixed: fixed } : {}) }), 'Do-not-contact removed.');
+      setRemoving(undefined);
+    }}>
+      <TextInput label={`Why can this contact be reached by ${removing === 'sms' ? 'text message' : 'email'} again?`} placeholder="Source and date" isRequired value={evidence} onChange={setEvidence} />
+      {removing === 'email' ? <>
+        <CheckboxInput label="The address has been fixed (required after a bounce or complaint)" value={fixed} onChange={setFixed} />
+        <Text type="supporting" color="secondary">Removing the entry does not record consent. Consent stays unknown until you record an opt-in.</Text>
+      </> : null}
+      <FormActions>
+        <Button label="Cancel" onClick={() => setRemoving(undefined)} />
+        <Button type="submit" variant="destructive" label="Remove do-not-contact" isDisabled={busy || !evidence.trim()} />
+      </FormActions>
+    </form> : <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      if (!comment.trim() || hasEntry) return;
+      mutate(() => api(`${path}/dnc/${channel}`, 'POST', { reason, comment: comment.trim() }), 'Do-not-contact added.');
+      setComment('');
+    }}>
+      <div className="ov-form-grid">
+        <Selector label="Channel" value={channel} options={dncChannelChoices} onChange={value => setChannel(value ?? 'email')} />
+        <Selector label="Reason" value={reason} options={dncReasonChoices} onChange={value => setReason(value ?? 'manual')} />
+      </div>
+      <TextInput label="Comment" placeholder="Why, and where the request came from" isRequired value={comment} onChange={setComment} />
+      <FormActions><Button type="submit" label="Add do-not-contact" isDisabled={busy || !comment.trim() || hasEntry} /></FormActions>
+    </form>}
+  </Panel>;
+}
+
 /* ── Custom Fields & Direct Email Modals ───────────────────────────────────── */
 
 function CustomFieldForm({
@@ -2091,6 +2160,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
                   return <StatusBadge label={label} tone={tone} />;
                 },
               },
+              { key: 'comment', header: 'Comment', renderCell: record => record.comment || '—' },
               { key: 'at', header: 'Recorded', renderCell: record => date(record.at) },
             ]} />}
       </Panel>
@@ -2370,13 +2440,19 @@ export function ContactView({ id }: { id: string }) {
             {contact.consentHistory?.length ? <Rows>{contact.consentHistory.map(entry => <li key={entry.id}>
               <span>
                 <span className="ov-actions">
-                  <StatusBadge label={entry.action === 'opted_in' ? 'Opted in' : 'Suppressed'} tone={entry.action === 'opted_in' ? 'success' : 'error'} />
+                  <StatusBadge label={entry.action === 'opted_in' ? 'Opted in' : entry.action === 'unsuppressed' ? 'Do-not-contact removed' : 'Suppressed'} tone={entry.action === 'opted_in' ? 'success' : entry.action === 'unsuppressed' ? 'warning' : 'error'} />
                 </span>
                 <Text type="supporting" color="secondary">{entry.evidence}</Text>
               </span>
               <Timestamp value={entry.at} format="date_time" />
             </li>)}</Rows> : <Text type="supporting" color="secondary">No consent events recorded yet.</Text>}
           </div>
+        </Panel>
+
+        <DncPanel contact={contact} path={path} busy={action.busy} mutate={mutate} />
+
+        <Panel title="Workflows" description="Where this contact is in each workflow, and why.">
+          <WorkflowRunLog contactId={contact.id} />
         </Panel>
 
         <Panel title="Segments">

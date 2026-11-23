@@ -34,12 +34,14 @@ type NativeList = {
   subscriber_count?: number;
   tags?: string[] | null;
   subscription_status?: string;
+  subscription_updated_at?: string | null;
 };
 type NativeSubscriber = {
   id: number;
   email: string;
   name: string;
   status: string;
+  updated_at?: string | null;
   attribs?: Record<string, unknown> | null;
   lists?: NativeList[] | null;
 };
@@ -187,6 +189,21 @@ function listPayload(input: MailingListInput) {
     type: input.type ?? 'private',
     optin: input.optin ?? 'double',
     tags: input.tags ?? [],
+  };
+}
+
+/** A subscriber that Listmonk holds as blocklisted or unsubscribed from at least one list, with the newest timestamp on that state. */
+export type SuppressedSubscriber = { id: number; email: string; blocked: boolean; unsubscribed: boolean; at: string | null };
+
+function suppressedFromNative(subscriber: NativeSubscriber): SuppressedSubscriber {
+  const blocked = subscriber.status === 'blocklisted';
+  const unsubscribedLists = (subscriber.lists ?? []).filter((list) => list.subscription_status === 'unsubscribed');
+  const stamps = [...unsubscribedLists.map((list) => list.subscription_updated_at), ...(blocked ? [subscriber.updated_at] : [])]
+    .map((value) => (value ? Date.parse(value) : NaN))
+    .filter(Number.isFinite);
+  return {
+    id: subscriber.id, email: subscriber.email, blocked, unsubscribed: unsubscribedLists.length > 0,
+    at: stamps.length ? new Date(Math.max(...stamps)).toISOString() : null,
   };
 }
 
@@ -772,6 +789,41 @@ export function createListmonk(options: Options) {
       await request<boolean>(`/api/subscribers/${safeId(id)}/blocklist`, 'PUT');
     },
 
+    // Reverses blockSubscriber. A blocklist marks every subscription "unsubscribed" and a plain status change keeps them
+    // (queries/subscribers.sql:161-201), so the update lists only the subscriptions that were not unsubscribed. The rest are deleted.
+    async unblockSubscriber(id: number) {
+      const existing = await nativeSubscriber(id);
+      const keep = (existing.lists ?? []).filter((list) => list.subscription_status !== 'unsubscribed').map((list) => list.id);
+      const updated = subscriberFromNative(await request<NativeSubscriber>(`/api/subscribers/${safeId(id)}`, 'PUT', {
+        email: emailKey(existing.email), name: existing.name, status: 'enabled', attribs: existing.attribs ?? {}, lists: keep,
+      }));
+      if (updated.blocked || updated.lists.some((list) => list.status === 'unsubscribed')) {
+        throw new UpstreamError(service, 502, 'The newsletter engine did not confirm the change.');
+      }
+    },
+
+    // One page of subscribers that are blocklisted or unsubscribed from any list, by id. Uses the subscribers
+    // `query` SQL expression (cmd/subscribers.go:99-125). `since` narrows it to rows touched after that time. The bounce
+    // action and the unsubscribe-by-campaign update do not always bump `updated_at` (queries/bounces.sql:14-17), so the id walk without `since` is the complete lane.
+    async suppressedSubscribers(options: { afterId?: number; since?: string; limit?: number } = {}): Promise<SuppressedSubscriber[]> {
+      const afterId = Number.isSafeInteger(options.afterId) && options.afterId! > 0 ? options.afterId! : 0;
+      const parts = [
+        `subscribers.id > ${afterId}`,
+        `(subscribers.status = 'blocklisted' OR EXISTS (SELECT 1 FROM subscriber_lists sl WHERE sl.subscriber_id = subscribers.id AND sl.status = 'unsubscribed'))`,
+      ];
+      if (options.since) {
+        const stamp = Date.parse(options.since);
+        if (!Number.isFinite(stamp)) throw new UpstreamError(service, 400, 'Choose a valid time.');
+        const iso = new Date(stamp).toISOString();
+        parts.push(`(subscribers.updated_at > '${iso}' OR EXISTS (SELECT 1 FROM subscriber_lists sc WHERE sc.subscriber_id = subscribers.id AND sc.updated_at > '${iso}'))`);
+      }
+      const query = withPagination({ page: 1, limit: Math.min(Math.max(options.limit ?? 50, 1), 100) });
+      query.set('query', parts.join(' AND '));
+      query.set('order', 'asc');
+      const page = await request<NativePage<NativeSubscriber>>(`/api/subscribers?${query}`);
+      return (page.results ?? []).map(suppressedFromNative).sort((a, b) => a.id - b.id);
+    },
+
     async deleteSubscriber(id: number) {
       await request<boolean>(`/api/subscribers/${safeId(id)}`, 'DELETE');
     },
@@ -889,6 +941,18 @@ export function createListmonk(options: Options) {
 
     async pauseCampaign(id: number): Promise<Campaign> {
       return campaignFromNative(await setCampaignStatus(id, 'paused'));
+    },
+
+    /**
+     * Puts a held campaign (draft that still has its send time) back on the schedule. Listmonk starts a scheduled
+     * campaign on its next scan once `send_at` has passed, so this also starts one whose time has already gone.
+     */
+    async resumeSchedule(id: number): Promise<Campaign> {
+      const current = await nativeCampaign(id);
+      if (current.status !== 'draft' || !current.send_at) {
+        throw new UpstreamError(service, 409, 'Only a held newsletter with a send time can be put back on the schedule.');
+      }
+      return campaignFromNative(await setCampaignStatus(id, 'scheduled'));
     },
 
     async cancelSchedule(id: number): Promise<Campaign> {

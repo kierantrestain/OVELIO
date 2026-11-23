@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { contactSortKeys, pointTriggerEventTypes, segmentOperatorKeys, type CustomFieldObject } from '@/contracts';
+import { contactSortKeys, dncChannels, dncReasons, pointTriggerEventTypes, segmentOperatorKeys, type CustomFieldObject } from '@/contracts';
 import { recordActivity } from '@/server/activity';
 import {
-  bulkUpdateContacts, clearContactBounces, contactDetail, contactDirectory, contactFields, createImportDraft,
+  addContactDnc, bulkUpdateContacts, clearContactBounces, contactDetail, contactDirectory, contactFields, createImportDraft,
   deleteContactView, deleteListSafely, deleteSegmentSafely, enqueueSegmentSync, exportContact, exportContacts, getImport,
   importIssuesCsv, listContactViews, listImports, listSuppressions, saveContactView, startImport, manualSuppress, requestErasure, resendContactOptin, saveContact,
-  sendContactEmail, setConsent, updateMailingList, updateMembership,
+  removeContactDnc, sendContactEmail, setConsent, updateMailingList, updateMembership,
 } from '@/server/audience';
 import { rateLimit } from '@/server/auth';
 import { assertDeliveryReady } from '@/server/delivery';
@@ -119,6 +119,19 @@ export const audienceEndpoints: Entry[] = [
       action: z.enum(['opted_in', 'suppressed']), evidence: z.string().trim().min(1).max(500),
     }));
     return setConsent(id(context), action, evidence);
+  }, 'marketer'),
+  // AUD-08: per-channel do-not-contact. Email goes through OVELIO suppressions; SMS goes to Mautic.
+  route('POST', /^contacts\/(\d+)\/dnc\/(email|sms)$/, async context => {
+    const input = await readBody(context.request, z.object({
+      reason: z.enum(dncReasons), comment: z.string().trim().min(1).max(500),
+    }));
+    return addContactDnc(id(context), z.enum(dncChannels).parse(context.params[1]), input.reason, input.comment);
+  }, 'marketer'),
+  route('POST', /^contacts\/(\d+)\/dnc\/(email|sms)\/remove$/, async context => {
+    const input = await readBody(context.request, z.object({
+      evidence: z.string().trim().min(1).max(500), confirmFixed: z.boolean().optional(),
+    }));
+    return removeContactDnc(id(context), z.enum(dncChannels).parse(context.params[1]), input);
   }, 'marketer'),
   route('POST', /^contacts\/(\d+)\/segments$/, async context => {
     const { segmentId, member } = await readBody(context.request, z.object({ segmentId: numberId, member: z.boolean() }));
@@ -244,7 +257,7 @@ export const audienceEndpoints: Entry[] = [
   route('POST', /^suppressions$/, async ({ request }) => {
     const input = await readBody(request, z.object({
       email,
-      reason: z.enum(['unsubscribe', 'bounce', 'complaint', 'erasure']),
+      reason: z.enum(['unsubscribe', 'bounce', 'complaint', 'erasure', 'manual']),
       evidence: z.string().trim().min(1).max(500),
     }));
     await manualSuppress(input.email, input.reason, input.evidence);

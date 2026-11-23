@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  Code2, Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Trash2, Users,
+  Code2, Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Route, Trash2, Users,
 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core/Button';
@@ -28,6 +28,7 @@ import { formActionSpecs, formFieldSpecs } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
 import { describeSources, WorkflowCanvasEditor, WorkflowOutline, workflowGraphOf } from './workflow-canvas';
+import { WorkflowRunModal } from './workflow-run-log';
 import {
   AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal,
   PageHeader, Pager, Panel, SlideDrawer, Snippet, StatusBadge, Tabs,
@@ -250,21 +251,37 @@ function HtmlPreviewModal({ title, html, onClose }: { title: string; html: strin
 
 function WorkflowContactsDrawer({ workflow, onClose }: { workflow: Workflow; onClose: () => void }) {
   const enrolled = useResource<WorkflowContact[]>(`${workflowPath}/${workflow.id}/contacts`);
-  return <SlideDrawer title={workflow.name} subtitle="Enrolled contacts in this automation" onClose={onClose} width={540}>
-    {!enrolled.data ? <AsyncState loading={enrolled.loading} error={enrolled.error} retry={enrolled.refresh} />
-      : enrolled.data.length ? <Table data={enrolled.data} idKey="contactId" hasHover columns={[
-        {
-          key: 'contactId',
-          header: 'Contact',
-          renderCell: item => <Link href={`/audience/${item.contactId}`}>Contact #{item.contactId}</Link>,
-        },
-        { key: 'dateAdded', header: 'Enrolled', renderCell: item => date(item.dateAdded) },
-        {
-          key: 'manuallyRemoved',
-          header: 'Status',
-          renderCell: item => <StatusBadge label={item.manuallyRemoved ? 'Removed' : 'Active'} tone={item.manuallyRemoved ? 'neutral' : 'success'} />,
-        },
-      ]} /> : <Empty title="No contacts enrolled yet" description="Contacts enter this workflow when they match its trigger while active." />}
+  const [lookup, setLookup] = useState('');
+  const [viewing, setViewing] = useState<number | null>(null);
+  const lookupId = Number(lookup);
+  return <SlideDrawer title={workflow.name} subtitle="Enrolled contacts in this automation" onClose={onClose} width={600}>
+    <div className="ov-stack-sm">
+      <div className="ov-form-grid">
+        <TextInput label="Find a contact by id" description="See where any contact is in this workflow, and why." value={lookup}
+          onChange={value => setLookup(value.replace(/\D/g, '').slice(0, 10))} />
+        <Button label="Show path" icon={<Route size={14} />} isDisabled={!lookupId} onClick={() => setViewing(lookupId)} />
+      </div>
+      {!enrolled.data ? <AsyncState loading={enrolled.loading} error={enrolled.error} retry={enrolled.refresh} />
+        : enrolled.data.length ? <Table data={enrolled.data} idKey="contactId" hasHover columns={[
+          {
+            key: 'contactId',
+            header: 'Contact',
+            renderCell: item => <Link href={`/audience/${item.contactId}`}>Contact #{item.contactId}</Link>,
+          },
+          { key: 'dateAdded', header: 'Enrolled', renderCell: item => date(item.dateAdded) },
+          {
+            key: 'manuallyRemoved',
+            header: 'Status',
+            renderCell: item => <StatusBadge label={item.manuallyRemoved ? 'Removed' : 'Active'} tone={item.manuallyRemoved ? 'neutral' : 'success'} />,
+          },
+          {
+            key: 'path',
+            header: 'Where now',
+            renderCell: item => <Button size="sm" variant="ghost" label="Show path" icon={<Route size={14} />} onClick={() => setViewing(item.contactId)} />,
+          },
+        ]} /> : <Empty title="No contacts enrolled yet" description="Contacts enter this workflow when they match its trigger while active." />}
+    </div>
+    {viewing !== null ? <WorkflowRunModal workflowId={workflow.id} workflow={workflow} contactId={viewing} onClose={() => setViewing(null)} /> : null}
   </SlideDrawer>;
 }
 

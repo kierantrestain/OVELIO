@@ -20,23 +20,41 @@ export type Contact = {
   updatedAt: string | null;
   tags: string[];
   suppressed: boolean;
+  /** Every do-not-contact entry Mautic holds for the contact, one per channel. */
+  dnc?: DncEntry[];
   /** Non-empty values of every contact field outside the nine core fields, keyed by field alias. */
   customFields?: Record<string, string>;
 };
 
 export type Consent = 'unknown' | 'opted_in' | 'suppressed';
 
+/** Mautic's do-not-contact channels that OVELIO manages: email is mirrored from OVELIO suppressions, SMS goes straight to Mautic. */
+export const dncChannels = ['email', 'sms'] as const;
+export type DncChannel = (typeof dncChannels)[number];
+
+/** Mautic's DNC reason codes: 1 unsubscribed, 2 bounced, 3 manual (Entity/DoNotContact.php:17-32). */
+export const dncReasons = ['unsubscribed', 'bounced', 'manual'] as const;
+export type DncReason = (typeof dncReasons)[number];
+
+export type DncEntry = {
+  channel: string;
+  reason: DncReason;
+  comment: string;
+  at: string | null;
+};
+
 export type ConsentEvent = {
   id: string;
-  action: 'opted_in' | 'suppressed';
+  action: 'opted_in' | 'suppressed' | 'unsuppressed';
   evidence: string;
   at: string;
 };
 
 export type SuppressionRecord = {
   emailKey: string;
-  reason: 'unsubscribe' | 'bounce' | 'complaint' | 'erasure';
+  reason: 'unsubscribe' | 'bounce' | 'complaint' | 'erasure' | 'manual';
   at: string;
+  comment?: string;
   contactId?: number | null;
   email?: string | null;
 };

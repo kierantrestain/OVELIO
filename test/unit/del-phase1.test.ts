@@ -170,23 +170,27 @@ test('DEL-21 when counts cannot be read the reason stays visible', async () => {
 
 function syncDeps(overrides: Partial<SegmentSyncDeps> = {}) {
   const synced: number[] = [];
+  const unlisted: number[] = [];
   const deps: SegmentSyncDeps = {
     mappings: async ids => ids.filter(id => id === 20).map(listId => ({ segmentId: 5, listId })),
     segments: async () => [{ id: 5, name: 'VIPs', published: true }],
     members: async (_segment, page) => ({ ids: page === 1 ? [1, 2] : [3], total: 3, limit: 2 }),
     listSubscribers: async () => ({ items: [{ id: 90, email: 'a@example.com', mauticId: 1 }, { id: 91, email: 'gone@example.com', mauticId: 9 }, { id: 92, email: 'manual@example.com', mauticId: null }], total: 3, page: 1, limit: 100 }),
     syncContact: async id => { synced.push(id); },
+    isMember: async id => [1, 2, 3].includes(id),
+    removeFromList: async id => { unlisted.push(id); },
     deferSync: async () => {},
     ...overrides,
   };
-  return { deps, synced };
+  return { deps, synced, unlisted };
 }
 
 test('DEL-08 every segment member is synced and contacts who left are removed before sending', async () => {
-  const { deps, synced } = syncDeps();
+  const { deps, synced, unlisted } = syncDeps();
   const report = await syncCampaignSegments([7, 20], deps);
   assert.deepEqual(synced.sort(), [1, 2, 3, 9]);
-  assert.deepEqual(report.segments, [{ segmentId: 5, name: 'VIPs', members: 3, removed: 1 }]);
+  assert.deepEqual(report.segments, [{ segmentId: 5, name: 'VIPs', members: 3, removed: 2 }]);
+  assert.deepEqual(unlisted.sort(), [91, 92], 'subscribers 91 (left) and 92 (no contact id) come off the list directly');
 });
 
 test('DEL-08 a campaign on ordinary lists needs no sync', async () => {

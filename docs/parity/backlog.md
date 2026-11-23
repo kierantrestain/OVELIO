@@ -26,7 +26,7 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 | AUD-05 | Segment operators per field type: from 6 to 24, including regexp, between, empty and not empty, `in_all`, and relative dates (`inLast`/`inNext`). The UI shows only operators that are valid for the field type (`audience.tsx:96-112` shows all of them for every field) | P0 | M | review | Operator matrix matches Mautic's per-type table. Relative-date filters work | R1#7-8 |
 | AUD-06 | Segment rebuild and status: trigger a rebuild, show the last-built time, member count and a member preview. Mautic only materialises membership on its cron (batch 300, 1 s sleep per batch), and nothing recomputes on contact change | P0 | M | review | The segment page shows count, last built and the first 50 members. Rebuild-now works | R1#9-10 |
 | AUD-07 | Point actions: set `properties` (which email, page, form or URL), `repeatable` and `group`. Add `email.send` to the type list | P0 | M | review | All 6 action types are configurable end to end | R1#18-19 |
-| AUD-08 | Do-not-contact: add and remove per channel and reason (1 unsubscribed, 2 bounced, 3 manual). DNC as a segment filter. One source of truth with OVELIO `suppressions` (see X-06) | P0 | M | todo | DNC can be removed. The segment filter works. No disagreement between DNC and suppressions | R1#25-26 |
+| AUD-08 | Do-not-contact: add and remove per channel and reason (1 unsubscribed, 2 bounced, 3 manual). DNC as a segment filter. One source of truth with OVELIO `suppressions` (see X-06) | P0 | M | review | DNC can be removed. The segment filter works. No disagreement between DNC and suppressions | R1#25-26 |
 | AUD-09 | Contact timeline: complete, filterable by event type, paginated (today it is the last 25 events, unfiltered) | P0 | M | review | All Mautic timeline event types, with paging. Feeds X-02 | R1#27 |
 | AUD-10 | Import: async job with progress, column mapping including custom fields, dry run, no 500-row cap, no global serial lock | P0 | M | review | Imports 100k rows through the job queue with mapping and a dry-run report | R1#30 |
 | AUD-11 | Merge and dedupe. Mautic has no REST merge, so OVELIO must own it: a duplicates queue, merge preview, Mautic's rules (sum points, union tags and companies, newest value wins per field) | P0 | L | todo | Duplicates are listed. A merge preview shows the result. The merge is executed and audited | R1#32 |
@@ -46,10 +46,10 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 |---|---|---|---|---|---|---|
 | AUT-01 | **BUG** The console route caps workflows at 12 steps while the library allows 20 (`route.ts:77` vs `workflows.ts:185`) | P0 | S | done | One shared limit | R2 |
 | AUT-02 | Branching workflow canvas: yes/no paths and nested events, stored as Mautic's `parent_id` plus `decision_path`. Any Mautic campaign graph opens and saves; nothing is read-only (`editable:false`, `workflows.ts:87-100`) | P0 | L | review | Round-trips every campaign graph the engine can hold | R2#1 |
-| AUT-03 | Conditions: all 14 immediate yes/no evaluations | P0 | M | todo | — | R2#2,6 |
+| AUT-03 | Conditions: all 14 immediate yes/no evaluations | P0 | M | review | — | R2#2,6 |
 | AUT-04 | "No action after X" paths: decisions get their negative branch after a wait. Today only the yes anchor is created, so a contact who never opens waits forever (`workflows.ts:233-235`) | P0 | M | review | Contacts who don't act move down the no path at the deadline | R2#3 |
-| AUT-05 | Action catalogue: from 5 to 26 | P0 | M | todo | Every registered Mautic action is configurable | R2#4 |
-| AUT-06 | Per-contact run state: event log with scheduled, executed and failed states, from `/campaigns/events/contact/{id}` | P0 | M | todo | The contact and workflow views show where each contact is and why | R2#11 |
+| AUT-05 | Action catalogue: from 5 to 26 | P0 | M | review | Every registered Mautic action is configurable | R2#4 |
+| AUT-06 | Per-contact run state: event log with scheduled, executed and failed states, from `/campaigns/events/contact/{id}` | P0 | M | review | The contact and workflow views show where each contact is and why | R2#11 |
 | AUT-07 | Form field types: from 5 to 24 | P0 | M | review | — | R2#16 |
 | AUT-08 | Form submit actions: from none (`index.ts:719-720` always sends `actions: []`) to all 13 (admin email, repost, tags, segment, points, send email, download asset and more) | P0 | M | review | — | R2#17 |
 | AUT-09 | Decision catalogue: from 2 to 9 (email open, click and reply, form submit, page hit, device hit, asset download, dynamic content, SMS reply) | P1 | M | todo | — | R2#5 |
@@ -91,7 +91,7 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 | DEL-18 | Relay performance: pooled SMTP transport, and cached consent decisions (the gateway makes 2 upstream calls per recipient today) | P1 | S | todo | Measured throughput before and after | R3 §2 |
 | DEL-19 | Archive and RSS metadata, custom headers, Return-Path, Cc and Bcc, domain allow and block lists, postback messengers | P2 | M | todo | — | R3#4,22,24,28 |
 | DEL-21 | Per-campaign unsubscribe counts: add a `campaign_unsubscribes` table written by OVELIO's unsubscribe route (it knows the campaign) and report it in campaign metrics (follow-up from DEL-04) | P1 | S | review | The metric is a real count per campaign | R3#10 |
-| DEL-22 | Refresh a scheduled campaign's segment recipients shortly before Listmonk starts it at `send_at` (a worker job), and pause it if the refresh fails. Today the refresh runs when it is scheduled (follow-up from DEL-08) | P1 | S | todo | Recipients match the segment at send time for scheduled sends too | R3#5 |
+| DEL-22 | Refresh a scheduled campaign's segment recipients shortly before Listmonk starts it at `send_at` (a worker job), and pause it if the refresh fails. Today the refresh runs when it is scheduled (follow-up from DEL-08) | P1 | S | review | Recipients match the segment at send time for scheduled sends too | R3#5 |
 | DEL-20 | ★ Native delivery pipeline: durable outbox with retries (Listmonk is at-most-once and can leave gaps after a crash), per-domain throttling and warm-up, exact delivered counts | P1 | L | todo | Decision D1 | R3 §4 |
 
 ## ANA: website tracking, sources, events, funnels, conversions (lane D)
@@ -124,7 +124,7 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 |---|---|---|---|---|---|---|
 | X-01 | ★ Consent-gated identity stitching from email click to web session to contact. Campaign links carry a signed HMAC pseudonym. The page calls `umami.identify()` only after consent. An OVELIO `identities` table maps pseudonym to contact, and erasure (DSAR) deletes the link | P0 | L | todo | A test contact clicks, browses, and appears on their own timeline. Erasure removes the link | R4#37 |
 | X-02 | ★ One contact timeline: Mautic activity, Listmonk sends, opens, clicks and bounces, and Umami visits and events | P0 | M | todo | Depends on X-01 and AUD-09 | R1 §3 |
-| X-03 | ★ One consent and suppression truth across Mautic DNC, Listmonk blocklist and OVELIO `suppressions`, reconciled by the worker | P0 | M | todo | No path where engines disagree | R1#25, R3 |
+| X-03 | ★ One consent and suppression truth across Mautic DNC, Listmonk blocklist and OVELIO `suppressions`, reconciled by the worker | P0 | M | review | No path where engines disagree | R1#25, R3 |
 | X-04 | ★ Behaviour segments: website events become segment membership and tags | P1 | L | todo | — | R4#38 |
 | X-05 | ★ Engagement score from opens, clicks and visits written back to the contact, with decay | P1 | M | todo | Depends on AUD-17 | R3 §3 |
 | X-06 | ★ Multi-touch attribution from campaign to revenue | P1 | L | todo | Depends on X-01 and ANA-08 | R4 §3 |

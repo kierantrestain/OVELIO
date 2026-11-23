@@ -6,7 +6,9 @@ import type { Sql } from './db';
 export type JobData = {
   contact_sync: { contactId: number };
   segment_sync: { segmentId: number; page: number };
-  suppress: { contactId: number; reason: 'unsubscribe' | 'bounce' | 'complaint' | 'erasure' };
+  suppress: { contactId: number; reason: 'unsubscribe' | 'bounce' | 'complaint' | 'erasure' | 'manual' };
+  unsuppress: { contactId: number; emailKey: string };
+  campaign_refresh: { campaignId: number; runId: string };
   erase: { contactId: number };
   contact_import: { importId: string };
 };
@@ -63,6 +65,10 @@ export async function finishJob(job: Job, error?: unknown) {
 export async function maintainJobs() {
   await db.query('DELETE FROM sessions WHERE expires_at < now()');
   await db.query("DELETE FROM rate_limits WHERE window_start < now() - interval '2 days'");
+  // An import that was uploaded and never started holds the whole CSV; keep it a week, then drop it (its issue rows cascade).
+  await db.query("DELETE FROM contact_imports WHERE status = 'draft' AND created_at < now() - interval '7 days'");
+  // A removal marker only matters while an engine could still show the old entry.
+  await db.query("DELETE FROM suppression_removals WHERE removed_at < now() - interval '90 days'");
   await db.query("DELETE FROM jobs WHERE status = 'done' AND finished_at < now() - interval '30 days'");
 }
 

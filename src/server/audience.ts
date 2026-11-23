@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import Papa from 'papaparse';
 import { z } from 'zod';
-import type { Consent, ConsentEvent, Contact, ContactSortKey, ContactView, ContactViewInput, ImportMapping, ImportPreview, ImportRun, ImportStatus, ContactDetail, ContactInput, Subscriber, SuppressionRecord } from '../contracts';
+import type { Consent, ConsentEvent, Contact, ContactSortKey, ContactView, ContactViewInput, ImportMapping, ImportPreview, ImportRun, ImportStatus, ContactDetail, ContactInput, DncEntry, Subscriber, SuppressionRecord } from '../contracts';
 import { recordActivity } from './activity';
 import { AppError, emailKey, logError } from './config';
 import { db, transaction } from './db';
@@ -17,6 +17,7 @@ type State = { contact_id: string; email_key: string; subscriber_id: string | nu
 type Membership = { segment_id: string; list_id: string };
 type ConsentInput = ContactInput & { consent?: 'opted_in' | 'unknown'; evidence?: string };
 const contactsPerPage = 100;
+const dncReasonFor = (reason: Reason | undefined): DncEntry['reason'] => reason === 'unsubscribe' ? 'unsubscribed' : reason === 'bounce' ? 'bounced' : 'manual';
 const stateColumns = 'contact_id, email_key, subscriber_id, consent';
 
 async function getState(contactId: number, client: Sql = db) {
@@ -49,8 +50,8 @@ function nativeSuppressed(subscriber: Subscriber | null) {
 
 async function suppressKey(key: string, reason: Reason, evidence: string, client: PoolClient, contactId?: number) {
   const inserted = await client.query(
-    `INSERT INTO suppressions (email_key, reason) VALUES ($1, $2) ON CONFLICT (email_key) DO NOTHING RETURNING email_key`,
-    [key, reason],
+    `INSERT INTO suppressions (email_key, reason, comment) VALUES ($1, $2, $3) ON CONFLICT (email_key) DO NOTHING RETURNING email_key`,
+    [key, reason, evidence.slice(0, 500)],
   );
   const rows = await client.query<{ contact_id: string }>(
     `UPDATE contact_state SET consent = 'suppressed', updated_at = now()
@@ -81,7 +82,7 @@ export async function manualSuppress(email: string, reason: Reason, evidence: st
     await suppressKey(emailKey(normalized), reason, evidence.trim(), client, contact?.id);
   });
   await Promise.all([
-    contact && !contact.suppressed ? missingIsOkay(mautic.setSuppressed(contact.id, reason)) : null,
+    contact && !contact.suppressed ? missingIsOkay(mautic.setSuppressed(contact.id, reason, evidence.trim())) : null,
     subscriber && !subscriber.blocked ? missingIsOkay(listmonk.blockSubscriber(subscriber.id)) : null,
   ]);
   await recordActivity('Email address suppressed', '/audience?tab=Suppressions');
@@ -91,10 +92,11 @@ export async function listSuppressions(): Promise<SuppressionRecord[]> {
   const result = await db.query<{
     email_key: string;
     reason: SuppressionRecord['reason'];
+    comment: string;
     created_at: Date;
     contact_id: string | null;
   }>(
-    `SELECT s.email_key, s.reason, s.created_at, cs.contact_id
+    `SELECT s.email_key, s.reason, s.comment, s.created_at, cs.contact_id
      FROM suppressions s
      LEFT JOIN contact_state cs ON cs.email_key = s.email_key
      ORDER BY s.created_at DESC
@@ -112,6 +114,7 @@ export async function listSuppressions(): Promise<SuppressionRecord[]> {
       emailKey: row.email_key,
       reason: row.reason,
       at: row.created_at.toISOString(),
+      comment: row.comment,
       contactId,
       email,
     });
@@ -201,13 +204,21 @@ export async function contactDetail(id: number): Promise<ContactDetail> {
     mautic.contactCampaigns(id).catch(() => []),
     mautic.contactCompanies(id).catch(() => []),
     mautic.contactDevices(id).catch(() => []),
-    db.query<{ id: string; action: 'opted_in' | 'suppressed'; evidence: string; created_at: Date }>(
+    db.query<{ id: string; action: ConsentEvent['action']; evidence: string; created_at: Date }>(
       'SELECT id, action, evidence, created_at FROM consent_events WHERE contact_id = $1 ORDER BY id DESC LIMIT 30',
       [id],
     ),
   ]);
   const key = contact.email ? emailKey(contact.email) : null;
-  const suppressed = contact.suppressed || Boolean(key && await isSuppressed(key));
+  const held = key ? (await db.query<{ reason: Reason; comment: string; created_at: Date }>(
+    'SELECT reason, comment, created_at FROM suppressions WHERE email_key = $1', [key],
+  )).rows[0] : undefined;
+  const suppressed = contact.suppressed || Boolean(held);
+  // Mautic's rows are the engine's view; a suppression OVELIO holds that the engine does not show yet is listed too.
+  const dnc: DncEntry[] = [...(contact.dnc ?? [])];
+  if (held && !dnc.some(entry => entry.channel === 'email')) {
+    dnc.push({ channel: 'email', reason: dncReasonFor(held.reason), comment: held.comment ?? '', at: held.created_at?.toISOString?.() ?? null });
+  }
   let mailingListIds: number[] | undefined;
   let newsletterActivity: ContactDetail['newsletterActivity'];
   let subscriberBounces: ContactDetail['subscriberBounces'];
@@ -236,6 +247,7 @@ export async function contactDetail(id: number): Promise<ContactDetail> {
   return {
     ...contact,
     suppressed,
+    dnc,
     segments,
     activity,
     notes,
@@ -401,13 +413,19 @@ export async function eraseContact(id: number) {
 
 export async function propagateSuppression(id: number, reason: Reason) {
   const state = await getState(id);
-  if (!state || !await isSuppressed(state.email_key)) return;
+  if (!state) return;
+  // The suppression row is the truth: it can have been removed or replaced since the job was queued.
+  const row = (await db.query<{ reason: Reason; comment: string }>(
+    'SELECT reason, comment FROM suppressions WHERE email_key = $1', [state.email_key],
+  )).rows[0];
+  if (!row) return;
   const contact = await missingIsOkay(mautic.contact(id));
   if (contact?.email && emailKey(contact.email) !== state.email_key) return;
   const subscriber = state.subscriber_id ? await listmonk.subscriber(Number(state.subscriber_id))
     : contact?.email ? await listmonk.findSubscriber(contact.email) : null;
+  const mirrored = row.reason ?? reason;
   await Promise.all([
-    contact && !contact.suppressed ? missingIsOkay(mautic.setSuppressed(id, reason)) : null,
+    contact && !contact.suppressed ? missingIsOkay(mautic.setSuppressed(id, mirrored, row.comment)) : null,
     subscriber && !subscriber.blocked ? missingIsOkay(listmonk.blockSubscriber(subscriber.id)) : null,
   ]);
 }
@@ -876,4 +894,256 @@ export async function exportContact(id: number) {
     'SELECT action, evidence, created_at FROM consent_events WHERE contact_id = $1 ORDER BY id', [id],
   );
   return { ...contact, consentHistory: evidence.rows };
+}
+
+/* ── AUD-08: do-not-contact per channel ───────────────────────────────────── */
+
+const dncToReason: Record<DncEntry['reason'], Reason> = { unsubscribed: 'unsubscribe', bounced: 'bounce', manual: 'manual' };
+
+export type DncRemovalInput = { evidence: string; confirmFixed?: boolean };
+
+// Adds a do-not-contact entry. Email goes through OVELIO (suppressions first, then both engines); SMS is not sent by OVELIO, so it goes to Mautic.
+export async function addContactDnc(id: number, channel: 'email' | 'sms', reason: DncEntry['reason'], comment: string) {
+  const note = comment.trim();
+  const contact = await mautic.contact(id);
+  if (channel === 'email') {
+    if (!contact.email) throw new AppError(409, 'Add an email address to manage do-not-contact.');
+    await manualSuppress(contact.email, dncToReason[reason], note || 'Do not contact added by an operator');
+  } else {
+    await mautic.addDnc(id, channel, dncToReason[reason], note);
+    await recordActivity('Do-not-contact added (' + channel + ')', `/audience/${id}`);
+  }
+  return contactDetail(id);
+}
+
+// Removes an email suppression. It needs typed evidence, is audited, deletes the suppression and reverses both engine mirrors.
+// It does not opt the contact in: consent returns to unknown until someone records opt-in.
+// A bounce or complaint needs an explicit confirmation that the address was fixed. An erasure is never removed:
+// the row is what stops an erased person being added again, and the erase job deletes the contact it would apply to.
+export async function removeEmailDnc(id: number, input: DncRemovalInput) {
+  const evidence = input.evidence.trim();
+  if (!evidence) throw new AppError(400, 'Record why this address can be contacted again.');
+  const contact = await mautic.contact(id);
+  if (!contact.email) throw new AppError(409, 'Add an email address to manage do-not-contact.');
+  const key = emailKey(contact.email);
+  await transaction(async client => {
+    await client.query('SELECT pg_advisory_xact_lock(64337002)');
+    const held = (await client.query<{ reason: Reason }>('SELECT reason FROM suppressions WHERE email_key = $1 FOR UPDATE', [key])).rows[0];
+    const engineEntry = contact.dnc?.find(entry => entry.channel === 'email');
+    if (!held && !engineEntry && !contact.suppressed) throw new AppError(409, 'This contact has no email do-not-contact entry.');
+    const reason: Reason = held?.reason ?? (engineEntry ? dncToReason[engineEntry.reason] : 'manual');
+    if (reason === 'erasure') throw new AppError(409, 'An erasure request cannot be undone. The suppression stays so the address is not added again.');
+    if ((reason === 'bounce' || reason === 'complaint') && !input.confirmFixed) {
+      throw new AppError(409, 'This address was suppressed after a ' + reason + '. Confirm that the address has been fixed before removing it.');
+    }
+    const state = await saveState(contact, client);
+    await client.query('DELETE FROM suppressions WHERE email_key = $1', [key]);
+    await client.query(
+      `INSERT INTO suppression_removals (email_key, removed_at, reason) VALUES ($1, clock_timestamp(), $2)
+       ON CONFLICT (email_key) DO UPDATE SET removed_at = EXCLUDED.removed_at, reason = EXCLUDED.reason`,
+      [key, reason],
+    );
+    await client.query("UPDATE contact_state SET consent = 'unknown', updated_at = now() WHERE contact_id = $1", [state.contact_id]);
+    await client.query(
+      `INSERT INTO consent_events (contact_id, email_key, action, evidence) VALUES ($1, $2, 'unsuppressed', $3)`,
+      [id, key, ((reason === 'bounce' || reason === 'complaint' ? '[address confirmed fixed] ' : '') + evidence).slice(0, 500)],
+    );
+    await enqueue('unsuppress', key, { contactId: id, emailKey: key }, client);
+  });
+  await recordActivity('Email do-not-contact removed', `/audience/${id}`);
+  return contactDetail(id);
+}
+
+export async function removeContactDnc(id: number, channel: 'email' | 'sms', input: DncRemovalInput) {
+  if (channel === 'email') return removeEmailDnc(id, input);
+  await mautic.removeDnc(id, channel);
+  await recordActivity('Do-not-contact removed (' + channel + ')', `/audience/${id}`);
+  return contactDetail(id);
+}
+
+// Job: reverse the engine mirrors after a removal. The suppression may have come back since (a new unsubscribe), so it checks first.
+export async function applySuppressionRemoval(id: number, key: string) {
+  if (await isSuppressed(key)) return;
+  const contact = await missingIsOkay(mautic.contact(id));
+  if (contact?.email && emailKey(contact.email) === key) {
+    if (contact.dnc?.some(entry => entry.channel === 'email')) await mautic.removeDnc(id, 'email');
+    const subscriber = await listmonk.findSubscriber(contact.email);
+    if (subscriber && (subscriber.blocked || nativeSuppressed(subscriber))) await listmonk.unblockSubscriber(subscriber.id);
+  }
+  await db.query(
+    `UPDATE contact_state SET consent = 'unknown', updated_at = now()
+     WHERE email_key = $1 AND consent = 'suppressed' AND NOT EXISTS (SELECT 1 FROM suppressions WHERE email_key = $1)`, [key],
+  );
+}
+
+/* ── X-03: engine-side suppressions flow back into OVELIO ─────────────────── */
+
+type Found = {
+  email: string; reason: Reason; at: string | null; evidence: string; contact?: Contact | null; subscriber?: { id: number; blocked: boolean };
+};
+
+// Records a suppression that started inside an engine. An engine entry that is not newer than a removal is a leftover
+// of that removal, so it is ignored. The check runs under the same lock as the removal.
+async function ingestEngineSuppression(found: Found): Promise<'added' | 'known' | 'stale'> {
+  const key = emailKey(found.email);
+  const outcome = await transaction(async client => {
+    await client.query('SELECT pg_advisory_xact_lock(64337002)');
+    if (await isSuppressed(key, client)) return 'known' as const;
+    const removal = (await client.query<{ removed_at: Date }>('SELECT removed_at FROM suppression_removals WHERE email_key = $1', [key])).rows[0];
+    if (removal && (!found.at || Date.parse(found.at) <= new Date(removal.removed_at).getTime())) return 'stale' as const;
+    if (found.contact) await saveState(found.contact, client);
+    await suppressKey(key, found.reason, found.evidence, client, found.contact?.id);
+    return 'added' as const;
+  });
+  // With a contact, the suppress job mirrors to both engines. Without one, only the newsletter engine knows the address.
+  if (outcome === 'added' && !found.contact && found.subscriber && !found.subscriber.blocked) {
+    await missingIsOkay(listmonk.blockSubscriber(found.subscriber.id));
+  }
+  return outcome;
+}
+
+const sweepLock = 64337003;
+const sweepPage = 50;
+const reassertPage = 10;
+const skewMargin = 60_000;
+type SweepCursor = {
+  dncStatId: number; mauticAfter: number; listmonkAfter: number;
+  sinceWatermark: string; sinceCycle: string | null; sinceAfter: number;
+  reassertAfter: string;
+};
+
+// Finds engine-side suppressions and brings OVELIO, Mautic and Listmonk back into agreement. One bounded pass per call,
+// in independent lanes. A lane that throws (an engine is down) is logged and skipped; the others still run, and each lane
+// saves its own cursor once it has succeeded:
+//  - Mautic change feed: new `lead_donotcontact` rows after the last seen id (one tick of latency),
+//  - Mautic walk by contact id over every email DNC (the completeness check),
+//  - Listmonk rows touched since a stored time (the cycle repeats a margin, so a row changed mid-cycle is seen next time),
+//  - Listmonk walk by id over every blocklist or list unsubscribe (bounces can change these without a timestamp), and
+//  - a few OVELIO suppressions re-queued for mirroring, so an engine that lost its entry gets it back.
+// A session advisory lock on its own pooled connection keeps concurrent workers from running it twice, and no transaction is
+// held open across the engine calls.
+export async function sweepEngineSuppressions(now = new Date()) {
+  const summary = { added: 0, stale: 0, skipped: false, failed: [] as string[] };
+  const client = await db.connect();
+  let held = false;
+  try {
+    const lock = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock($1) AS ok', [sweepLock]);
+    held = lock.rows[0]?.ok === true;
+    if (!held) { summary.skipped = true; return summary; }
+    const stored = (await client.query<{ value: Partial<SweepCursor> }>("SELECT value FROM settings WHERE key = 'suppression_sweep'")).rows[0]?.value ?? {};
+    const cursor: SweepCursor = {
+      dncStatId: stored.dncStatId ?? -1, mauticAfter: stored.mauticAfter ?? 0, listmonkAfter: stored.listmonkAfter ?? 0,
+      sinceWatermark: stored.sinceWatermark ?? now.toISOString(), sinceCycle: stored.sinceCycle ?? null, sinceAfter: stored.sinceAfter ?? 0,
+      reassertAfter: stored.reassertAfter ?? '',
+    };
+    const count = (outcome: 'added' | 'known' | 'stale') => { if (outcome === 'added') summary.added++; if (outcome === 'stale') summary.stale++; };
+    const save = (patch: Partial<SweepCursor>) => client.query(
+      `INSERT INTO settings (key, value) VALUES ('suppression_sweep', $1::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value`, [JSON.stringify(patch)],
+    );
+    const known = async (keys: string[]) => new Set((await client.query<{ email_key: string }>(
+      'SELECT email_key FROM suppressions WHERE email_key = ANY($1::text[])', [keys])).rows.map(row => row.email_key));
+    const lane = async (name: string, work: () => Promise<Partial<SweepCursor> | void>) => {
+      try {
+        const patch = await work();
+        if (patch) { Object.assign(cursor, patch); await save(patch); }
+      } catch (error) {
+        summary.failed.push(name);
+        logError('suppression-sweep-' + name, error);
+      }
+    };
+    const fromNewsletter = async (rows: Awaited<ReturnType<typeof listmonk.suppressedSubscribers>>) => {
+      const keys = rows.map(row => emailKey(row.email));
+      const already = await known(keys);
+      for (const [index, row] of rows.entries()) {
+        if (already.has(keys[index])) continue;
+        try {
+          const contact = await mautic.findContact(row.email).catch(() => null);
+          count(await ingestEngineSuppression({
+            email: row.email, reason: 'unsubscribe', at: row.at, contact, subscriber: row,
+            evidence: row.blocked ? 'Newsletter engine blocklist' : 'Newsletter engine list unsubscribe',
+          }));
+        } catch (error) {
+          logError('suppression-sweep-newsletter', error);
+        }
+      }
+    };
+
+    // Mautic change feed. The first run starts at the newest row; the walk below covers what came before.
+    await lane('audience-feed', async () => {
+      if (cursor.dncStatId < 0) return { dncStatId: (await mautic.dncChanges(0, 1, 'DESC'))[0]?.id ?? 0 };
+      const rows = await mautic.dncChanges(cursor.dncStatId, sweepPage);
+      if (!rows.length) return;
+      // A contact that already has a suppression needs no lookup.
+      const covered = new Set((await client.query<{ contact_id: string }>(
+        `SELECT cs.contact_id FROM contact_state cs JOIN suppressions s ON s.email_key = cs.email_key WHERE cs.contact_id = ANY($1::bigint[])`,
+        [rows.map(row => row.leadId)])).rows.map(row => Number(row.contact_id)));
+      for (const row of rows) {
+        if (covered.has(row.leadId)) continue;
+        try {
+          const contact = await missingIsOkay(mautic.contact(row.leadId));
+          if (!contact?.email) continue;
+          count(await ingestEngineSuppression({
+            email: contact.email, reason: dncToReason[row.reason], at: row.at, contact,
+            evidence: ('Audience engine do-not-contact (' + row.reason + ')' + (row.comment ? ': ' + row.comment : '')).slice(0, 500),
+          }));
+        } catch (error) {
+          logError('suppression-sweep-audience', error);
+        }
+      }
+      return { dncStatId: rows[rows.length - 1].id };
+    });
+
+    // Mautic walk: every contact with an email DNC row, by id.
+    await lane('audience-walk', async () => {
+      const dnc = await mautic.dncContacts('email', cursor.mauticAfter, sweepPage);
+      if (dnc.length) {
+        const already = await known(dnc.filter(contact => contact.email).map(contact => emailKey(contact.email)));
+        for (const contact of dnc) {
+          const entry = contact.dnc?.find(item => item.channel === 'email');
+          if (!contact.email || !entry || already.has(emailKey(contact.email))) continue;
+          try {
+            count(await ingestEngineSuppression({
+              email: contact.email, reason: dncToReason[entry.reason], at: entry.at, contact,
+              evidence: ('Audience engine do-not-contact (' + entry.reason + ')' + (entry.comment ? ': ' + entry.comment : '')).slice(0, 500),
+            }));
+          } catch (error) {
+            logError('suppression-sweep-audience', error);
+          }
+        }
+      }
+      return { mauticAfter: dnc.length < sweepPage ? 0 : dnc[dnc.length - 1].id };
+    });
+
+    // Listmonk, changed since the watermark.
+    await lane('newsletter-changed', async () => {
+      const cycle = cursor.sinceCycle ?? new Date(now.getTime() - skewMargin).toISOString();
+      const changed = await listmonk.suppressedSubscribers({ afterId: cursor.sinceAfter, since: cursor.sinceWatermark, limit: sweepPage });
+      await fromNewsletter(changed);
+      return changed.length < sweepPage
+        ? { sinceWatermark: cycle, sinceCycle: null, sinceAfter: 0 }
+        : { sinceCycle: cycle, sinceAfter: changed[changed.length - 1].id };
+    });
+
+    // Listmonk, the full walk.
+    await lane('newsletter-walk', async () => {
+      const walk = await listmonk.suppressedSubscribers({ afterId: cursor.listmonkAfter, limit: sweepPage });
+      await fromNewsletter(walk);
+      return { listmonkAfter: walk.length < sweepPage ? 0 : walk[walk.length - 1].id };
+    });
+
+    // OVELIO to the engines. Mirroring is idempotent.
+    await lane('mirror', async () => {
+      const mirrored = await client.query<{ contact_id: string; reason: Reason; email_key: string }>(
+        `SELECT cs.contact_id, s.reason, s.email_key FROM suppressions s JOIN contact_state cs ON cs.email_key = s.email_key
+         WHERE s.email_key > $1 ORDER BY s.email_key LIMIT $2`, [cursor.reassertAfter, reassertPage],
+      );
+      for (const row of mirrored.rows) await enqueue('suppress', row.contact_id, { contactId: Number(row.contact_id), reason: row.reason }, client);
+      return { reassertAfter: mirrored.rows.length < reassertPage ? '' : mirrored.rows[mirrored.rows.length - 1].email_key };
+    });
+    return summary;
+  } finally {
+    if (held) await client.query('SELECT pg_advisory_unlock($1)', [sweepLock]).catch(() => {});
+    client.release();
+  }
 }

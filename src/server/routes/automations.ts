@@ -44,7 +44,10 @@ const workflowNode = z.object({
   type: z.string().trim().min(1).max(50),
   name: z.string().trim().min(1).max(191),
   description: z.string().max(1000).default(''),
-  properties: z.record(z.string(), z.unknown()),
+  // AUT-03 / AUT-05: each type's property rules live in the shared catalogue and run in validateWorkflowGraph before
+  // anything is written; here only the size is capped.
+  properties: z.record(z.string(), z.unknown())
+    .refine(properties => JSON.stringify(properties).length <= 20_000, 'Keep a step’s settings under 20,000 characters.'),
   schedule: workflowSchedule,
   position: z.object({ x: z.number(), y: z.number() }).optional(),
 });
@@ -153,7 +156,13 @@ export const automationsEndpoints: Entry[] = [
     await recordActivity('Automation deleted', '/automations');
     return new Response(null, { status: 204 });
   }, 'marketer'),
+  route('GET', /^workflows\/(\d+)$/, async context => mautic.workflow(id(context)), 'marketer'),
   route('GET', /^workflows\/(\d+)\/contacts$/, async context => mautic.workflowContacts(id(context)), 'marketer'),
+  // AUT-06: where one contact is in one workflow, and every workflow step logged for one contact.
+  route('GET', /^workflows\/(\d+)\/contacts\/(\d+)\/log$/, async context =>
+    mautic.workflowContactLog(id(context), numberId.parse(context.params[1])), 'marketer'),
+  route('GET', /^workflows\/contact-log\/(\d+)$/, async context => mautic.contactWorkflowLog(id(context)), 'marketer'),
+  route('GET', /^marketing-messages$/, async () => mautic.marketingMessages(), 'marketer'),
   route('POST', /^workflows\/(\d+)\/status$/, async context => {
     const { enabled } = await readBody(context.request, z.object({ enabled: z.boolean() }));
     if (enabled) await assertDeliveryReady();

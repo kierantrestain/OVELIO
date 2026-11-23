@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
+import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
@@ -25,7 +26,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Token } from '@astryxdesign/core/Token';
 import type {
   Campaign, CampaignArchiveInput, CampaignInput, CampaignLinkStat, CampaignStartResult, MailingList, MediaItem, Page, Point,
-  RunningCampaignStat, Template, TemplateInput, TransactionalEmailInput,
+  PreSendRefresh, RunningCampaignStat, Template, TemplateInput, TransactionalEmailInput,
 } from '@/contracts';
 import { api, date, number, saveFile, upload, useAction, useFields, useResource } from './client';
 import { EmailMetrics } from './overview';
@@ -112,6 +113,31 @@ const statusTone: Record<string, Tone> = {
 function resolveCampaignTab(value?: string): CampaignTab {
   const normalized = value?.trim().toLowerCase();
   return tabs.find(item => item.toLowerCase() === normalized) ?? 'Newsletters';
+}
+
+const refreshTone: Record<PreSendRefresh['state'], { status: 'info' | 'success' | 'warning' | 'error'; label: string }> = {
+  waiting: { status: 'info', label: 'Recipient refresh pending' },
+  refreshing: { status: 'info', label: 'Refreshing recipients' },
+  held: { status: 'warning', label: 'Held for refresh' },
+  ready: { status: 'success', label: 'Recipients refreshed' },
+  late: { status: 'warning', label: 'Sent late' },
+  failed: { status: 'error', label: 'Not sent: refresh failed' },
+  missed: { status: 'warning', label: 'Sent without refresh' },
+};
+
+function refreshSummary(refresh: PreSendRefresh) {
+  if (refresh.message) return refresh.message;
+  if (refresh.state === 'waiting') return `Recipients are refreshed from their segments at ${date(refresh.refreshFrom)}, shortly before the send time, so they match the segments when sending starts.`;
+  if (refresh.state === 'refreshing') return 'Recipients are being refreshed from their segments. Sending starts at the scheduled time once this finishes.';
+  return 'Recipients were refreshed from their segments before sending.';
+}
+
+/** Shows the pre-send refresh of a scheduled newsletter, including why it was held, failed or sent late. */
+function PreSendRefreshNotice({ campaign }: { campaign: Campaign }) {
+  const refresh = campaign.preSendRefresh;
+  if (!refresh || (refresh.state === 'ready' && campaign.status !== 'scheduled')) return null;
+  const tone = refreshTone[refresh.state];
+  return <Banner status={tone.status} title={tone.label} description={refreshSummary(refresh)} />;
 }
 
 function Status({ status }: { status: string }) {
@@ -852,7 +878,15 @@ export function Campaigns({ initialTab }: { initialTab?: string } = {}) {
                   <Text type="supporting" color="secondary">{item.subject}</Text>
                 </span>,
               },
-              { key: 'status', header: 'Status', renderCell: item => <Status status={item.status} /> },
+              {
+                key: 'status',
+                header: 'Status',
+                renderCell: item => <span className="ov-cell">
+                  <Status status={item.status} />
+                  {item.preSendRefresh && !(item.preSendRefresh.state === 'ready' && item.status !== 'scheduled')
+                    ? <Text type="supporting" color="secondary">{refreshTone[item.preSendRefresh.state].label}</Text> : null}
+                </span>,
+              },
               {
                 key: 'tags',
                 header: 'Tags',
@@ -1039,7 +1073,7 @@ function DeliveryDialog({ mode, campaign, onClose, onDone }: {
   const [sendAt, setSendAt] = useState<ISODateTimeString>();
   const copy = {
     test: { title: 'Send test email', endpoint: 'test', notice: 'Test email submitted to delivery.' },
-    schedule: { title: 'Schedule newsletter', endpoint: 'schedule', notice: 'Newsletter scheduled.' },
+    schedule: { title: 'Schedule newsletter', endpoint: 'schedule', notice: 'Newsletter scheduled. Recipients are refreshed again shortly before the send time.' },
     send: { title: campaign.status === 'paused' ? 'Resume sending' : 'Send newsletter', endpoint: 'start', notice: 'Delivery started.' },
     pause: { title: 'Pause sending', endpoint: 'pause', notice: 'Delivery paused.' },
   }[mode];
@@ -1226,6 +1260,8 @@ export function CampaignView({ id }: { id: string }) {
         ) : null}
         {campaign.status === 'scheduled' ? (
           <Button icon={<X size={15} />} label="Cancel schedule" onClick={() => setModal('unschedule')} />
+        ) : campaign.status === 'draft' && campaign.preSendRefresh?.state === 'held' ? (
+          <Button icon={<X size={15} />} label="Cancel held send" onClick={() => setModal('unschedule')} />
         ) : null}
         {campaign.status === 'paused' || campaign.status === 'scheduled' ? (
           <Button icon={<Ban size={15} />} label="Cancel send" onClick={() => setModal('cancel')} />
@@ -1250,6 +1286,7 @@ export function CampaignView({ id }: { id: string }) {
 
     {!campaign ? <Panel><AsyncState loading={resource.loading} error={resource.error} retry={resource.refresh} /></Panel> : <div className="ov-stack">
       <Feedback error={action.error || exporter.error} notice={notice || action.notice || exporter.notice} />
+      <PreSendRefreshNotice campaign={campaign} />
 
       {campaign.status === 'running' ? <Panel
         title="Sending in progress"
@@ -1327,15 +1364,17 @@ export function CampaignView({ id }: { id: string }) {
     {campaign && modal === 'edit' ? <CampaignForm campaign={campaign} onClose={() => setModal(undefined)} onDone={() => finish('Changes saved.')} /> : null}
     {campaign && modal === 'preview' ? <Preview id={campaign.id} onClose={() => setModal(undefined)} /> : null}
     {campaign && modal === 'unschedule' ? <ConfirmDialog
-      title="Cancel schedule"
-      description={`Cancel the scheduled send for "${campaign.name}" and return it to draft?`}
-      actionLabel="Cancel schedule"
+      title={campaign.status === 'draft' ? 'Cancel held send' : 'Cancel schedule'}
+      description={campaign.status === 'draft'
+        ? `"${campaign.name}" is held as a draft while its recipients refresh. Cancel the pending send?`
+        : `Cancel the scheduled send for "${campaign.name}" and return it to draft?`}
+      actionLabel={campaign.status === 'draft' ? 'Cancel held send' : 'Cancel schedule'}
       destructive={false}
       busy={action.busy}
       onClose={() => setModal(undefined)}
       onConfirm={() => void action.run(async () => {
         await api(`${path}/${campaign.id}/pause`, 'POST');
-        finish('Schedule cancelled. The newsletter is now a draft.');
+        finish(campaign.status === 'draft' ? 'Held send cancelled. The newsletter stays a draft.' : 'Schedule cancelled. The newsletter is now a draft.');
       })}
     /> : null}
     {campaign && modal === 'cancel' ? <ConfirmDialog

@@ -1,5 +1,5 @@
 import type {
-  Asset, Category, Company, Contact, ContactDevice, ContactLinkedCompany,
+  Asset, Category, Company, Contact, ContactDevice, DncEntry, ContactLinkedCompany,
   ContactNote, CustomField, CustomFieldObject, DynamicContent, FocusItem,
   FormSubmission, LandingPage, MarketingReport, MarketingReportData,
   PointAction, PointTrigger, PointTriggerEvent, Segment, SegmentFilter, Stage,
@@ -89,6 +89,22 @@ function customFieldValues(all: ApiRecord) {
   return values;
 }
 
+// Mautic names its DNC reasons by code: 1 unsubscribed, 2 bounced, 3 manual (Entity/DoNotContact.php:17-32).
+// A legacy response can key the collection by channel; the row's own channel wins when it has one.
+export function toDncEntries(entries: unknown): DncEntry[] {
+  if (!entries || typeof entries !== 'object') return [];
+  return Object.entries(entries).map(([key, raw]) => {
+    const entry = record(raw);
+    const code = number(entry.reason);
+    return {
+      channel: text(entry.channel) || key,
+      reason: code === 1 ? 'unsubscribed' as const : code === 2 ? 'bounced' as const : 'manual' as const,
+      comment: text(entry.comments),
+      at: date(entry.dateAdded),
+    };
+  });
+}
+
 export function toContact(value: ApiRecord): Contact {
   const fields = record(record(value.fields).all);
   const tags = Object.values(record(value.tags));
@@ -117,6 +133,7 @@ export function toContact(value: ApiRecord): Contact {
       .map(tag => text(record(tag).tag)).filter(Boolean),
     suppressed: Object.entries(entries).some(([channel, entry]) =>
       channel === 'email' || text(record(entry).channel) === 'email'),
+    dnc: toDncEntries(entries),
     customFields: customFieldValues(fields),
   };
 }

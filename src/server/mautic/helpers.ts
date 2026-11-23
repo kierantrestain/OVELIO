@@ -8,12 +8,14 @@ import { flag, number, published, requiredId, service, text, type ApiRecord } fr
 
 export type Config = { url?: string; username?: string; password?: string; fetch?: typeof fetch };
 
-export type SuppressionReason = 'unsubscribe' | 'bounce' | 'complaint' | 'erasure';
+export type SuppressionReason = 'unsubscribe' | 'bounce' | 'complaint' | 'erasure' | 'manual';
 
 export type ContactQuery = {
   page?: number; limit?: number; search?: string; segmentId?: number; tag?: string;
   orderBy?: ContactSortKey; orderByDir?: 'asc' | 'desc';
 };
+
+export type DncChange = { id: number; leadId: number; channel: string; reason: 'unsubscribed' | 'bounced' | 'manual'; comment: string; at: string | null };
 
 export type Where = [column: string, expression: string, value?: string | number];
 
@@ -53,7 +55,10 @@ export const unsubscribeLink = /<a\s+[^>]*href\s*=\s*["']\{unsubscribe_url\}["']
 
 export const unsubscribeFooter = '<p><a href="{unsubscribe_url}">Unsubscribe from marketing emails</a></p>';
 
-export const suppressionCodes = { unsubscribe: 1, bounce: 2, complaint: 3, erasure: 3 };
+export const suppressionCodes = { unsubscribe: 1, bounce: 2, complaint: 3, erasure: 3, manual: 3 };
+
+// Mautic's own reason codes, as a DNC row stores them (Entity/DoNotContact.php:17-32).
+export const dncReasonCodes = { unsubscribed: 1, bounced: 2, manual: 3 } as const;
 
 export function queryPath(path: string, query: URLSearchParams) {
   return `${path}?${query}`;

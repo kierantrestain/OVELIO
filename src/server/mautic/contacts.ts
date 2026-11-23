@@ -10,7 +10,7 @@ import {
   total, type ApiRecord,
 } from './normalize';
 import { day, maxPage, maxContactPage, contactSortColumns, contactSearch, suppressionCodes, queryPath, conditions, dates, sortContacts, requiredText, contactPayload, companyPayload, wantedTags, fieldObject, customValues } from './helpers';
-import type { SuppressionReason, ContactQuery, Where } from './helpers';
+import type { SuppressionReason, ContactQuery, Where, DncChange } from './helpers';
 import type { Client } from './client';
 
 export function contactsApi(client: Client) {
@@ -58,6 +58,20 @@ export function contactsApi(client: Client) {
       return at && label ? [{ id: key, type, typeLabel: types[type] || text(event.eventType) || type, label, at, ...(/^https?:/.test(href) ? { href } : {}) }] : [];
     });
     return { events, types, total: total(response), page, limit };
+  }
+
+  // Writes a DNC row through Mautic's `/dnc/{channel}/add` and checks the contact shows it afterwards.
+  // Mautic keeps an existing "unsubscribed" row as it is (Model/DoNotContact.php:97-111), so the row may keep its older reason.
+  async function addDnc(id: number, channel: string, reason: SuppressionReason, comment = '') {
+    const code = suppressionCodes[reason];
+    if (!code) throw new UpstreamError(service, 400, 'Choose a valid suppression reason.');
+    if (!/^[a-z]{2,20}$/.test(channel)) throw new UpstreamError(service, 400, 'Choose a valid channel.');
+    await request(`/contacts/${requiredId(id)}/dnc/${channel}/add`, 'POST', new URLSearchParams({
+      reason: String(code), comments: comment.slice(0, 500) || `OVELIO suppression: ${reason}`,
+    }));
+    if (!(await contact(id)).dnc?.some(entry => entry.channel === channel)) {
+      throw new UpstreamError(service, 502, 'The audience engine did not confirm the do-not-contact entry.');
+    }
   }
 
   return {
@@ -143,15 +157,51 @@ export function contactsApi(client: Client) {
       await remove(`/contacts/${requiredId(id)}/delete`);
     },
 
-    async setSuppressed(id: number, reason: SuppressionReason) {
-      const code = suppressionCodes[reason];
-      if (!code) throw new UpstreamError(service, 400, 'Choose a valid suppression reason.');
-      await request(`/contacts/${requiredId(id)}/dnc/email/add`, 'POST', new URLSearchParams({
-        reason: String(code), comments: `OVELIO suppression: ${reason}`,
-      }));
-      if (!(await contact(id)).suppressed) {
-        throw new UpstreamError(service, 502, 'The audience engine did not confirm the suppression.');
+    addDnc,
+
+    // The DNC change feed. Mautic's stats API serves `lead_donotcontact` (LeadBundle/EventListener/StatsSubscriber.php:27-37,
+    // route /stats/{table}, Controller/Api/StatsApiController.php:25-38). A new row always takes a higher id and a removal
+    // deletes the row, so rows after the last seen id are exactly the DNC changes. Rows come back under `stats`.
+    async dncChanges(afterId: number, limit: number, direction: 'ASC' | 'DESC' = 'ASC'): Promise<DncChange[]> {
+      const query = conditions(new URLSearchParams({
+        limit: String(Math.min(limit, maxPage)), 'order[0][col]': 'id', 'order[0][dir]': direction,
+      }), [['id', 'gt', afterId], ['channel', 'eq', 'email']]);
+      const response = await request(queryPath('/stats/lead_donotcontact', query));
+      if (!Array.isArray(response.stats)) throw new UpstreamError(service, 502);
+      return response.stats.map(record).flatMap(row => {
+        const id = positiveId(row.id);
+        const leadId = positiveId(row.lead_id);
+        if (!id || !leadId) return [];
+        const code = number(row.reason);
+        return [{
+          id, leadId, channel: text(row.channel) || 'email', comment: text(row.comments), at: date(row.date_added),
+          reason: code === 1 ? 'unsubscribed' as const : code === 2 ? 'bounced' as const : 'manual' as const,
+        }];
+      });
+    },
+
+    async setSuppressed(id: number, reason: SuppressionReason, comment = '') {
+      await addDnc(id, 'email', reason, comment);
+    },
+
+    // Mautic removes the first row it finds for the channel (Model/DoNotContact.php:32-62) and answers with a recordFound flag.
+    async removeDnc(id: number, channel: string) {
+      if (!/^[a-z]{2,20}$/.test(channel)) throw new UpstreamError(service, 400, 'Choose a valid channel.');
+      await request(`/contacts/${requiredId(id)}/dnc/${channel}/remove`, 'POST', new URLSearchParams());
+      if ((await contact(id)).dnc?.some(entry => entry.channel === channel)) {
+        throw new UpstreamError(service, 502, 'The audience engine did not confirm the removal.');
       }
+    },
+
+    // One page of contacts that carry an email DNC row, after a contact id. Mautic has no "DNC changed since" query,
+    // so the reconciliation sweep walks this set in id order (search command: LeadRepository.php:951-966).
+    async dncContacts(channel: string, afterId: number, limit: number): Promise<Contact[]> {
+      if (!/^[a-z]{2,20}$/.test(channel)) throw new UpstreamError(service, 400, 'Choose a valid channel.');
+      const query = conditions(new URLSearchParams({
+        search: `dnc:${channel}`, orderBy: 'l.id', orderByDir: 'ASC', limit: String(Math.min(limit, maxPage)),
+      }), [['l.id', 'gt', afterId]]);
+      const response = await request(queryPath('/contacts', query));
+      return items(response.contacts).map(toContact).sort((a, b) => a.id - b.id);
     },
 
     async adjustPoints(contactId: number, delta: number): Promise<Contact> {
