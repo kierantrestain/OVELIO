@@ -1,7 +1,7 @@
 // Module-level helpers shared by the Mautic adapter modules.
 import type {
   CompanyInput, Contact, ContactInput, CustomField, CustomFieldObject, DateRange, FocusItemInput, JourneyEmail,
-  SegmentFilter,
+  ContactSortKey, SegmentFilter,
 } from '../../contracts';
 import { UpstreamError } from '../upstream';
 import { flag, number, published, requiredId, service, text, type ApiRecord } from './normalize';
@@ -10,13 +10,44 @@ export type Config = { url?: string; username?: string; password?: string; fetch
 
 export type SuppressionReason = 'unsubscribe' | 'bounce' | 'complaint' | 'erasure';
 
-export type ContactQuery = { page?: number; limit?: number; search?: string; segmentId?: number; tag?: string };
+export type ContactQuery = {
+  page?: number; limit?: number; search?: string; segmentId?: number; tag?: string;
+  orderBy?: ContactSortKey; orderByDir?: 'asc' | 'desc';
+};
 
 export type Where = [column: string, expression: string, value?: string | number];
 
 export const day = 86400000;
 
 export const maxPage = 100;
+
+// Largest contact page the console asks for; larger pages are fetched from the engine in chunks of maxPage.
+export const maxContactPage = 500;
+
+// Sortable contact columns, as Mautic's `orderBy` names them (LeadRepository.php:1064 uses `l.` columns).
+export const contactSortColumns: Record<ContactSortKey, string> = {
+  createdAt: 'l.date_added', updatedAt: 'l.date_modified', lastActive: 'l.last_active', email: 'l.email',
+  firstName: 'l.firstname', lastName: 'l.lastname', company: 'l.company', city: 'l.city', country: 'l.country',
+  position: 'l.position', points: 'l.points', id: 'l.id',
+};
+
+const searchCommandName = /(?:^|\s)!?([a-z][a-z0-9_]*(?::[a-z]+)?):/i;
+
+// True when the text uses Mautic's `command:value` grammar rather than being plain words.
+export function hasSearchCommand(search: string) {
+  return searchCommandName.test(search);
+}
+
+// Cleans a contact search for the engine's `search=` parameter. Command searches pass through; plain words are quoted as one phrase.
+export function contactSearch(raw: string | undefined) {
+  const text = (raw ?? '').replace(/[<>\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (!text) return '';
+  if (hasSearchCommand(text)) {
+    if ((text.match(/"/g) ?? []).length % 2) throw new UpstreamError(service, 400, 'Close the quotation marks in the search.');
+    return text;
+  }
+  return `"${text.replace(/"/g, ' ').trim()}"`;
+}
 
 export const unsubscribeLink = /<a\s+[^>]*href\s*=\s*["']\{unsubscribe_url\}["']/i;
 

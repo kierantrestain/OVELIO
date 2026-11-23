@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { maxWorkflowSteps } from '@/contracts';
+import { maxWorkflowNodes, maxWorkflowSteps } from '@/contracts';
 import { recordActivity } from '@/server/activity';
 import { assertDeliveryReady, mailContent } from '@/server/delivery';
 import { json, readBody } from '@/server/http';
@@ -20,13 +20,52 @@ const workflowStep = z.object({
   stageId: numberId.optional(),
 });
 
+const nodeId = z.string().regex(/^(\d{1,10}|new[A-Za-z0-9_-]{0,40})$/, 'Use a saved step id or a temporary id starting with "new".');
+const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Write times as HH:MM.');
+
+// AUT-02: one entry per Mautic event; trigger fields mirror Event.php's trigger_* columns.
+const workflowSchedule = z.object({
+  mode: z.enum(['immediate', 'interval', 'date', 'optimized']).nullable(),
+  interval: z.number().int().min(0).max(1_000_000),
+  unit: z.enum(['i', 'h', 'd', 'm', 'y']).nullable(),
+  date: z.string().trim().max(40).nullable(),
+  hour: clockTime.nullable(),
+  restrictedStartHour: clockTime.nullable(),
+  restrictedStopHour: clockTime.nullable(),
+  restrictedDaysOfWeek: z.array(z.number().int().min(-1).max(6)).max(8),
+  window: z.number().int().min(0).max(1_000_000).nullable(),
+});
+
+const workflowNode = z.object({
+  id: nodeId,
+  parentId: nodeId.nullable(),
+  branch: z.enum(['yes', 'no']).nullable(),
+  eventType: z.enum(['action', 'decision', 'condition']),
+  type: z.string().trim().min(1).max(50),
+  name: z.string().trim().min(1).max(191),
+  description: z.string().max(1000).default(''),
+  properties: z.record(z.string(), z.unknown()),
+  schedule: workflowSchedule,
+  position: z.object({ x: z.number(), y: z.number() }).optional(),
+});
+
+const workflowGraph = z.object({
+  segmentIds: z.array(numberId).max(20),
+  formIds: z.array(numberId).max(20),
+  allowRestart: z.boolean().default(false),
+  nodes: z.array(workflowNode).min(1).max(maxWorkflowNodes),
+});
+
 const workflow = z.object({
   name, description,
   segmentId: z.number().int().min(0).max(2_147_483_647).default(0),
   formId: numberId.optional(),
-  steps: z.array(workflowStep).min(1).max(maxWorkflowSteps),
-}).refine(input => input.segmentId > 0 || (input.formId ?? 0) > 0, 'Select a trigger segment or lead form.')
-  .refine(input => !input.steps[0].condition, 'The first step starts when a contact triggers the workflow.');
+  steps: z.array(workflowStep).max(maxWorkflowSteps).default([]),
+  graph: workflowGraph.optional(),
+  removedNodeIds: z.array(z.string().regex(/^\d{1,10}$/)).max(maxWorkflowNodes).optional(),
+}).refine(input => input.graph || input.segmentId > 0 || (input.formId ?? 0) > 0, 'Select a trigger segment or lead form.')
+  .refine(input => input.graph || input.steps.length > 0, 'Add at least one workflow step.')
+  .refine(input => input.graph || !input.steps[0]?.condition, 'The first step starts when a contact triggers the workflow.');
 
 const shortText = z.string().max(500);
 const formField = z.object({

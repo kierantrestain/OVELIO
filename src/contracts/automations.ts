@@ -314,16 +314,472 @@ export type WorkflowStep = {
 export type WorkflowInput = {
   name: string;
   description?: string;
+  /** Linear step editor fields. Ignored when `graph` is sent. */
   segmentId: number;
   formId?: number;
   steps: WorkflowStep[];
+  /** AUT-02: the full branching graph. When present it replaces `segmentId`, `formId` and `steps`. */
+  graph?: WorkflowGraph;
+  /** AUT-02: saved step ids the editor deleted on purpose. Any other saved step missing from `graph` is refused. */
+  removedNodeIds?: string[];
 };
 
 export type Workflow = WorkflowInput & {
   id: number;
   enabled: boolean;
   editable?: boolean;
+  /** Why the canvas cannot save this automation, when `editable` is false. */
+  readOnlyReason?: string;
 };
+
+/* ── AUT-02 / AUT-04: branching workflow graph ─────────────────────────────── */
+// Mautic 7.2.2 stores a campaign as events with parent_id + decision_path ('yes'|'no') and a canvas
+// (CampaignBundle/Model/CampaignModel.php:277-335, Entity/Event.php:54-70). The graph below mirrors that
+// one-to-one so any campaign the engine holds opens, edits and saves without losing events.
+
+/** Most steps one workflow graph may hold. */
+export const maxWorkflowNodes = 100;
+
+export type WorkflowEventType = 'action' | 'decision' | 'condition';
+export type WorkflowBranch = 'yes' | 'no';
+export const workflowIntervalUnits = ['i', 'h', 'd', 'm', 'y'] as const;
+export type WorkflowIntervalUnit = typeof workflowIntervalUnits[number];
+export type WorkflowTriggerMode = 'immediate' | 'interval' | 'date' | 'optimized';
+
+/** The engine's per-event trigger columns (Event.php trigger_* fields), kept as stored. */
+export type WorkflowSchedule = {
+  /** null means "run when reached"; decisions always have null. */
+  mode: WorkflowTriggerMode | null;
+  interval: number;
+  unit: WorkflowIntervalUnit | null;
+  /** Fixed date for mode 'date', as the engine returned it (ISO 8601). */
+  date: string | null;
+  /** HH:MM values. */
+  hour: string | null;
+  restrictedStartHour: string | null;
+  restrictedStopHour: string | null;
+  /** 0 = Sunday ... 6 = Saturday, -1 = weekdays. */
+  restrictedDaysOfWeek: number[];
+  window: number | null;
+};
+
+export type WorkflowNode = {
+  /** The engine event id ("18") or a temporary id starting with "new" for a step not saved yet. */
+  id: string;
+  /** null when the step starts from the workflow's sources. */
+  parentId: string | null;
+  /** Set when the parent is a decision or condition: which answer leads here. */
+  branch: WorkflowBranch | null;
+  eventType: WorkflowEventType;
+  /** The engine event type, such as email.send or email.open. Unknown types are kept as advanced steps. */
+  type: string;
+  name: string;
+  description: string;
+  /** Exactly the properties the engine stores for this step. */
+  properties: Record<string, unknown>;
+  schedule: WorkflowSchedule;
+  /** Canvas position, written by the auto layout. */
+  position?: { x: number; y: number };
+};
+
+export type WorkflowGraph = {
+  segmentIds: number[];
+  formIds: number[];
+  /** Re-entry flag, kept as stored (AUT-11 adds a control). */
+  allowRestart: boolean;
+  nodes: WorkflowNode[];
+};
+
+export type WorkflowFieldKind = 'email' | 'stage' | 'segments' | 'tags' | 'integer';
+
+export type WorkflowFieldSpec = {
+  /** The properties key the value is stored under. */
+  key: string;
+  label: string;
+  kind: WorkflowFieldKind;
+  required?: boolean;
+  hint?: string;
+};
+
+/** One catalogue entry per engine event type. Adding a type is adding an entry here. */
+export type WorkflowNodeSpec = {
+  type: string;
+  eventType: WorkflowEventType;
+  label: string;
+  description: string;
+  fields: WorkflowFieldSpec[];
+  /** Properties every new step of this type starts with. */
+  defaults: Record<string, unknown>;
+  /** At least one of these properties must hold a value. */
+  needsOneOf?: string[];
+  /** The parent step must be one of these types (the engine's connection restrictions). */
+  parentTypes?: string[];
+  /** Decisions: the verb in "If not opened within 3 days". */
+  verb?: string;
+};
+
+export const workflowNodeSpecs: WorkflowNodeSpec[] = [
+  { type: 'email.send', eventType: 'action', label: 'Send email', description: 'Send a published journey email.',
+    fields: [{ key: 'email', label: 'Email', kind: 'email', required: true }], defaults: { email: 0, email_type: 'marketing' } },
+  { type: 'lead.changetags', eventType: 'action', label: 'Change tags', description: 'Add or remove contact tags.',
+    fields: [{ key: 'add_tags', label: 'Add tags', kind: 'tags' }, { key: 'remove_tags', label: 'Remove tags', kind: 'tags' }],
+    defaults: { add_tags: [], remove_tags: [] }, needsOneOf: ['add_tags', 'remove_tags'] },
+  { type: 'lead.changepoints', eventType: 'action', label: 'Change points', description: 'Add or subtract contact points.',
+    fields: [{ key: 'points', label: 'Points', kind: 'integer', required: true, hint: 'Use a negative number to subtract.' }],
+    defaults: { points: 10 } },
+  { type: 'lead.changelist', eventType: 'action', label: 'Change segments', description: 'Add the contact to or remove them from segments.',
+    fields: [{ key: 'addToLists', label: 'Add to segments', kind: 'segments' }, { key: 'removeFromLists', label: 'Remove from segments', kind: 'segments' }],
+    defaults: { addToLists: [], removeFromLists: [] }, needsOneOf: ['addToLists', 'removeFromLists'] },
+  { type: 'stage.change', eventType: 'action', label: 'Change stage', description: 'Move the contact to a lifecycle stage.',
+    fields: [{ key: 'stage', label: 'Stage', kind: 'stage', required: true }], defaults: { stage: 0 } },
+  { type: 'email.open', eventType: 'decision', label: 'Opened email?', description: 'Wait for the contact to open the email before this step.',
+    fields: [], defaults: {}, parentTypes: ['email.send'], verb: 'opened' },
+  { type: 'email.click', eventType: 'decision', label: 'Clicked email?', description: 'Wait for the contact to click a link in the email before this step.',
+    fields: [], defaults: {}, parentTypes: ['email.send'], verb: 'clicked' },
+];
+
+const nodeSpecByType = new Map(workflowNodeSpecs.map(spec => [spec.type, spec]));
+
+export function workflowNodeSpec(type: string): WorkflowNodeSpec | undefined {
+  return nodeSpecByType.get(type);
+}
+
+export function emptySchedule(mode: WorkflowTriggerMode | null = 'immediate'): WorkflowSchedule {
+  return {
+    mode, interval: 0, unit: null, date: null, hour: null,
+    restrictedStartHour: null, restrictedStopHour: null, restrictedDaysOfWeek: [], window: null,
+  };
+}
+
+export function intervalSchedule(interval: number, unit: WorkflowIntervalUnit): WorkflowSchedule {
+  return { ...emptySchedule('interval'), interval, unit };
+}
+
+/** Workflow steps a node branches into: decisions and conditions answer yes or no. */
+export function branches(node: Pick<WorkflowNode, 'eventType'>) {
+  return node.eventType === 'decision' || node.eventType === 'condition';
+}
+
+export function childNodes(graph: WorkflowGraph, parentId: string | null, branch?: WorkflowBranch | null) {
+  return graph.nodes.filter(node => node.parentId === parentId && (branch === undefined || node.branch === branch));
+}
+
+/** The node and every step below it. */
+export function subtreeIds(graph: WorkflowGraph, id: string) {
+  const ids = new Set([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const node of graph.nodes) {
+      if (node.parentId !== null && ids.has(node.parentId) && !ids.has(node.id)) {
+        ids.add(node.id);
+        grew = true;
+      }
+    }
+  }
+  return ids;
+}
+
+const unitMinutes: Record<WorkflowIntervalUnit, number> = { i: 1, h: 60, d: 1440, m: 43200, y: 525600 };
+const unitNames: Record<WorkflowIntervalUnit, [string, string]> = {
+  i: ['minute', 'minutes'], h: ['hour', 'hours'], d: ['day', 'days'], m: ['month', 'months'], y: ['year', 'years'],
+};
+
+export function intervalLabel(interval: number, unit: WorkflowIntervalUnit) {
+  // Minute and hour waits from the step editor read better as hours or days when they divide evenly.
+  if (unit === 'i' && interval >= 60 && interval % 60 === 0) return intervalLabel(interval / 60, 'h');
+  if (unit === 'h' && interval >= 24 && interval % 24 === 0) return intervalLabel(interval / 24, 'd');
+  return `${interval} ${unitNames[unit][interval === 1 ? 0 : 1]}`;
+}
+
+function dateLabel(value: string) {
+  const time = Date.parse(value);
+  return Number.isFinite(time)
+    ? new Date(time).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC'
+    : value;
+}
+
+export function scheduleLabel(schedule: WorkflowSchedule) {
+  const window = schedule.restrictedStartHour && schedule.restrictedStopHour
+    ? ` between ${schedule.restrictedStartHour} and ${schedule.restrictedStopHour}` : '';
+  const at = schedule.hour ? ` at ${schedule.hour}` : '';
+  switch (schedule.mode) {
+    case 'interval':
+      return schedule.unit && schedule.interval > 0 ? `Wait ${intervalLabel(schedule.interval, schedule.unit)}${at}${window}` : `Immediately${window}`;
+    case 'date':
+      return schedule.date ? `On ${dateLabel(schedule.date)}` : 'On a date';
+    case 'optimized':
+      return 'At the best time for each contact';
+    default:
+      return `Immediately${window}`;
+  }
+}
+
+export type DecisionWait =
+  | { kind: 'none' }
+  | { kind: 'immediate' }
+  | { kind: 'interval'; interval: number; unit: WorkflowIntervalUnit }
+  | { kind: 'date'; date: string };
+
+/**
+ * AUT-04: how long a decision waits before contacts who did not act take the no path.
+ * Mautic stores the wait on the decision's no-path children: InactiveHelper::getEarliestInactiveDate takes the
+ * earliest execution date of those children, counted from when the decision's parent ran
+ * (CampaignBundle/Executioner/Helper/InactiveHelper.php:121-147).
+ */
+export function decisionWait(graph: WorkflowGraph, decisionId: string): DecisionWait {
+  let best: DecisionWait = { kind: 'none' };
+  let bestMinutes = Infinity;
+  for (const child of childNodes(graph, decisionId, 'no')) {
+    const { mode, interval, unit, date } = child.schedule;
+    if (mode === 'interval' && unit && interval > 0) {
+      const minutes = interval * unitMinutes[unit];
+      if (minutes < bestMinutes) {
+        bestMinutes = minutes;
+        best = { kind: 'interval', interval, unit };
+      }
+    } else if (mode === 'date' && date) {
+      if (best.kind === 'none') best = { kind: 'date', date };
+    } else {
+      bestMinutes = 0;
+      best = { kind: 'immediate' };
+    }
+  }
+  return best;
+}
+
+/** "If not opened within 3 days", or null when the decision has no no path. */
+export function decisionWaitLabel(graph: WorkflowGraph, decision: WorkflowNode) {
+  const verb = workflowNodeSpec(decision.type)?.verb ?? 'done';
+  const wait = decisionWait(graph, decision.id);
+  switch (wait.kind) {
+    case 'interval':
+      return `If not ${verb} within ${intervalLabel(wait.interval, wait.unit)}`;
+    case 'date':
+      return `If not ${verb} by ${dateLabel(wait.date)}`;
+    case 'immediate':
+      return `If not ${verb} by the next engine run`;
+    default:
+      return null;
+  }
+}
+
+/** AUT-04: set the decision's wait on every step of its no path. */
+export function setDecisionWait(graph: WorkflowGraph, decisionId: string, interval: number, unit: WorkflowIntervalUnit): WorkflowGraph {
+  return {
+    ...graph,
+    nodes: graph.nodes.map(node => node.parentId === decisionId && node.branch === 'no'
+      ? { ...node, schedule: { ...node.schedule, mode: 'interval', interval, unit, date: null } }
+      : node),
+  };
+}
+
+export type WorkflowIssue = { level: 'error' | 'warning'; message: string; nodeId?: string };
+
+const hourPattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function hasValue(value: unknown) {
+  if (Array.isArray(value)) return value.length > 0;
+  if (value && typeof value === 'object') return Object.keys(value).length > 0;
+  if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+  return typeof value === 'string' ? value.trim().length > 0 : false;
+}
+
+function scheduleIssues(node: WorkflowNode): string[] {
+  const { mode, interval, unit, date, hour, restrictedStartHour, restrictedStopHour, restrictedDaysOfWeek } = node.schedule;
+  const problems: string[] = [];
+  if (mode === 'interval') {
+    if (!Number.isSafeInteger(interval) || interval < 0) problems.push('Set the wait as a whole number.');
+    if (!unit) problems.push('Choose minutes, hours, days, months or years for the wait.');
+  }
+  if (mode === 'date' && (!date || !Number.isFinite(Date.parse(date)))) problems.push('Choose the date this step runs.');
+  for (const value of [hour, restrictedStartHour, restrictedStopHour]) {
+    if (value !== null && !hourPattern.test(value)) problems.push('Write times as HH:MM, for example 09:00.');
+  }
+  if (Boolean(restrictedStartHour) !== Boolean(restrictedStopHour)) problems.push('Set both the start and the end of the send window.');
+  if (restrictedDaysOfWeek.some(day => !Number.isInteger(day) || day < -1 || day > 6)) problems.push('Choose valid days of the week.');
+  return problems;
+}
+
+/**
+ * AUT-02: structural rules the engine needs, plus the engine editor's own connection rules
+ * (CampaignBundle/Assets/js/campaign.js:881-960) and AUT-04's no-path wait (Form/Type/EventType.php:64-72).
+ */
+export function validateWorkflowGraph(graph: WorkflowGraph): WorkflowIssue[] {
+  const issues: WorkflowIssue[] = [];
+  const error = (message: string, nodeId?: string) => issues.push({ level: 'error', message, nodeId });
+  const warn = (message: string, nodeId?: string) => issues.push({ level: 'warning', message, nodeId });
+
+  if (!graph.segmentIds.length && !graph.formIds.length) error('Choose at least one segment or lead form to start the workflow.');
+  if (!graph.nodes.length) error('Add at least one step.');
+  if (graph.nodes.length > maxWorkflowNodes) error(`Use at most ${maxWorkflowNodes} steps in one workflow.`);
+
+  const byId = new Map<string, WorkflowNode>();
+  for (const node of graph.nodes) {
+    if (byId.has(node.id)) error('Two steps share the same id.', node.id);
+    byId.set(node.id, node);
+  }
+
+  for (const node of graph.nodes) {
+    const parent = node.parentId === null ? undefined : byId.get(node.parentId);
+    if (node.parentId !== null && !parent) {
+      error('This step is not connected to the workflow.', node.id);
+      continue;
+    }
+    // Every step must lead back to the sources without a loop.
+    const seen = new Set([node.id]);
+    let cursor = parent;
+    while (cursor) {
+      if (seen.has(cursor.id)) {
+        error('These steps form a loop.', node.id);
+        break;
+      }
+      seen.add(cursor.id);
+      cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
+    }
+
+    if (parent && branches(parent)) {
+      if (node.branch !== 'yes' && node.branch !== 'no') error('Choose the yes or the no path for this step.', node.id);
+    } else if (node.branch !== null) {
+      error('Only a decision or a condition has yes and no paths.', node.id);
+    }
+
+    const spec = workflowNodeSpec(node.type);
+    if (spec && spec.eventType !== node.eventType) error(`${spec.label} must be a ${spec.eventType}.`, node.id);
+    if (spec?.parentTypes && (!parent || !spec.parentTypes.includes(parent.type))) {
+      error(`${spec.label} must come straight after a Send email step.`, node.id);
+    }
+    if (node.eventType === 'decision' && parent?.eventType === 'decision') {
+      warn('The engine editor does not place a decision straight after another decision.', node.id);
+    }
+    if (!node.name.trim()) error('Give this step a name.', node.id);
+
+    if (spec) {
+      for (const field of spec.fields) {
+        if (field.required && !hasValue(node.properties[field.key])) error(`${spec.label}: set ${field.label.toLowerCase()}.`, node.id);
+      }
+      if (spec.needsOneOf && !spec.needsOneOf.some(key => hasValue(node.properties[key]))) {
+        error(`${spec.label}: add or remove at least one item.`, node.id);
+      }
+    }
+    if (node.type === 'lead.changetags') {
+      const tags = [node.properties.add_tags, node.properties.remove_tags].flatMap(value => Array.isArray(value) ? value : []);
+      if (tags.some(tag => typeof tag === 'string' && tag.trim().startsWith('-'))) error('A tag cannot start with a hyphen.', node.id);
+    }
+
+    if (node.eventType !== 'decision') for (const problem of scheduleIssues(node)) error(problem, node.id);
+
+    // AUT-04: an action on a decision's no path needs a wait, as in the engine's own editor (EventType.php:64-72).
+    if (parent?.eventType === 'decision' && node.branch === 'no') {
+      const waits = (node.schedule.mode === 'interval' && node.schedule.interval > 0) || node.schedule.mode === 'date';
+      if (!waits && node.eventType === 'action') {
+        error(`Set how long to wait for “${parent.name}” before contacts take the no path.`, node.id);
+      } else if (!waits) {
+        warn('Contacts take this no path at the next engine run because it has no wait.', node.id);
+      }
+    }
+
+    if (node.type === 'email.send') {
+      const emailId = node.properties.email;
+      let ancestor = parent;
+      const visited = new Set<string>();
+      while (ancestor && !visited.has(ancestor.id)) {
+        visited.add(ancestor.id);
+        if (ancestor.type === 'email.send' && ancestor.properties.email === emailId && hasValue(emailId)) {
+          error('This email is already sent earlier on this path. Each marketing email is sent once per contact.', node.id);
+          break;
+        }
+        ancestor = ancestor.parentId === null ? undefined : byId.get(ancestor.parentId);
+      }
+    }
+  }
+
+  for (const node of graph.nodes) {
+    if (node.eventType === 'decision' && !childNodes(graph, node.id, 'no').length) {
+      warn(`Contacts who never act wait at “${node.name}” with no end. Add a step on the no path to move them on.`, node.id);
+    }
+  }
+  return issues;
+}
+
+/* ── Auto layout: top-down tree, yes paths left of no paths ─────────────────── */
+
+export const workflowLayout = { columnWidth: 248, rowHeight: 168, originX: 24, originY: 24 } as const;
+
+export type WorkflowLayout = {
+  /** Column centre (in columns) and depth (row) per node id; the sources sit at depth 0. */
+  positions: Map<string, { column: number; depth: number }>;
+  entry: { column: number; depth: 0 };
+  columns: number;
+  rows: number;
+};
+
+type Slot = { branch: WorkflowBranch | null; children: WorkflowNode[] };
+
+function slotsOf(graph: WorkflowGraph, node: WorkflowNode | null): Slot[] {
+  const id = node ? node.id : null;
+  if (node && branches(node)) {
+    return (['yes', 'no'] as const).map(branch => ({ branch, children: childNodes(graph, id, branch) }));
+  }
+  return [{ branch: null, children: childNodes(graph, id) }];
+}
+
+export function layoutWorkflowGraph(graph: WorkflowGraph): WorkflowLayout {
+  const positions = new Map<string, { column: number; depth: number }>();
+  const widths = new Map<string | null, number>();
+  const visiting = new Set<string | null>();
+  let rows = 1;
+
+  function width(node: WorkflowNode | null): number {
+    const key = node ? node.id : null;
+    const known = widths.get(key);
+    if (known !== undefined) return known;
+    if (visiting.has(key)) return 1;
+    visiting.add(key);
+    const total = slotsOf(graph, node).reduce((sum, slot) => sum + Math.max(1, slot.children.reduce((acc, child) => acc + width(child), 0)), 0);
+    visiting.delete(key);
+    widths.set(key, Math.max(1, total));
+    return Math.max(1, total);
+  }
+
+  function place(node: WorkflowNode | null, left: number, depth: number) {
+    const own = width(node);
+    if (node) {
+      if (positions.has(node.id)) return;
+      positions.set(node.id, { column: left + own / 2, depth });
+    }
+    rows = Math.max(rows, depth + 1);
+    let cursor = left;
+    for (const slot of slotsOf(graph, node)) {
+      const slotWidth = Math.max(1, slot.children.reduce((acc, child) => acc + width(child), 0));
+      let childLeft = cursor + (slotWidth - slot.children.reduce((acc, child) => acc + width(child), 0)) / 2;
+      for (const child of slot.children) {
+        place(child, childLeft, depth + 1);
+        childLeft += width(child);
+      }
+      cursor += slotWidth;
+    }
+  }
+
+  place(null, 0, 0);
+  const columns = width(null);
+  // Steps outside the tree (invalid graphs) still get a place so they can be fixed.
+  for (const node of graph.nodes) {
+    if (!positions.has(node.id)) {
+      positions.set(node.id, { column: columns + 0.5, depth: rows });
+      rows += 1;
+    }
+  }
+  return { positions, entry: { column: columns / 2, depth: 0 }, columns: Math.max(columns, ...[...positions.values()].map(p => Math.ceil(p.column + 0.5))), rows };
+}
+
+/** Pixel position of a node's top-left corner for a given card width. */
+export function layoutPoint(position: { column: number; depth: number }, cardWidth = 200) {
+  return {
+    x: Math.round(workflowLayout.originX + position.column * workflowLayout.columnWidth - cardWidth / 2),
+    y: Math.round(workflowLayout.originY + position.depth * workflowLayout.rowHeight),
+  };
+}
 
 export type WorkflowContact = {
   contactId: number;

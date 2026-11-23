@@ -1,9 +1,18 @@
-import type { JourneyEmail, JourneyEmailInput, Workflow, WorkflowContact, WorkflowInput } from '../../contracts';
+import { validateWorkflowGraph } from '../../contracts';
+import type { JourneyEmail, JourneyEmailInput, Workflow, WorkflowContact, WorkflowGraph, WorkflowInput } from '../../contracts';
 import { UpstreamError } from '../upstream';
-import { flag, published, record, requiredId, service, toWorkflowContact, type ApiRecord } from './normalize';
-import { managedSteps, toWorkflow, verifySavedWorkflow, workflowPayload } from './workflows';
+import { flag, positiveId, published, record, requiredId, service, toWorkflowContact, type ApiRecord } from './normalize';
+import { campaignGraph, graphPayload, linearChain, stepsGraph, toWorkflow, verifySavedGraph } from './workflows';
 import { allowedEmail, withUnsubscribeLink, toEmail } from './helpers';
 import type { Client } from './client';
+
+function asNewGraph(graph: WorkflowGraph): WorkflowGraph {
+  const rename = (nodeId: string) => /^\d+$/.test(nodeId) ? `new${nodeId}` : nodeId;
+  return {
+    ...graph,
+    nodes: graph.nodes.map(node => ({ ...node, id: rename(node.id), parentId: node.parentId === null ? null : rename(node.parentId) })),
+  };
+}
 
 export function campaignsApi(client: Client) {
   const { request, list, get, write, remove, segment } = client;
@@ -59,18 +68,44 @@ export function campaignsApi(client: Client) {
     },
 
     async createWorkflow(input: WorkflowInput) {
-      const dto = await write('/campaigns/new', 'campaign', 'POST', workflowPayload(input));
-      return verifySavedWorkflow(dto, input);
+      // A new campaign has no saved events, so every step goes in with a temporary id (CampaignModel.php:226-234).
+      const graph = input.graph ? asNewGraph(input.graph) : stepsGraph(input);
+      const { payload, expected } = graphPayload(graph, { name: input.name, description: input.description });
+      const dto = await write('/campaigns/new', 'campaign', 'POST', payload);
+      return verifySavedGraph(dto, expected);
     },
 
     async updateWorkflow(id: number, input: WorkflowInput) {
       const previous = await get('/campaigns', 'campaign', id);
-      const steps = managedSteps(previous);
-      if (!steps.length || flag(previous.isPublished)) {
+      const parsed = campaignGraph(previous);
+      if (parsed.problem || !parsed.graph.nodes.length) {
+        throw new UpstreamError(service, 409, parsed.problem ?? 'This automation cannot be changed from the console.');
+      }
+      if (flag(previous.isPublished)) {
         throw new UpstreamError(service, 409, 'Pause an editable automation before changing its steps.');
       }
-      const dto = await write(`/campaigns/${requiredId(id)}/edit`, 'campaign', 'PUT', workflowPayload(input, steps));
-      return verifySavedWorkflow(dto, input);
+      let graph: WorkflowGraph;
+      if (input.graph) {
+        // AUT-02: a PUT deletes every saved step it leaves out (CampaignApiController.php:203-219), so only steps the
+        // editor deleted on purpose may be missing, and every saved id it sends must still exist.
+        const savedIds = new Set(parsed.graph.nodes.map(node => node.id));
+        const sentIds = new Set(input.graph.nodes.filter(node => /^\d+$/.test(node.id)).map(node => node.id));
+        const removed = new Set(input.removedNodeIds ?? []);
+        const dropped = [...savedIds].filter(savedId => !sentIds.has(savedId) && !removed.has(savedId));
+        const unknown = [...sentIds].filter(sentId => !savedIds.has(sentId));
+        if (dropped.length || unknown.length) {
+          throw new UpstreamError(service, 409, 'This automation changed since you opened it. Reload it and try again.');
+        }
+        graph = input.graph;
+      } else {
+        if (!linearChain(parsed.graph)) {
+          throw new UpstreamError(service, 409, 'This automation has branches. Open it in the canvas editor to change it.');
+        }
+        graph = stepsGraph(input, parsed.graph);
+      }
+      const { payload, expected } = graphPayload(graph, { name: input.name, description: input.description, retiredIds: parsed.retiredIds });
+      const dto = await write(`/campaigns/${requiredId(id)}/edit`, 'campaign', 'PUT', payload);
+      return verifySavedGraph(dto, expected);
     },
 
     async deleteWorkflow(id: number): Promise<void> {
@@ -87,14 +122,19 @@ export function campaignsApi(client: Client) {
     async setWorkflowEnabled(id: number, enabled: boolean) {
       const current = await get('/campaigns', 'campaign', id);
       if (enabled) {
-        const workflow = toWorkflow(current);
-        if (!workflow.editable) throw new UpstreamError(service, 409, 'This automation cannot be activated from the step editor.');
-        const emailSteps = workflow.steps.filter(step => (step.kind ?? 'email') === 'email');
-        const [source, ...emails] = await Promise.all([
-          workflow.segmentId > 0 ? segment(workflow.segmentId) : Promise.resolve(null),
-          ...emailSteps.map(step => get('/emails', 'email', step.emailId)),
+        const { graph, problem } = campaignGraph(current);
+        if (problem || !graph.nodes.length) throw new UpstreamError(service, 409, 'This automation cannot be activated from the console.');
+        const blocking = validateWorkflowGraph(graph).find(issue => issue.level === 'error');
+        if (blocking) throw new UpstreamError(service, 409, `Fix the workflow before activating it: ${blocking.message}`);
+        const emailIds = [...new Set(graph.nodes
+          .filter(node => node.type === 'email.send')
+          .map(node => positiveId(node.properties.email))
+          .filter((emailId): emailId is number => emailId !== null))];
+        const [sources, emails] = await Promise.all([
+          Promise.all(graph.segmentIds.map(segmentId => segment(segmentId))),
+          Promise.all(emailIds.map(emailId => get('/emails', 'email', emailId))),
         ]);
-        if ((source && !source.published) || emails.some(email => !allowedEmail(email) || !published(email))) {
+        if (sources.some(source => !source.published) || emails.some(email => !allowedEmail(email) || !published(email))) {
           throw new UpstreamError(service, 409, 'Publish the audience segment and use published emails with an unsubscribe link.');
         }
       }

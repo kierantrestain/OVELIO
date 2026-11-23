@@ -5,6 +5,9 @@ import { AppError } from '@/server/config';
 import { recordActivity } from '@/server/activity';
 import { json, readBody } from '@/server/http';
 import { umami } from '@/server/umami';
+import { buildSnippet, getSnippetPreferences, saveSnippetPreferences, snippetOptionsSchema } from '@/server/analytics-snippet';
+import { channelReport, channelRulesSchema, classifyVisit, loadChannelRules, saveChannelRules } from '@/server/analytics-channels';
+import { apiKeyInput, createApiKey, listApiKeys, revokeApiKey } from '@/server/analytics-events';
 import { name, description, timestamp, siteId, requiredUrl, reportDate, route, page, date } from './shared';
 import type { Context, Entry } from './shared';
 
@@ -238,8 +241,31 @@ export const analyticsEndpoints: Entry[] = [
     currency: context.query.has('currency')
       ? z.string().trim().regex(/^[A-Za-z]{3}$/).transform(v => v.toUpperCase()).parse(context.query.get('currency'))
       : undefined,
+    lookbackDays: context.query.has('lookbackDays') ? z.coerce.number().int().min(0).max(90).parse(context.query.get('lookbackDays')) : undefined,
     filters: reportFilters(context.query),
   })),
+  route('GET', /^websites\/([0-9a-f-]+)\/revenue\/utm$/i, async context => {
+    const currency = z.string().trim().regex(/^[A-Z]{3}$/).parse((context.query.get('currency') ?? 'USD').toUpperCase());
+    const dimension = z.enum(['utmSource', 'utmMedium', 'utmCampaign']).parse(context.query.get('type') ?? 'utmSource');
+    return umami.revenueByUtm(site(context), date(context.query), dimension, currency, reportFilters(context.query));
+  }),
+  route('GET', /^websites\/([0-9a-f-]+)\/channels$/i, async context => {
+    const [{ rules, custom }, rows] = await Promise.all([
+      loadChannelRules(),
+      umami.breakdown(site(context), date(context.query), ['referrer', 'utmSource', 'utmMedium', 'query'], reportFilters(context.query)),
+    ]);
+    return { ...channelReport(rules, rows), customRules: custom };
+  }),
+  route('GET', /^websites\/([0-9a-f-]+)\/snippet$/i, async context => {
+    const preferences = await getSnippetPreferences(site(context));
+    const origin = z.url({ protocol: /^https?$/ }).catch('').parse(context.query.get('origin') ?? '');
+    return { ...preferences, snippet: origin ? buildSnippet(origin, preferences.websiteId, preferences.options) : '' };
+  }),
+  route('PUT', /^websites\/([0-9a-f-]+)\/snippet$/i, async context => {
+    const input = await readBody(context.request, z.object({ options: snippetOptionsSchema, origin: z.url({ protocol: /^https?$/ }) }));
+    const saved = await saveSnippetPreferences(site(context), input.options);
+    return { ...saved, snippet: buildSnippet(input.origin, saved.websiteId, saved.options) };
+  }, 'marketer'),
   route('POST', /^websites\/([0-9a-f-]+)\/breakdown$/i, async context => {
     const data = await readBody(context.request, z.object({
       startAt: timestamp, endAt: timestamp,
@@ -260,6 +286,29 @@ export const analyticsEndpoints: Entry[] = [
     await umami.deleteAnnotation(site(context), siteId.parse(context.params[1]));
     return new Response(null, { status: 204 });
   }, 'marketer'),
+  route('GET', /^channel-rules$/, async () => loadChannelRules()),
+  route('PUT', /^channel-rules$/, async context => saveChannelRules((await readBody(context.request, z.object({ rules: channelRulesSchema }))).rules), 'marketer'),
+  route('POST', /^channel-rules\/test$/, async context => {
+    const input = await readBody(context.request, z.object({
+      rules: channelRulesSchema.optional(),
+      visit: z.object({
+        referrer: z.string().max(300).optional(), utmSource: z.string().max(300).optional(),
+        utmMedium: z.string().max(300).optional(), query: z.string().max(2000).optional(),
+      }),
+    }));
+    return classifyVisit(input.rules ?? (await loadChannelRules()).rules, input.visit);
+  }),
+  route('GET', /^api-keys$/, async () => listApiKeys(), 'admin'),
+  route('POST', /^api-keys$/, async context => {
+    const created = await createApiKey(await readBody(context.request, apiKeyInput), context.user.id);
+    await recordActivity('Events API key created', '/analytics');
+    return json(created, 201);
+  }, 'admin'),
+  route('DELETE', /^api-keys\/([0-9a-f-]+)$/i, async context => {
+    await revokeApiKey(site(context));
+    await recordActivity('Events API key revoked', '/analytics');
+    return new Response(null, { status: 204 });
+  }, 'admin'),
   route('GET', /^links$/, async () => umami.links()),
   route('GET', /^links\/charts$/, async ({ query }) => {
     const ids = (query.get('ids') ?? '').split(',').map(v => v.trim()).filter(Boolean).slice(0, 20).map(v => siteId.parse(v));

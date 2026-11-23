@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import {
   ANALYTICS_LIMITS, FILTER_DIMENSIONS, PROPERTY_DATA_TYPE_CODES, UNFILTERABLE_DIMENSIONS,
-  filterQueryParams, hasFilters, normalizeSegmentOperator,
+  equalityRule, filterQueryParams, hasFilters, normalizeSegmentOperator,
 } from '@/contracts/analytics';
 import type {
   Annotation,
@@ -40,6 +40,8 @@ import type {
   RevenueMetricType,
   RevenueReport,
   RevenueStats,
+  RevenueUtmDimension,
+  RevenueUtmReport,
   SavedFunnel,
   SavedFunnelInput,
   SessionActivityItem,
@@ -760,6 +762,7 @@ const attributionOptionsSchema = z.object({
   type: z.enum(['path', 'event']),
   step: z.string().trim().min(1).max(ANALYTICS_LIMITS.stepValueLength),
   currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/, 'Use a 3-letter ISO currency code.').optional(),
+  lookbackDays: z.number().int().min(0).max(90).optional(),
 });
 
 const breakdownFieldSchema = z.enum([
@@ -1365,6 +1368,12 @@ export function createUmami(config: UmamiConfig) {
       return validated(journeyPathSchema.array(), result);
     },
 
+    /**
+     * Umami 3.5.0's attribution query takes only startDate, endDate, model, type, step and currency
+     * (src/lib/schema.ts:330-340) and has no lookback or revenue output. A lookback is therefore applied here by
+     * searching for earlier visits from `range.startAt - lookbackDays`; conversions in that earlier stretch count too.
+     * Revenue comes from the revenue stats endpoint under the same filters over the chosen range.
+     */
     async attribution(
       id: string,
       range: DateRange,
@@ -1373,21 +1382,67 @@ export function createUmami(config: UmamiConfig) {
         type: 'path' | 'event';
         step: string;
         currency?: string;
+        lookbackDays?: number;
         filters?: ReportFilters;
       },
     ): Promise<AttributionResult> {
       const parsedOptions = attributionOptionsSchema.parse({
         model: options.model, type: options.type, step: options.step, currency: options.currency,
+        lookbackDays: options.lookbackDays,
       });
+      const lookbackDays = parsedOptions.lookbackDays ?? 0;
+      const searchedFrom = range.startAt - lookbackDays * 86_400_000;
       const result = await authorized(`${websitePath(id)}/attribution`, {}, {
-        ...queryRange(range),
+        ...queryRange({ startAt: searchedFrom, endAt: range.endAt }),
         ...queryFilters(options.filters),
         ...(parsedOptions.currency ? { currency: parsedOptions.currency } : {}),
         model: parsedOptions.model,
         type: parsedOptions.type,
         step: parsedOptions.step,
       });
-      return validated(attributionSchema, result);
+      const attribution = validated(attributionSchema, result);
+      const currency = parsedOptions.currency ?? 'USD';
+      const stats = await available(
+        authorized(`${websitePath(id)}/revenue/stats`, {}, { ...queryRange(range), ...queryFilters(options.filters), currency })
+          .then(data => validated(revenueStatsResponseSchema, data)),
+      );
+      return {
+        ...attribution,
+        ...(lookbackDays ? { lookbackDays, searchedFrom } : {}),
+        revenue: stats && stats.stats.count > 0 ? { currency, sum: stats.stats.sum, count: stats.stats.count } : null,
+      };
+    },
+
+    /**
+     * Revenue by UTM value. Umami 3.5.0's revenue metrics only break down by country, region, referrer and channel
+     * (getRevenueMetrics.ts:25), so this lists the top UTM values for the range and asks the revenue stats endpoint
+     * for each one with an `is` filter added.
+     */
+    async revenueByUtm(
+      websiteId: string,
+      range: DateRange,
+      dimension: RevenueUtmDimension,
+      currency = 'USD',
+      filters?: ReportFilters,
+    ): Promise<RevenueUtmReport> {
+      const parsedCurrency = currencySchema.parse(currency);
+      const names = (await this.expandedMetrics(websiteId, range, dimension, filters, 10)).map(row => row.name);
+      const rows = await Promise.all(names.map(async name => {
+        const scoped: ReportFilters = {
+          ...filters,
+          rules: [...(filters?.rules ?? []).filter(rule => rule.dimension !== dimension), equalityRule(dimension, name)],
+        };
+        const result = await authorized(`${websitePath(websiteId)}/revenue/stats`, {}, {
+          ...queryRange(range), ...queryFilters(scoped), currency: parsedCurrency,
+        }).then(data => validated(revenueStatsResponseSchema, data));
+        return { name, sum: result.stats.sum, count: result.stats.count };
+      }));
+      return {
+        currency: parsedCurrency,
+        dimension,
+        rows: rows.filter(row => row.count > 0).sort((a, b) => b.sum - a.sum),
+        truncated: names.length >= 10,
+      };
     },
 
     async breakdown(

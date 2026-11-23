@@ -4,7 +4,7 @@ import {
   Ban, Download, ListFilter, MailCheck, Minus, Pencil, Plus, Search, Send, ShieldAlert, Trash2, Upload,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
@@ -23,13 +23,13 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
-  BounceRecord, Company, Contact, ContactDetail, ContactNote, CustomField, CustomFieldObject,
+  BounceRecord, Company, Contact, ContactDetail, ContactNote, ContactSortKey, ContactTimeline, ContactView, ImportMapping, ImportPreview, ImportRun, CustomField, CustomFieldObject,
   JourneyEmail, MailingList, Page, PointAction, PointTrigger, PointTriggerEventInput, PointTriggerEventType,
   Segment, SegmentFilter, SegmentFilterField, SegmentOffsetUnit, SegmentOptions, SegmentPicker, SegmentRule, Stage,
   SuppressionRecord, Tag, Workflow,
 } from '@/contracts';
 import {
-  canonicalSegmentOperator, emptySegmentRule, formatSegmentOffset, parseSegmentDate, resolveSegmentField, segmentDateUnits,
+  contactSearchCommands, contactSortKeys, canonicalSegmentOperator, emptySegmentRule, formatSegmentOffset, parseSegmentDate, resolveSegmentField, segmentDateUnits,
   segmentFieldCatalogue, segmentFilterFromRule, segmentOffsetUnits, segmentOperatorsFor, segmentRelativeDates,
   segmentRuleFromFilter, segmentValueMode,
 } from '@/contracts';
@@ -44,7 +44,6 @@ import type { Tone } from './ui';
 
 const tabs = ['Contacts', 'Segments', 'Mailing lists', 'Tags & stages', 'Companies', 'Lead scoring', 'Suppressions', 'Custom fields'] as const;
 type AudienceTab = typeof tabs[number];
-type ImportResult = { imported: number; failed: { row: number; message: string }[] };
 type BulkActionType = 'add_tag' | 'remove_tag' | 'add_segment' | 'adjust_points';
 type SuppressionReason = SuppressionRecord['reason'];
 type NoteType = 'general' | 'email' | 'call' | 'meeting';
@@ -103,6 +102,7 @@ const csvTemplate = [
 
 const fallbackPointActionTypes: Record<string, string> = {
   'email.open': 'Opens an email',
+  'email.send': 'Is sent an email',
   'url.hit': 'Visits a tracked page',
   'form.submit': 'Submits a lead form',
   'asset.download': 'Downloads an asset',
@@ -115,6 +115,12 @@ const suppressionReasons: { value: SuppressionReason; label: string }[] = [
   { value: 'complaint', label: 'Complaint' },
   { value: 'erasure', label: 'Erasure' },
 ];
+
+const sortLabels: Record<ContactSortKey, string> = {
+  createdAt: 'Date added', updatedAt: 'Last changed', lastActive: 'Last active', email: 'Email', firstName: 'First name', lastName: 'Last name',
+  company: 'Company', city: 'City', country: 'Country', position: 'Position', points: 'Score', id: 'Contact id',
+};
+const sortChoices = contactSortKeys.map(value => ({ value, label: sortLabels[value] }));
 
 const noteTypes: { value: NoteType; label: string }[] = [
   { value: 'general', label: 'General' },
@@ -303,23 +309,52 @@ function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: 
   </Modal>;
 }
 
+type ImportDraft = { run: ImportRun; preview: ImportPreview };
+
+// Upload, map columns, optionally dry-run, then follow the background job's progress.
 function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
   const action = useAction();
   const [file, setFile] = useState<File>();
   const [evidence, setEvidence] = useState('');
-  const [result, setResult] = useState<ImportResult>();
+  const [draft, setDraft] = useState<ImportDraft>();
+  const [mapping, setMapping] = useState<ImportMapping>({});
+  const [updateExisting, setUpdateExisting] = useState(true);
+  const [run, setRun] = useState<ImportRun>();
+  const watching = run && (run.status === 'queued' || run.status === 'running') ? run.id : null;
+  useEffect(() => {
+    if (!watching) return;
+    const timer = setInterval(() => {
+      void api<ImportRun>(`/contacts/imports/${watching}`).then(next => {
+        setRun(next);
+        if (next.status === 'done' && !next.dryRun) onImported();
+      }).catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [watching, onImported]);
+
+  async function start(dryRun: boolean) {
+    if (!draft) return;
+    setRun(await api<ImportRun>(`/contacts/imports/${draft.run.id}/start`, 'POST', {
+      mapping, dryRun, updateExisting, evidence: evidence.trim() || undefined,
+    }));
+  }
+  const issues = run && run.skipped + run.errors > 0;
+  const emailMapped = Object.values(mapping).includes('email');
+  const percent = run?.total ? Math.min(100, Math.round(run.processed / run.total * 100)) : 0;
+
   return <Modal title="Import contacts" onClose={onClose}>
-    <form className="ov-stack-sm" onSubmit={event => {
+    {!draft ? <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
         if (!file?.size) throw new Error('Choose a CSV file to import.');
-        if (file.size > 1_000_000) throw new Error('Choose a CSV file smaller than 1 MB.');
-        setResult(await api<ImportResult>('/contacts/import', 'POST', { csv: await file.text(), evidence: evidence.trim() || undefined }));
-        onImported();
+        if (file.size > 25_000_000) throw new Error('Choose a CSV file smaller than 25 MB.');
+        const next = await api<ImportDraft>('/contacts/imports', 'POST', { csv: await file.text(), fileName: file.name, evidence: evidence.trim() || undefined });
+        setDraft(next);
+        setMapping(next.preview.mapping);
       });
     }}>
       <div className="ov-actions ov-actions--between">
-        <Text type="supporting" color="secondary">Include an email column and up to 500 rows. Optional columns: first_name, last_name, company, phone, position, city, country, website, tags (separated by |), consent and evidence. A column named after a custom field alias fills that field.</Text>
+        <Text type="supporting" color="secondary">Upload a CSV with a header row and an email column. Large files run in the background; you choose how each column maps in the next step.</Text>
         <Button size="sm" label="Download CSV template" icon={<Download size={14} />}
           onClick={() => saveFile(csvTemplate, 'ovelio-contacts-template.csv', 'text/csv')} />
       </div>
@@ -327,14 +362,75 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
         <input id="ov-import-file" className="ov-native-file" type="file" accept=".csv,text/csv" onChange={event => setFile(event.target.files?.[0])} />
       </Field>
       <TextInput label="Consent evidence" description="Used for opted_in rows without their own evidence. Record the source and date of consent." isOptional value={evidence} onChange={setEvidence} />
-      <Feedback error={action.error} notice={result ? `${number(result.imported)} contacts imported. ${number(result.failed.length)} rows failed.` : undefined} />
-      {result?.failed.length ? <Rows>{result.failed.slice(0, 25).map(item => <li key={item.row}><Text type="supporting">Row {item.row} · {item.message}</Text></li>)}</Rows> : null}
+      <Feedback error={action.error} />
       <FormActions>
-        <Button label={result ? 'Close' : 'Cancel'} onClick={onClose} />
-        <Button type="submit" variant="primary" label="Import contacts" isLoading={action.busy} />
+        <Button label="Cancel" onClick={onClose} />
+        <Button type="submit" variant="primary" label="Continue" isLoading={action.busy} />
       </FormActions>
-    </form>
+    </form> : <div className="ov-stack-sm">
+      <Text type="supporting" color="secondary">{number(draft.preview.rowCount)} rows in {draft.run.fileName}. Check which field each column fills.</Text>
+      <Table data={draft.preview.headers.map((header, index) => ({ header, index }))} idKey="header" columns={[
+        { key: 'header', header: 'CSV column', renderCell: item => <span className="ov-cell">
+          <Text weight="semibold">{item.header}</Text>
+          <Text type="supporting" color="secondary">{draft.preview.rows.map(row => row[item.index]).filter(Boolean).slice(0, 2).join(', ') || '—'}</Text>
+        </span> },
+        { key: 'target', header: 'Fills', renderCell: item => <Selector label={`Field for ${item.header}`} isLabelHidden width={230}
+          value={mapping[item.header] ?? 'skip'} options={draft.preview.targets}
+          onChange={value => setMapping(current => ({ ...current, [item.header]: value ?? 'skip' }))} isDisabled={!!run && run.status !== 'draft' && !run.dryRun && run.status !== 'done'} /> },
+      ]} />
+      <Switch label="Update contacts that already exist" description="Off leaves existing contacts untouched and reports them as skipped." value={updateExisting} onChange={setUpdateExisting} />
+      {run ? <div className="ov-stack-sm" role="status">
+        <Text weight="semibold">{run.dryRun ? 'Dry run' : 'Import'} {run.status === 'done' ? 'finished' : run.status === 'failed' ? 'failed' : `running, ${number(run.processed)} of ${number(run.total)} rows (${percent}%)`}</Text>
+        <Text type="supporting" color="secondary">
+          {run.dryRun ? 'Would create' : 'Created'} {number(run.created)} · {run.dryRun ? 'would update' : 'updated'} {number(run.updated)} · skipped {number(run.skipped)} · errors {number(run.errors)}
+        </Text>
+        {issues && run.status === 'done' ? <Button size="sm" label="Download skipped and failed rows" icon={<Download size={14} />}
+          onClick={() => void action.run(async () => saveFile(await api<string>(`/contacts/imports/${run.id}/issues`), 'ovelio-import-issues.csv', 'text/csv'))} /> : null}
+      </div> : null}
+      <Feedback error={action.error} />
+      <FormActions>
+        <Button label={run?.status === 'done' && !run.dryRun ? 'Close' : 'Cancel'} onClick={onClose} />
+        <Button label="Dry run" isLoading={action.busy} isDisabled={!emailMapped || !!watching}
+          onClick={() => void action.run(() => start(true))} />
+        <Button variant="primary" label="Import contacts" isLoading={action.busy} isDisabled={!emailMapped || !!watching || (run?.status === 'done' && !run.dryRun)}
+          onClick={() => void action.run(() => start(false))} />
+      </FormActions>
+    </div>}
   </Modal>;
+}
+
+function TimelinePanel({ contactId }: { contactId: number }) {
+  const [page, setPage] = useState(1);
+  const [type, setType] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [search, setSearch] = useState('');
+  const params = new URLSearchParams({ page: String(page), limit: '25' });
+  if (type) params.append('include', type);
+  if (search) params.set('q', search);
+  const timeline = useResource<ContactTimeline>(`${contactsPath}/${contactId}/timeline?${params}`);
+  const [known, setKnown] = useState<Record<string, string>>({});
+  const types = timeline.data?.types;
+  if (types && Object.keys(types).length > Object.keys(known).length) setKnown(types);
+  return <Panel title="Activity" description="Everything the audience engine has recorded for this contact, newest first.">
+    <div className="ov-toolbar">
+      <form onSubmit={event => { event.preventDefault(); setSearch(query.trim()); setPage(1); }}>
+        <TextInput label="Search activity" isLabelHidden type="search" startIcon="search" placeholder="Search activity" value={query} onChange={setQuery} width={240} />
+      </form>
+      <Selector label="Event type" isLabelHidden width={220} placeholder="All event types" hasClear value={type}
+        options={Object.entries(known).sort((a, b) => a[1].localeCompare(b[1])).map(([value, label]) => ({ value, label }))}
+        onChange={value => { setType(value); setPage(1); }} />
+    </div>
+    {!timeline.data ? <AsyncState loading={timeline.loading} error={timeline.error} retry={timeline.refresh} /> : <>
+      {timeline.data.events.length ? <Rows>{timeline.data.events.map(item => <li key={item.id}>
+        <span className="ov-cell">
+          <Text>{item.href ? <Link href={item.href}>{item.label}</Link> : item.label}</Text>
+          <Text type="supporting" color="secondary">{item.typeLabel}</Text>
+        </span>
+        <Timestamp value={item.at} format="date_time" />
+      </li>)}</Rows> : <Empty title={type || search ? 'No activity matches' : 'No recorded activity'} />}
+      <Pager {...timeline.data} onPage={setPage} />
+    </>}
+  </Panel>;
 }
 
 /* ── Segments & Mailing Lists Modals ───────────────────────────────────────── */
@@ -747,11 +843,19 @@ function CompanyForm({ company, onClose, onDone }: { company?: Company; onClose:
   </Modal>;
 }
 
+const pointPickers: Record<string, { key: string; label: string; path: string; empty: string } | undefined> = {
+  'email.open': { key: 'emails', label: 'Only these emails', path: '/journey-emails', empty: 'Any email' },
+  'email.send': { key: 'emails', label: 'Only these emails', path: '/journey-emails', empty: 'Any email' },
+  'form.submit': { key: 'forms', label: 'Only these forms', path: '/forms', empty: 'Any form' },
+  'page.hit': { key: 'pages', label: 'Only these landing pages', path: '/pages', empty: 'Any landing page' },
+  'asset.download': { key: 'assets', label: 'Only these assets', path: '/assets', empty: 'Any asset' },
+};
+
 function PointActionForm({
   rule, typeMap, onClose, onDone,
 }: { rule?: PointAction; typeMap: Record<string, string>; onClose: () => void; onDone: () => void }) {
   const action = useAction();
-  const mergedTypes = Object.keys(typeMap).length ? typeMap : fallbackPointActionTypes;
+  const mergedTypes = { ...fallbackPointActionTypes, ...typeMap };
   const options = Object.entries(mergedTypes).map(([value, label]) => ({ value, label: cleanLabel(label) || prettifyKey(value) }));
   if (rule?.type && !options.some(option => option.value === rule.type)) {
     options.push({ value: rule.type, label: prettifyKey(rule.type) });
@@ -760,6 +864,16 @@ function PointActionForm({
   const [type, setType] = useState<string>(rule?.type || options[0]?.value || 'email.open');
   const [delta, setDelta] = useState(rule?.delta ?? 10);
   const [published, setPublished] = useState(rule?.published ?? true);
+  const [repeatable, setRepeatable] = useState(rule?.repeatable ?? false);
+  const [groupId, setGroupId] = useState<string | null>(rule?.groupId ? String(rule.groupId) : null);
+  const [properties, setProperties] = useState<Record<string, unknown>>(rule?.properties ?? {});
+  const picker = pointPickers[type];
+  const choices = useResource<{ id: number; name?: string; title?: string; subject?: string }[]>(picker?.path ?? null);
+  const groups = useResource<{ id: number; name: string }[]>('/point-groups');
+  const chosen = picker && Array.isArray(properties[picker.key]) ? (properties[picker.key] as unknown[]).map(String) : [];
+  const text = (key: string) => String(properties[key] ?? '');
+  const patch = (key: string, value: unknown) => setProperties(current => ({ ...current, [key]: value }));
+  const needsUrl = type === 'url.hit';
 
   return <Modal title={rule ? 'Edit scoring rule' : 'Create scoring rule'} onClose={onClose}>
     <form className="ov-stack-sm" onSubmit={event => {
@@ -771,21 +885,40 @@ function PointActionForm({
           type,
           delta,
           published,
+          repeatable,
+          groupId: groupId ? Number(groupId) : null,
+          properties: picker ? { [picker.key]: chosen.map(Number) } : needsUrl ? properties : {},
         });
         onDone();
       });
     }}>
       <TextInput label="Rule name" isRequired {...field('name')} />
       <div className="ov-form-grid">
-        <Selector label="Action type" value={type} options={options} onChange={value => setType(value ?? options[0]?.value ?? 'email.open')} />
+        <Selector label="Action type" value={type} options={options} onChange={value => { setType(value ?? options[0]?.value ?? 'email.open'); setProperties({}); }} />
         <NumberInput label="Points delta" description="Positive to add, negative to deduct." min={-10000} max={10000} isIntegerOnly value={delta} onChange={setDelta} />
+      </div>
+      {picker ? <fieldset className="ov-stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
+        <Text weight="semibold">{picker.label}</Text>
+        <Text type="supporting" color="secondary">{chosen.length ? `${number(chosen.length)} selected.` : `${picker.empty}: leave everything unticked.`}</Text>
+        {(choices.data ?? []).map(item => <CheckboxInput key={item.id} label={item.name || item.title || item.subject || `#${item.id}`}
+          value={chosen.includes(String(item.id))}
+          onChange={on => patch(picker.key, on ? [...chosen, String(item.id)] : chosen.filter(entry => entry !== String(item.id)))} />)}
+      </fieldset> : null}
+      {needsUrl ? <div className="ov-stack-sm">
+        <TextInput label="URL" description="The tracked page address that earns points. Use * as a wildcard." isRequired value={text('page_url')} onChange={value => patch('page_url', value)} />
+        <NumberInput label="Hits needed" description="0 awards points on every hit." min={0} isIntegerOnly value={Number(properties.page_hits ?? 0)} onChange={value => patch('page_hits', value)} />
+        <Switch label="First visit only" value={properties.first_time === true} onChange={value => patch('first_time', value)} />
+      </div> : null}
+      <div className="ov-form-grid">
+        <Selector label="Point group" placeholder="No group" hasClear value={groupId} options={(groups.data ?? []).map(item => ({ value: String(item.id), label: item.name }))} onChange={setGroupId} />
+        <Switch label="Repeatable" description="Award the points each time, not only the first time." value={repeatable} onChange={setRepeatable} />
       </div>
       <TextArea label="Description" rows={2} isOptional {...field('description')} />
       <Switch label="Published" value={published} onChange={setPublished} />
       <Feedback error={action.error} />
       <FormActions>
         <Button label="Cancel" onClick={onClose} />
-        <Button type="submit" variant="primary" label={rule ? 'Save rule' : 'Create rule'} isLoading={action.busy} isDisabled={!values.name.trim() || !type} />
+        <Button type="submit" variant="primary" label={rule ? 'Save rule' : 'Create rule'} isLoading={action.busy} isDisabled={!values.name.trim() || !type || (needsUrl && !text('page_url').trim())} />
       </FormActions>
     </form>
   </Modal>;
@@ -1344,6 +1477,11 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const [page, setPage] = useState(1);
   const [segmentId, setSegmentId] = useState('');
   const [tagFilter, setTagFilter] = useState('');
+  const [sortBy, setSortBy] = useState<ContactSortKey>('createdAt');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [pageSize, setPageSize] = useState(25);
+  const [viewId, setViewId] = useState<string | null>(null);
+  const [viewName, setViewName] = useState('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [bulkAction, setBulkAction] = useState<BulkActionType>('add_tag');
   const [bulkTag, setBulkTag] = useState('');
@@ -1374,10 +1512,14 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   // Resources
   const contacts = useResource<Page<Contact>>(tab === 'Contacts' ? `${contactsPath}?${new URLSearchParams({
     page: String(page),
+    limit: String(pageSize),
+    orderBy: sortBy,
+    orderByDir: sortDir,
     ...(search ? { q: search } : {}),
     ...(segmentId ? { segmentId } : {}),
     ...(tagFilter ? { tag: tagFilter } : {}),
   })}` : null);
+  const views = useResource<ContactView[]>(tab === 'Contacts' ? '/contact-views' : null);
   const segments = useResource<Segment[]>(tab === 'Contacts' || tab === 'Segments' ? segmentPath : null);
   const lists = useResource<MailingList[]>(tab === 'Mailing lists' ? listPath : null);
   const tags = useResource<Tag[]>(tab === 'Contacts' || tab === 'Tags & stages' ? tagPath : null);
@@ -1487,10 +1629,17 @@ export function Audience({ initialTab }: { initialTab?: string }) {
     {tab === 'Contacts' ? <Panel title="Contact directory" description={contacts.data ? `${number(contacts.data.total)} contacts` : undefined}>
       <div className="ov-toolbar">
         <form onSubmit={event => { event.preventDefault(); setSearch(query.trim()); setPage(1); setSelectedIds([]); }}>
-          <TextInput label="Search contacts" isLabelHidden type="search" startIcon="search" placeholder="Name or email" value={query} onChange={setQuery} width={260} />
+          <TextInput label="Search contacts" isLabelHidden type="search" startIcon="search" placeholder="Name, email or tag:vip is:unowned" value={query} onChange={setQuery} width={300} />
           <Button type="submit" label="Search" icon={<Search size={15} />} />
         </form>
         <div className="ov-actions">
+          <Selector label="Sort by" isLabelHidden width={160} value={sortBy} options={sortChoices}
+            onChange={value => { setSortBy((value as ContactSortKey) || 'createdAt'); setPage(1); }} />
+          <Selector label="Sort direction" isLabelHidden width={130} value={sortDir} options={[{ value: 'desc', label: 'Newest first' }, { value: 'asc', label: 'Oldest first' }]}
+            onChange={value => { setSortDir(value === 'asc' ? 'asc' : 'desc'); setPage(1); }} />
+          <Selector label="Contacts per page" isLabelHidden width={120} value={String(pageSize)}
+            options={['25', '50', '100', '250', '500'].map(value => ({ value, label: `${value} per page` }))}
+            onChange={value => { setPageSize(Number(value) || 25); setPage(1); setSelectedIds([]); }} />
           <Selector label="Segment filter" isLabelHidden width={210} value={segmentId || 'all'}
             options={[{ value: 'all', label: 'All segments' }, ...optionsOf(segments.data)]}
             onChange={value => { setSegmentId(value && value !== 'all' ? value : ''); setPage(1); setSelectedIds([]); }} />
@@ -1499,6 +1648,27 @@ export function Audience({ initialTab }: { initialTab?: string }) {
             onChange={value => { setTagFilter(value && value !== 'all' ? value : ''); setPage(1); setSelectedIds([]); }} />
           {filtered ? <Button size="sm" variant="ghost" label="Clear filters" onClick={clearContactFilters} /> : null}
         </div>
+      </div>
+
+      <div className="ov-toolbar">
+        <Selector label="Saved views" isLabelHidden width={220} placeholder="Saved views" hasClear value={viewId}
+          options={(views.data ?? []).map(item => ({ value: item.id, label: item.name }))}
+          onChange={value => {
+            setViewId(value);
+            const chosen = views.data?.find(item => item.id === value);
+            if (!chosen) return;
+            setSearch(chosen.search); setQuery(chosen.search); setSortBy(chosen.sortBy); setSortDir(chosen.sortDir);
+            setSegmentId(''); setTagFilter(''); setPage(1); setSelectedIds([]);
+          }} />
+        <TextInput label="View name" isLabelHidden placeholder="Name this view" value={viewName} onChange={setViewName} width={180} />
+        <Button size="sm" label="Save view" isLoading={action.busy} isDisabled={!viewName.trim()}
+          onClick={() => void action.run(async () => {
+            const saved = await api<ContactView>('/contact-views', 'POST', { name: viewName.trim(), search, sortBy, sortDir });
+            setViewId(saved.id); setViewName(''); views.refresh(); setNotice('View saved for the team.');
+          })} />
+        {viewId ? <Button size="sm" variant="ghost" label="Delete view" icon={<Trash2 size={14} />}
+          onClick={() => void action.run(async () => { await api(`/contact-views/${viewId}`, 'DELETE'); setViewId(null); views.refresh(); })} /> : null}
+        <Text type="supporting" color="secondary">Search commands: {contactSearchCommands.slice(0, 8).map(item => item.example).join(', ')} and more.</Text>
       </div>
 
       <FilterBar items={activeFilters} onRemove={removeContactFilter} onClear={clearContactFilters} />
@@ -2346,11 +2516,7 @@ export function ContactView({ id }: { id: string }) {
         </Panel>
       </div>
 
-      <Panel title="Activity">
-        {contact.activity.length ? <Rows>{contact.activity.map((item, index) => <li key={item.at + item.type + index}>
-          <Text>{item.label}</Text><Timestamp value={item.at} format="date_time" />
-        </li>)}</Rows> : <Empty title="No recorded activity" />}
-      </Panel>
+      <TimelinePanel contactId={contact.id} />
     </div>}
 
     {modal === 'edit' && contact ? <ContactForm contact={contact} onClose={() => setModal(undefined)} onDone={() => {

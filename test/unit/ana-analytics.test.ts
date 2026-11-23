@@ -69,7 +69,7 @@ test('ANA-04 every supported filter reaches the engine on breakdown and attribut
   assert.equal(calls.at(-1)?.url.searchParams.get('device'), 'eq.mobile');
   assert.equal(calls.at(-1)?.url.searchParams.get('utmSource'), 'eq.news');
   await api.attribution(siteId, range, { model: 'last-click', type: 'event', step: 'buy', currency: 'eur', filters: { rules: [{ dimension: 'country', operator: 'eq', values: ['GB'] }] } });
-  const q = calls.at(-1)!.url.searchParams;
+  const q = calls.find(call => call.url.pathname.endsWith('/attribution'))!.url.searchParams;
   assert.equal(q.get('country'), 'eq.GB');
   assert.equal(q.get('currency'), 'EUR');
   assert.equal(q.get('step'), 'buy');

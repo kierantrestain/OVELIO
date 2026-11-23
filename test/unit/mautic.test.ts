@@ -78,7 +78,7 @@ test('retrieves identified contacts with a selected segment, stable pagination a
       },
     });
   });
-  const page = await api.contacts({ page: 2, limit: 500, search: 'Taylor', segmentId: 3 });
+  const page = await api.contacts({ page: 2, limit: 100, search: 'Taylor', segmentId: 3 });
   assert.equal(page.total, 102);
   assert.deepEqual(page.items.map(({ id, email, suppressed }) => [id, email, suppressed]), [
     [19, 'taylor2@example.test', false], [17, 'taylor@example.test', true],
@@ -595,6 +595,10 @@ test('manages lead scoring point actions, flattened action types, and point trig
     'email.open': 'Opens an email',
     'email.send': 'Is sent an email',
     'form.submit': 'Submits a form',
+    // AUD-07: the six core types always show, even when the engine's own list leaves some out.
+    'page.hit': 'Visits a landing page',
+    'url.hit': 'Visits a tracked URL',
+    'asset.download': 'Downloads an asset',
   });
   const createdAction = await api.createPointAction({ name: 'Form submit', type: 'form.submit', delta: 10 });
   assert.equal(createdAction.id, 2);

@@ -11,7 +11,6 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Link } from '@astryxdesign/core/Link';
 import { MetadataList, MetadataListItem } from '@astryxdesign/core/MetadataList';
-import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
@@ -20,15 +19,15 @@ import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
-import { Token } from '@astryxdesign/core/Token';
 import type {
   Asset, Category, DynamicContent, FocusItem, FocusItemInput, FormActionSpec, FormField, FormFieldOptions, FormFieldPropertySpec,
   FormFieldTypeSpec, FormPostAction, FormSubmission, JourneyEmail, LandingPage, LeadForm, LeadFormInput, Page, Segment, Stage, Webhook, Workflow, WorkflowContact,
-  WorkflowInput, WorkflowStep, WorkflowStepKind,
+  WorkflowStep,
 } from '@/contracts';
-import { formActionSpecs, formFieldSpecs, maxWorkflowSteps } from '@/contracts';
+import { formActionSpecs, formFieldSpecs } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
+import { describeSources, WorkflowCanvasEditor, WorkflowOutline, workflowGraphOf } from './workflow-canvas';
 import {
   AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal,
   PageHeader, Pager, Panel, SlideDrawer, Snippet, StatusBadge, Tabs,
@@ -39,7 +38,6 @@ const tabs = [
   'Dynamic content', 'Popups & bars', 'Categories', 'Webhooks',
 ] as const;
 type AutomationsTab = typeof tabs[number];
-type TriggerType = 'segment' | 'form';
 type FocusType = FocusItemInput['type'];
 type FocusStyle = FocusItemInput['style'];
 type FocusWhen = NonNullable<FocusItemInput['when']>;
@@ -101,28 +99,6 @@ type CategoryFilter = 'all' | CategoryBundle;
 
 const categoryBundleLabels: Record<string, string> = Object.fromEntries(categoryBundles.map(item => [item.value, item.label]));
 const validCategoryBundles = new Set<string>(categoryBundles.map(item => item.value));
-
-const recipes = [
-  { id: 'blank', name: 'Blank workflow', delays: [0] },
-  { id: 'welcome', name: 'Welcome sequence', delays: [0, 1440] },
-  { id: 'nurture', name: 'Lead nurturing', delays: [0, 2880, 4320] },
-  { id: 'follow-up', name: 'Follow-up email', delays: [1440] },
-  { id: 're-engage', name: 'Re-engagement', delays: [0, 10080] },
-];
-
-const stepKindOptions: { value: WorkflowStepKind; label: string; description: string }[] = [
-  { value: 'email', label: 'Send journey email', description: 'Deliver a published automation email' },
-  { value: 'tags', label: 'Modify tags', description: 'Add or remove contact tags' },
-  { value: 'points', label: 'Adjust lead score', description: 'Add or subtract contact points' },
-  { value: 'segment', label: 'Change segments', description: 'Add to or remove from segments' },
-  { value: 'stage', label: 'Change lifecycle stage', description: 'Move contact to a lifecycle stage' },
-];
-
-const conditions = [
-  { value: 'none', label: 'Continue without a condition' },
-  { value: 'opened_previous', label: 'Previous email was opened' },
-  { value: 'clicked_previous', label: 'Previous email link was clicked' },
-];
 
 const mappedContactFields = [
   { value: 'none', label: 'Not mapped' },
@@ -270,307 +246,7 @@ function HtmlPreviewModal({ title, html, onClose }: { title: string; html: strin
   </Modal>;
 }
 
-/* ── Workflow Step Editor & Enrolled Contacts Drawer ───────────────────────── */
-
-type EditableStep = {
-  key: number;
-  kind: WorkflowStepKind;
-  emailId: number;
-  delayMinutes: number;
-  condition?: 'opened_previous' | 'clicked_previous';
-  addTagsText: string;
-  removeTagsText: string;
-  pointsDelta: number;
-  addSegmentIds: number[];
-  removeSegmentIds: number[];
-  stageId: number;
-};
-
-function makeEmptyStep(key: number, delayMinutes = 0): EditableStep {
-  return {
-    key,
-    kind: 'email',
-    emailId: 0,
-    delayMinutes,
-    addTagsText: '',
-    removeTagsText: '',
-    pointsDelta: 10,
-    addSegmentIds: [],
-    removeSegmentIds: [],
-    stageId: 0,
-  };
-}
-
-function toEditableStep(step: WorkflowStep, key: number): EditableStep {
-  return {
-    key,
-    kind: step.kind ?? 'email',
-    emailId: step.emailId ?? 0,
-    delayMinutes: step.delayMinutes ?? 0,
-    condition: step.condition,
-    addTagsText: (step.addTags ?? []).join(', '),
-    removeTagsText: (step.removeTags ?? []).join(', '),
-    pointsDelta: step.pointsDelta ?? 10,
-    addSegmentIds: step.addSegmentIds ?? [],
-    removeSegmentIds: step.removeSegmentIds ?? [],
-    stageId: step.stageId ?? 0,
-  };
-}
-
-function parseCsvList(text: string) {
-  return [...new Set(text.split(',').map(item => item.trim()).filter(Boolean))];
-}
-
-function stepIsValid(step: EditableStep) {
-  switch (step.kind) {
-    case 'email':
-      return step.emailId > 0;
-    case 'tags': {
-      const add = parseCsvList(step.addTagsText);
-      const remove = parseCsvList(step.removeTagsText);
-      return (add.length > 0 || remove.length > 0) && ![...add, ...remove].some(tag => tag.startsWith('-'));
-    }
-    case 'points':
-      return Number.isSafeInteger(step.pointsDelta) && step.pointsDelta !== 0;
-    case 'segment':
-      return step.addSegmentIds.length > 0 || step.removeSegmentIds.length > 0;
-    case 'stage':
-      return step.stageId > 0;
-  }
-}
-
-function WorkflowForm({ workflow, onClose, onDone }: { workflow?: Workflow; onClose: () => void; onDone: () => void }) {
-  const emails = useResource<JourneyEmail[]>(emailPath);
-  const segments = useResource<Segment[]>('/segments');
-  const forms = useResource<LeadForm[]>(formPath);
-  const stages = useResource<Stage[]>('/stages');
-  const action = useAction();
-
-  const { values, field, setValues } = useFields({ name: workflow?.name ?? '', description: workflow?.description ?? '' });
-  const [triggerType, setTriggerType] = useState<TriggerType>(workflow && !workflow.segmentId && workflow.formId ? 'form' : 'segment');
-  const [segmentId, setSegmentId] = useState<string | null>(workflow?.segmentId ? String(workflow.segmentId) : null);
-  const [formId, setFormId] = useState<string | null>(workflow?.formId ? String(workflow.formId) : null);
-  const [recipe, setRecipe] = useState('blank');
-  const [steps, setSteps] = useState<EditableStep[]>(() =>
-    workflow?.steps.length ? workflow.steps.map((step, index) => toEditableStep(step, index)) : [makeEmptyStep(0)],
-  );
-  const nextKey = useRef(steps.length);
-
-  const publishedSegments = segments.data?.filter(segment => segment.published) ?? [];
-  const allSegments = segments.data ?? [];
-  const publishedForms = forms.data?.filter(form => form.published) ?? [];
-  const publishedEmails = emails.data?.filter(email => email.published) ?? [];
-  const stageList = stages.data ?? [];
-
-  const emailOptions = publishedEmails.map(email => ({ value: String(email.id), label: email.name, description: email.subject }));
-  const segmentOptions = allSegments.map(segment => ({ value: String(segment.id), label: segment.name }));
-  const stageOptions = stageList.map(stage => ({ value: String(stage.id), label: stage.name }));
-
-  const hasTrigger = triggerType === 'segment' ? Boolean(segmentId) : Boolean(formId);
-  const ready = hasTrigger && steps.length > 0 && steps.every(stepIsValid);
-
-  function applyRecipe(id: string) {
-    const chosen = recipes.find(item => item.id === id);
-    if (!chosen) return;
-    setRecipe(id);
-    if (id !== 'blank') setValues(current => ({ ...current, name: chosen.name }));
-    setSteps(chosen.delays.map(delayMinutes => makeEmptyStep(nextKey.current++, delayMinutes)));
-  }
-
-  function updateStep(stepKey: number, parts: Partial<EditableStep>) {
-    setSteps(items => items.map(step => step.key === stepKey ? { ...step, ...parts } : step));
-  }
-
-  function buildPayload(): WorkflowInput {
-    const builtSteps: WorkflowStep[] = steps.map((step, index) => {
-      const canCondition = index > 0 && steps[index - 1].kind === 'email';
-      const condition = canCondition && step.condition ? { condition: step.condition } : {};
-      switch (step.kind) {
-        case 'email':
-          return { kind: 'email', emailId: step.emailId, delayMinutes: step.delayMinutes, ...condition };
-        case 'tags':
-          return {
-            kind: 'tags',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            addTags: parseCsvList(step.addTagsText),
-            removeTags: parseCsvList(step.removeTagsText),
-          };
-        case 'points':
-          return {
-            kind: 'points',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            pointsDelta: step.pointsDelta,
-          };
-        case 'segment':
-          return {
-            kind: 'segment',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            addSegmentIds: step.addSegmentIds,
-            removeSegmentIds: step.removeSegmentIds,
-          };
-        case 'stage':
-          return {
-            kind: 'stage',
-            emailId: 0,
-            delayMinutes: step.delayMinutes,
-            ...condition,
-            stageId: step.stageId,
-          };
-      }
-    });
-
-    return {
-      name: values.name.trim(),
-      description: values.description.trim(),
-      segmentId: triggerType === 'segment' ? Number(segmentId) : 0,
-      ...(triggerType === 'form' && formId ? { formId: Number(formId) } : {}),
-      steps: builtSteps,
-    };
-  }
-
-  return <Modal title={workflow ? 'Edit automation' : 'Create automation'} onClose={onClose} size="large">
-    <form className="ov-stack-sm" onSubmit={event => {
-      event.preventDefault();
-      void action.run(async () => {
-        const input = buildPayload();
-        await api(workflow ? `${workflowPath}/${workflow.id}` : workflowPath, workflow ? 'PATCH' : 'POST', input);
-        onDone();
-      });
-    }}>
-      {!workflow ? <Selector label="Workflow template" value={recipe} onChange={value => applyRecipe(value ?? 'blank')}
-        options={recipes.map(item => ({ value: item.id, label: item.name, description: `${item.delays.length} step${item.delays.length > 1 ? 's' : ''}` }))} /> : null}
-
-      <TextInput label="Workflow name" isRequired {...field('name')} />
-
-      <div className="ov-form-grid">
-        <div className="ov-stack-sm">
-          <Text type="label">Trigger source</Text>
-          <SegmentedControl label="Trigger source" value={triggerType}
-            onChange={value => setTriggerType(value === 'form' ? 'form' : 'segment')}>
-            <SegmentedControlItem value="segment" label="Segment" />
-            <SegmentedControlItem value="form" label="Lead form" />
-          </SegmentedControl>
-        </div>
-        {triggerType === 'segment' ? (
-          <Selector label="Trigger segment" description="Contacts entering this segment start the workflow." placeholder="Select a published segment"
-            isLoading={segments.loading} value={segmentId} hasClear onChange={setSegmentId}
-            options={publishedSegments.map(segment => ({ value: String(segment.id), label: segment.name }))} />
-        ) : (
-          <Selector label="Trigger lead form" description="Contacts submitting this form start the workflow." placeholder="Select a published lead form"
-            isLoading={forms.loading} value={formId} hasClear onChange={setFormId}
-            options={publishedForms.map(form => ({ value: String(form.id), label: form.name }))} />
-        )}
-      </div>
-
-      <TextArea label="Description" isOptional rows={2} {...field('description')} />
-      <Feedback error={segments.error || emails.error || forms.error || stages.error} />
-      {triggerType === 'segment' && segments.data && !publishedSegments.length ? <Text color="secondary">Create and publish a segment in Audience first.</Text> : null}
-      {triggerType === 'form' && forms.data && !publishedForms.length ? <Text color="secondary">Create and publish a lead form in the Lead forms tab first.</Text> : null}
-
-      {steps.map((step, index) => {
-        const canCondition = index > 0 && steps[index - 1].kind === 'email';
-        return <div key={step.key} className="ov-step">
-          <div className="ov-step-heading">
-            <Text weight="semibold">Step {index + 1}</Text>
-            {steps.length > 1 ? <IconButton variant="ghost" size="sm" label={`Remove step ${index + 1}`} icon={<Trash2 size={15} />}
-              onClick={() => setSteps(items => items.filter(item => item.key !== step.key))} /> : null}
-          </div>
-
-          <div className="ov-form-grid">
-            <Selector label={`Step ${index + 1} action`} value={step.kind} options={stepKindOptions}
-              onChange={value => updateStep(step.key, { kind: (value as WorkflowStepKind) || 'email' })} />
-            <NumberInput label={`Step ${index + 1} delay`} units="minutes" min={0} max={525600} isIntegerOnly value={step.delayMinutes}
-              description={delayLabel(step.delayMinutes)} onChange={value => updateStep(step.key, { delayMinutes: value })} />
-          </div>
-
-          {step.kind === 'email' ? (
-            <>
-              <Selector label={`Step ${index + 1} email`} placeholder="Choose a published journey email"
-                value={step.emailId ? String(step.emailId) : null} hasClear
-                onChange={value => updateStep(step.key, { emailId: Number(value) || 0 })} options={emailOptions} />
-              {emails.data && !publishedEmails.length ? <Text type="supporting" color="secondary">Create and publish a journey email first.</Text> : null}
-            </>
-          ) : null}
-
-          {step.kind === 'tags' ? (
-            <div className="ov-form-grid">
-              <TextInput label="Add tags" description="Comma-separated" placeholder="engaged, prospect"
-                value={step.addTagsText} onChange={value => updateStep(step.key, { addTagsText: value })} />
-              <TextInput label="Remove tags" description="Comma-separated" placeholder="cold"
-                value={step.removeTagsText} onChange={value => updateStep(step.key, { removeTagsText: value })} />
-            </div>
-          ) : null}
-
-          {step.kind === 'points' ? (
-            <NumberInput label="Score change" description="Positive to add points, negative to deduct (non-zero)."
-              min={-10000} max={10000} isIntegerOnly value={step.pointsDelta}
-              onChange={value => updateStep(step.key, { pointsDelta: value })} />
-          ) : null}
-
-          {step.kind === 'segment' ? (
-            <div className="ov-form-grid">
-              <div className="ov-stack-sm">
-                <Selector label="Add to segment" placeholder="Select segment to add" value={null} hasClear
-                  options={segmentOptions.filter(opt => !step.addSegmentIds.includes(Number(opt.value)))}
-                  onChange={value => {
-                    const id = Number(value);
-                    if (id) updateStep(step.key, { addSegmentIds: [...step.addSegmentIds, id] });
-                  }} />
-                {step.addSegmentIds.length ? <div className="ov-tags">
-                  {step.addSegmentIds.map(id => <Token key={id} size="sm" color="green"
-                    label={allSegments.find(s => s.id === id)?.name || `Segment ${id}`}
-                    onRemove={() => updateStep(step.key, { addSegmentIds: step.addSegmentIds.filter(item => item !== id) })} />)}
-                </div> : null}
-              </div>
-              <div className="ov-stack-sm">
-                <Selector label="Remove from segment" placeholder="Select segment to remove" value={null} hasClear
-                  options={segmentOptions.filter(opt => !step.removeSegmentIds.includes(Number(opt.value)))}
-                  onChange={value => {
-                    const id = Number(value);
-                    if (id) updateStep(step.key, { removeSegmentIds: [...step.removeSegmentIds, id] });
-                  }} />
-                {step.removeSegmentIds.length ? <div className="ov-tags">
-                  {step.removeSegmentIds.map(id => <Token key={id} size="sm" color="red"
-                    label={allSegments.find(s => s.id === id)?.name || `Segment ${id}`}
-                    onRemove={() => updateStep(step.key, { removeSegmentIds: step.removeSegmentIds.filter(item => item !== id) })} />)}
-                </div> : null}
-              </div>
-            </div>
-          ) : null}
-
-          {step.kind === 'stage' ? (
-            <>
-              <Selector label="Target lifecycle stage" placeholder="Select a lifecycle stage"
-                value={step.stageId ? String(step.stageId) : null} hasClear options={stageOptions}
-                onChange={value => updateStep(step.key, { stageId: Number(value) || 0 })} />
-              {stages.data && !stageList.length ? <Text type="supporting" color="secondary">Create lifecycle stages in Audience → Tags &amp; stages first.</Text> : null}
-            </>
-          ) : null}
-
-          {canCondition ? (
-            <Selector label={`Step ${index + 1} condition`} value={step.condition ?? 'none'} options={conditions}
-              onChange={value => updateStep(step.key, { condition: value === 'opened_previous' || value === 'clicked_previous' ? value : undefined })} />
-          ) : null}
-        </div>;
-      })}
-
-      {steps.length < maxWorkflowSteps ? <div>
-        <Button label="Add step" icon={<Plus size={15} />} onClick={() => setSteps(items => [...items, makeEmptyStep(nextKey.current++)])} />
-      </div> : null}
-      <Feedback error={action.error} />
-      <FormActions>
-        <Button label="Cancel" onClick={onClose} />
-        <Button type="submit" variant="primary" label={workflow ? 'Save changes' : 'Save workflow'} isLoading={action.busy} isDisabled={!ready || !values.name.trim()} />
-      </FormActions>
-    </form>
-  </Modal>;
-}
+/* ── Enrolled Contacts Drawer (the editor lives in workflow-canvas.tsx) ────── */
 
 function WorkflowContactsDrawer({ workflow, onClose }: { workflow: Workflow; onClose: () => void }) {
   const enrolled = useResource<WorkflowContact[]>(`${workflowPath}/${workflow.id}/contacts`);
@@ -1942,15 +1618,7 @@ export function Automations({ initialTab }: { initialTab?: string }) {
   }
 
   function describeTrigger(workflow: Workflow) {
-    if (workflow.formId && !workflow.segmentId) {
-      const formName = forms.data?.find(item => item.id === workflow.formId)?.name || `Lead form #${workflow.formId}`;
-      return `Lead form: ${formName}`;
-    }
-    if (workflow.segmentId) {
-      const segName = segments.data?.find(item => item.id === workflow.segmentId)?.name || `Segment #${workflow.segmentId}`;
-      return `Segment: ${segName}`;
-    }
-    return 'Managed trigger';
+    return describeSources(workflowGraphOf(workflow), { segments: segments.data, forms: forms.data });
   }
 
   const createAction: Record<AutomationsTab, [string, () => void]> = {
@@ -1974,7 +1642,16 @@ export function Automations({ initialTab }: { initialTab?: string }) {
       notice={notice || action.notice}
     />
 
-    {tab === 'Workflows' ? <Panel title="Workflows" description="A workflow shows as Active only after the automation engine confirms it is enabled.">
+    {tab === 'Workflows' && workflowEditor ? <WorkflowCanvasEditor key={workflowEditor === 'new' ? 'new' : workflowEditor.id}
+      workflow={workflowEditor === 'new' ? undefined : workflowEditor}
+      onClose={() => setWorkflowEditor(undefined)}
+      onDone={() => {
+        setNotice(workflowEditor === 'new' ? 'Workflow saved. Enable it to start enrolling contacts.' : 'Changes saved.');
+        setWorkflowEditor(undefined);
+        workflows.refresh();
+      }} /> : null}
+
+    {tab === 'Workflows' && !workflowEditor ? <Panel title="Workflows" description="A workflow shows as Active only after the automation engine confirms it is enabled.">
       {!workflows.data ? <AsyncState loading={workflows.loading} error={workflows.error} retry={workflows.refresh} />
         : workflows.data.length ? <div className="ov-stack-sm">{workflows.data.map(workflow => <article className="ov-step" key={workflow.id}>
           <div className="ov-step-heading">
@@ -1993,7 +1670,10 @@ export function Automations({ initialTab }: { initialTab?: string }) {
               </Text> : null}
             </span>
             <Text type="supporting" color="secondary">{delayLabel(step.delayMinutes)}</Text>
-          </li>)}</ol> : null}
+          </li>)}</ol> : workflow.graph?.nodes.length ? <WorkflowOutline graph={workflow.graph}
+            lookups={{ emails: emails.data, segments: segments.data, forms: forms.data, stages: stages.data }} /> : null}
+          {workflow.editable === false && workflow.readOnlyReason ? <Text type="supporting" color="secondary">{workflow.readOnlyReason}</Text> : null}
+          {workflow.enabled ? <Text type="supporting" color="secondary">Pause the workflow to edit it.</Text> : null}
           <div className="ov-actions">
             {!workflow.enabled && workflow.editable !== false ? <Button size="sm" label="Edit workflow" icon={<Pencil size={14} />}
               onClick={() => setWorkflowEditor(workflow)} /> : null}
@@ -2277,14 +1957,6 @@ export function Automations({ initialTab }: { initialTab?: string }) {
             },
           ]} />}
     </Panel> : null}
-
-    {workflowEditor ? <WorkflowForm workflow={workflowEditor === 'new' ? undefined : workflowEditor}
-      onClose={() => setWorkflowEditor(undefined)}
-      onDone={() => {
-        setNotice(workflowEditor === 'new' ? 'Workflow saved. Enable it to start enrolling contacts.' : 'Changes saved.');
-        setWorkflowEditor(undefined);
-        workflows.refresh();
-      }} /> : null}
 
     {workflowContacts ? <WorkflowContactsDrawer workflow={workflowContacts} onClose={() => setWorkflowContacts(undefined)} /> : null}
 

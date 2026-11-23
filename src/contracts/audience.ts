@@ -199,6 +199,10 @@ export type CompanyInput = {
   country?: string;
 };
 
+/** Property keys Mautic reads per action type (EmailBundle/Helper/PointEventHelper.php:23, FormBundle/Helper/PointActionHelper.php:11, PageBundle/Helper/PointActionHelper.php:42, PointModel.php:356). */
+export const pointActionTypeKeys = ['email.open', 'email.send', 'form.submit', 'page.hit', 'url.hit', 'asset.download'] as const;
+export type PointActionTypeKey = (typeof pointActionTypeKeys)[number];
+
 export type PointAction = {
   id: number;
   name: string;
@@ -206,6 +210,11 @@ export type PointAction = {
   type: string;
   delta: number;
   published: boolean;
+  /** Which email, page, form, asset or URL the rule is limited to. Empty means any. */
+  properties: Record<string, unknown>;
+  repeatable: boolean;
+  groupId: number | null;
+  groupName: string | null;
 };
 
 export type PointActionInput = {
@@ -214,6 +223,9 @@ export type PointActionInput = {
   type: string;
   delta: number;
   published?: boolean;
+  properties?: Record<string, unknown>;
+  repeatable?: boolean;
+  groupId?: number | null;
 };
 
 export type PointTriggerEvent = {
@@ -642,3 +654,107 @@ export function segmentFilterFromRule(rule: SegmentRule, field: SegmentFilterFie
   }
   return { ...base, filter: raw };
 }
+
+
+/* ── Contact list: search grammar, sorting, saved views ──────────────────── */
+
+/** Columns the contact list can be sorted by, mapped to Mautic's `l.` columns server-side. */
+export const contactSortKeys = [
+  'createdAt', 'updatedAt', 'lastActive', 'email', 'firstName', 'lastName', 'company', 'city', 'country', 'position', 'points', 'id',
+] as const;
+export type ContactSortKey = (typeof contactSortKeys)[number];
+
+export type ContactSearchCommand = { command: string; label: string; example: string; description: string };
+
+/** The 28 commands LeadRepository::getSearchCommands() registers (LeadRepository.php:1021-1052), spelled as Mautic's English translations spell them. */
+export const contactSearchCommands: ContactSearchCommand[] = [
+  { command: 'is:anonymous', label: 'Anonymous visitors', example: 'is:anonymous', description: 'Contacts that have not been identified.' },
+  { command: 'is:mine', label: 'My contacts', example: 'is:mine', description: 'Contacts owned by the connected API user.' },
+  { command: 'is:unowned', label: 'Unowned', example: 'is:unowned', description: 'Contacts with no owner.' },
+  { command: 'segment', label: 'Segment', example: 'segment:newsletter', description: 'Members of a segment, by segment alias.' },
+  { command: 'campaign', label: 'Campaign', example: 'campaign:12', description: 'Members of a campaign, by campaign id.' },
+  { command: 'name', label: 'Name', example: 'name:ada', description: 'First or last name.' },
+  { command: 'company', label: 'Company', example: 'company:northwind', description: 'Company name.' },
+  { command: 'company_id', label: 'Company id', example: 'company_id:4', description: 'Linked company, by id.' },
+  { command: 'email', label: 'Email', example: 'email:*@example.com', description: 'Email address.' },
+  { command: 'owner', label: 'Owner', example: 'owner:admin', description: 'Contacts owned by a user.' },
+  { command: 'ip', label: 'IP address', example: 'ip:203.0.113.5', description: 'Contacts seen from an IP address.' },
+  { command: 'tag', label: 'Tag', example: 'tag:vip', description: 'Contacts with a tag.' },
+  { command: 'stage', label: 'Lifecycle stage', example: 'stage:lead', description: 'Contacts in a lifecycle stage.' },
+  { command: 'common', label: 'In several segments', example: 'common:"a,b"', description: 'Contacts common to the listed segments.' },
+  { command: 'email_sent', label: 'Email sent', example: 'email_sent:5', description: 'Contacts sent an email, by email id.' },
+  { command: 'email_read', label: 'Email read', example: 'email_read:5', description: 'Contacts who read an email, by email id.' },
+  { command: 'email_queued', label: 'Email queued', example: 'email_queued:5', description: 'Contacts with an email queued, by email id.' },
+  { command: 'email_pending', label: 'Email pending', example: 'email_pending:5', description: 'Contacts with an email pending, by email id.' },
+  { command: 'page_source', label: 'Page source', example: 'page_source:page', description: 'Contacts by the source of a page visit.' },
+  { command: 'page_source_id', label: 'Page source id', example: 'page_source_id:3', description: 'Contacts by the id of a page source.' },
+  { command: 'import_id', label: 'Import id', example: 'import_id:7', description: 'Contacts created or updated by a Mautic import.' },
+  { command: 'import_action', label: 'Import action', example: 'import_action:created', description: 'Contacts by import action.' },
+  { command: 'page_id', label: 'Page visited', example: 'page_id:3', description: 'Contacts who visited a page, by id.' },
+  { command: 'sms_sent', label: 'Text message sent', example: 'sms_sent:2', description: 'Contacts sent a text message, by id.' },
+  { command: 'web_sent', label: 'Web notification sent', example: 'web_sent:2', description: 'Contacts sent a web notification, by id.' },
+  { command: 'mobile_sent', label: 'Mobile notification sent', example: 'mobile_sent:2', description: 'Contacts sent a mobile notification, by id.' },
+  { command: 'dnc', label: 'Do not contact', example: 'dnc:any', description: 'Contacts marked do not contact, for any or one channel.' },
+  { command: 'form', label: 'Form', example: 'form:3', description: 'Contacts who submitted a form, by id.' },
+];
+
+export type ContactView = {
+  id: string;
+  name: string;
+  search: string;
+  sortBy: ContactSortKey;
+  sortDir: 'asc' | 'desc';
+  createdBy: string | null;
+  updatedAt: string;
+};
+
+export type ContactViewInput = { name: string; search: string; sortBy: ContactSortKey; sortDir: 'asc' | 'desc' };
+
+/* ── Contact timeline ─────────────────────────────────────────────────────── */
+
+export type TimelineEvent = { id: string; type: string; typeLabel: string; label: string; at: string; href?: string };
+
+export type ContactTimeline = {
+  events: TimelineEvent[];
+  /** Every event type the engine reports, as key to label, for the filter menu. */
+  types: Record<string, string>;
+  total: number;
+  page: number;
+  limit: number;
+};
+
+export type TimelineQuery = { search?: string; include?: string[]; exclude?: string[]; page?: number; limit?: number; dir?: 'asc' | 'desc' };
+
+/* ── Contact import ───────────────────────────────────────────────────────── */
+
+export const importCoreFields = [
+  'email', 'firstName', 'lastName', 'company', 'phone', 'position', 'city', 'country', 'website', 'tags', 'consent', 'evidence',
+] as const;
+
+/** Maps a CSV column header to a target: a core field name, `custom:<alias>`, or `skip`. */
+export type ImportMapping = Record<string, string>;
+
+export type ImportPreview = {
+  headers: string[];
+  rows: string[][];
+  rowCount: number;
+  mapping: ImportMapping;
+  targets: { value: string; label: string }[];
+};
+
+export type ImportStatus = 'draft' | 'queued' | 'running' | 'done' | 'failed';
+
+export type ImportRun = {
+  id: string;
+  fileName: string;
+  status: ImportStatus;
+  dryRun: boolean;
+  total: number;
+  processed: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: number;
+  createdAt: string;
+  finishedAt: string | null;
+};

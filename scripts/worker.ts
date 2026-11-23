@@ -1,5 +1,5 @@
 import { setTimeout as wait } from 'node:timers/promises';
-import { checkRecipient, eraseContact, propagateSuppression, syncContact, syncSegment } from '../src/server/audience';
+import { checkRecipient, eraseContact, propagateSuppression, runContactImport, syncContact, syncSegment } from '../src/server/audience';
 import { appOrigin, logError, requiredEnv } from '../src/server/config';
 import { db } from '../src/server/db';
 import { createRelay } from '../src/server/delivery';
@@ -25,6 +25,7 @@ async function run(job: Job) {
     case 'segment_sync': return syncSegment(job.payload.segmentId, job.payload.page);
     case 'suppress': return propagateSuppression(job.payload.contactId, job.payload.reason);
     case 'erase': return eraseContact(job.payload.contactId);
+    case 'contact_import': return runContactImport(job.payload.importId);
   }
 }
 

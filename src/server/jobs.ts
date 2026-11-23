@@ -8,6 +8,7 @@ export type JobData = {
   segment_sync: { segmentId: number; page: number };
   suppress: { contactId: number; reason: 'unsubscribe' | 'bounce' | 'complaint' | 'erasure' };
   erase: { contactId: number };
+  contact_import: { importId: string };
 };
 export type Job = {
   [Kind in keyof JobData]: {

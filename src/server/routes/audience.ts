@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import { pointTriggerEventTypes, segmentOperatorKeys, type CustomFieldObject } from '@/contracts';
+import { contactSortKeys, pointTriggerEventTypes, segmentOperatorKeys, type CustomFieldObject } from '@/contracts';
 import { recordActivity } from '@/server/activity';
 import {
-  bulkUpdateContacts, clearContactBounces, contactDetail, contactDirectory, contactFields,
-  deleteListSafely, deleteSegmentSafely, enqueueSegmentSync, exportContact, exportContacts,
-  importContacts, listSuppressions, manualSuppress, requestErasure, resendContactOptin, saveContact,
+  bulkUpdateContacts, clearContactBounces, contactDetail, contactDirectory, contactFields, createImportDraft,
+  deleteContactView, deleteListSafely, deleteSegmentSafely, enqueueSegmentSync, exportContact, exportContacts, getImport,
+  importIssuesCsv, listContactViews, listImports, listSuppressions, saveContactView, startImport, manualSuppress, requestErasure, resendContactOptin, saveContact,
   sendContactEmail, setConsent, updateMailingList, updateMembership,
 } from '@/server/audience';
 import { rateLimit } from '@/server/auth';
@@ -27,6 +27,17 @@ const segmentFilter = z.object({
   ]),
 });
 
+const contactView = z.object({
+  name: z.string().trim().min(1).max(80),
+  search: z.string().trim().max(300),
+  sortBy: z.enum(contactSortKeys),
+  sortDir: z.enum(['asc', 'desc']),
+});
+
+const pointProperties = z.record(z.string().max(40), z.union([
+  z.string().max(500), z.number(), z.boolean(), z.array(z.union([z.number(), z.string().max(100)])).max(200),
+]));
+
 const triggerEvents = z.array(z.object({
   id: numberId.optional(),
   name: z.string().trim().max(120).optional(),
@@ -37,12 +48,21 @@ const triggerEvents = z.array(z.object({
 export const audienceEndpoints: Entry[] = [
   /* ── Audience: Contacts, Notes, Consent, Suppressions, Bulk ──────────────── */
   route('GET', /^contacts$/, async ({ query }) => contactDirectory({
-    search: z.string().trim().max(128).optional().parse(query.get('q') ?? undefined),
+    search: z.string().trim().max(300).optional().parse(query.get('q') ?? undefined),
     page: page(query),
     segmentId: query.has('segmentId') ? numberId.parse(query.get('segmentId')) : undefined,
-    limit: query.has('limit') ? z.coerce.number().int().min(1).max(50).parse(query.get('limit')) : undefined,
+    limit: query.has('limit') ? z.coerce.number().int().min(1).max(500).parse(query.get('limit')) : undefined,
     tag: z.string().trim().max(70).optional().parse(query.get('tag') ?? undefined),
+    orderBy: z.enum(contactSortKeys).optional().parse(query.get('orderBy') ?? undefined),
+    orderByDir: z.enum(['asc', 'desc']).optional().parse(query.get('orderByDir') ?? undefined),
   }), 'marketer'),
+  route('GET', /^contact-views$/, async () => listContactViews(), 'marketer'),
+  route('POST', /^contact-views$/, async ({ request, user }) => json(await saveContactView(await readBody(request, contactView), user.id), 201), 'marketer'),
+  route('PATCH', /^contact-views\/([0-9a-f-]{36})$/, async context => saveContactView(await readBody(context.request, contactView), context.user.id, z.uuid().parse(context.params[0])), 'marketer'),
+  route('DELETE', /^contact-views\/([0-9a-f-]{36})$/, async context => {
+    await deleteContactView(z.uuid().parse(context.params[0]));
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
   route('POST', /^contacts$/, async ({ request }) => {
     const contact = await saveContact(await readBody(request, contactFields));
     await recordActivity('Contact saved', '/audience');
@@ -58,9 +78,24 @@ export const audienceEndpoints: Entry[] = [
     }));
     return bulkUpdateContacts(input);
   }, 'marketer'),
-  route('POST', /^contacts\/import$/, async ({ request }) => {
-    const body = await readBody(request, z.object({ csv: z.string().min(1).max(1_000_000), evidence: z.string().trim().max(500).optional() }), 1_200_000);
-    return importContacts(body.csv, body.evidence);
+  // Import: upload and suggest a mapping, then start a dry run or the real run as a background job.
+  route('POST', /^contacts\/imports$/, async ({ request, user }) => {
+    const body = await readBody(request, z.object({
+      csv: z.string().min(1).max(25_000_000), fileName: z.string().trim().max(200).optional(), evidence: z.string().trim().max(500).optional(),
+    }), 26_000_000);
+    return json(await createImportDraft(body.csv, body.fileName ?? 'contacts.csv', user.id, body.evidence), 201);
+  }, 'marketer'),
+  route('GET', /^contacts\/imports$/, async () => listImports(), 'marketer'),
+  route('GET', /^contacts\/imports\/([0-9a-f-]{36})$/, async context => getImport(z.uuid().parse(context.params[0])), 'marketer'),
+  route('GET', /^contacts\/imports\/([0-9a-f-]{36})\/issues$/, async context => new Response(await importIssuesCsv(z.uuid().parse(context.params[0])), {
+    headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="ovelio-import-issues.csv"', 'Cache-Control': 'no-store' },
+  }), 'marketer'),
+  route('POST', /^contacts\/imports\/([0-9a-f-]{36})\/start$/, async context => {
+    const body = await readBody(context.request, z.object({
+      mapping: z.record(z.string().max(200), z.string().max(80)),
+      dryRun: z.boolean(), updateExisting: z.boolean(), evidence: z.string().trim().max(500).optional(),
+    }));
+    return json(await startImport(z.uuid().parse(context.params[0]), body), 202);
   }, 'marketer'),
   route('GET', /^contacts\/export$/, async () => new Response(await exportContacts(), {
     headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="ovelio-contacts.csv"', 'Cache-Control': 'no-store' },
@@ -114,6 +149,14 @@ export const audienceEndpoints: Entry[] = [
     await recordActivity('Contact lifecycle stage updated', `/audience/${contactId}`);
     return contactDetail(contactId);
   }, 'marketer'),
+  route('GET', /^contacts\/(\d+)\/timeline$/, async context => mautic.contactTimeline(id(context), {
+    search: z.string().trim().max(200).optional().parse(context.query.get('q') ?? undefined),
+    include: z.array(z.string().max(60)).max(60).parse(context.query.getAll('include')),
+    exclude: z.array(z.string().max(60)).max(60).parse(context.query.getAll('exclude')),
+    page: page(context.query),
+    limit: context.query.has('limit') ? z.coerce.number().int().min(1).max(100).parse(context.query.get('limit')) : undefined,
+    dir: z.enum(['asc', 'desc']).optional().parse(context.query.get('dir') ?? undefined),
+  }), 'marketer'),
   route('GET', /^contacts\/(\d+)\/notes$/, async context => mautic.contactNotes(id(context)), 'marketer'),
   route('POST', /^contacts\/(\d+)\/notes$/, async context => {
     const input = await readBody(context.request, z.object({
@@ -278,11 +321,14 @@ export const audienceEndpoints: Entry[] = [
   }, 'marketer'),
   route('GET', /^point-actions$/, async () => mautic.pointActions(), 'marketer'),
   route('GET', /^point-actions\/types$/, async () => mautic.pointActionTypes(), 'marketer'),
+  route('GET', /^point-groups$/, async () => mautic.pointGroups(), 'marketer'),
   route('POST', /^point-actions$/, async ({ request }) => json(await mautic.createPointAction(await readBody(request, z.object({
     name, description, type: z.string().trim().min(1).max(80), delta: z.number().int().min(-10000).max(10000), published: z.boolean().optional(),
+    properties: pointProperties.optional(), repeatable: z.boolean().optional(), groupId: numberId.nullable().optional(),
   }))), 201), 'marketer'),
   route('PATCH', /^point-actions\/(\d+)$/, async context => mautic.updatePointAction(id(context), await readBody(context.request, z.object({
     name: name.optional(), description, type: z.string().trim().min(1).max(80).optional(), delta: z.number().int().min(-10000).max(10000).optional(), published: z.boolean().optional(),
+    properties: pointProperties.optional(), repeatable: z.boolean().optional(), groupId: numberId.nullable().optional(),
   }))), 'marketer'),
   route('DELETE', /^point-actions\/(\d+)$/, async context => {
     await mautic.deletePointAction(id(context));

@@ -676,6 +676,7 @@ test('reads retention, journeys, attribution, and multi-dimensional breakdown', 
       utmContent: [{ label: 'hero', value: 2 }],
       utmTerm: [{ label: 'automation', value: 1 }],
       total: { pageviews: 25, visitors: 10, visits: 12 },
+      revenue: null,
     },
   );
 

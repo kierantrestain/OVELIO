@@ -21,14 +21,14 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 |---|---|---|---|---|---|---|
 | AUD-01 | **BUG** Point triggers are created and updated with no `events`, so they never fire (`src/server/mautic/index.ts:672-695`) | P0 | M | done | Create/edit send `events` (type and properties). The UI offers all 7 trigger event types. Unit test asserts the payload | R1#20-21 |
 | AUD-02 | **BUG** Custom field values are dropped: `contactPayload` and `toContact` handle only 9 core fields (`index.ts:93-111`, `normalize.ts:74-103`, `audience.ts:494`) | P0 | M | done | Custom field values are read, written, imported, exported and shown on the contact. Type-validated against the field definition | R1#2 |
-| AUD-03 | Contact list: full search grammar (Mautic has 27 search commands), sort by any listable field, page size over 100, saved views | P0 | M | todo | Parity with Mautic's `GET /contacts` search, orderBy and limit | R1#4 |
+| AUD-03 | Contact list: full search grammar (Mautic has 27 search commands), sort by any listable field, page size over 100, saved views | P0 | M | review | Parity with Mautic's `GET /contacts` search, orderBy and limit | R1#4 |
 | AUD-04 | Segment filter fields: from 6 to about 55 (custom contact and company fields, stage, segment membership, 6 DNC keys, devices, UTM, email, page and asset behaviours, point groups) | P0 | L | review | Every Mautic filter family is selectable, with a type-aware value input | R1#6 |
 | AUD-05 | Segment operators per field type: from 6 to 24, including regexp, between, empty and not empty, `in_all`, and relative dates (`inLast`/`inNext`). The UI shows only operators that are valid for the field type (`audience.tsx:96-112` shows all of them for every field) | P0 | M | review | Operator matrix matches Mautic's per-type table. Relative-date filters work | R1#7-8 |
 | AUD-06 | Segment rebuild and status: trigger a rebuild, show the last-built time, member count and a member preview. Mautic only materialises membership on its cron (batch 300, 1 s sleep per batch), and nothing recomputes on contact change | P0 | M | review | The segment page shows count, last built and the first 50 members. Rebuild-now works | R1#9-10 |
-| AUD-07 | Point actions: set `properties` (which email, page, form or URL), `repeatable` and `group`. Add `email.send` to the type list | P0 | M | todo | All 6 action types are configurable end to end | R1#18-19 |
+| AUD-07 | Point actions: set `properties` (which email, page, form or URL), `repeatable` and `group`. Add `email.send` to the type list | P0 | M | review | All 6 action types are configurable end to end | R1#18-19 |
 | AUD-08 | Do-not-contact: add and remove per channel and reason (1 unsubscribed, 2 bounced, 3 manual). DNC as a segment filter. One source of truth with OVELIO `suppressions` (see X-06) | P0 | M | todo | DNC can be removed. The segment filter works. No disagreement between DNC and suppressions | R1#25-26 |
-| AUD-09 | Contact timeline: complete, filterable by event type, paginated (today it is the last 25 events, unfiltered) | P0 | M | todo | All Mautic timeline event types, with paging. Feeds X-02 | R1#27 |
-| AUD-10 | Import: async job with progress, column mapping including custom fields, dry run, no 500-row cap, no global serial lock | P0 | M | todo | Imports 100k rows through the job queue with mapping and a dry-run report | R1#30 |
+| AUD-09 | Contact timeline: complete, filterable by event type, paginated (today it is the last 25 events, unfiltered) | P0 | M | review | All Mautic timeline event types, with paging. Feeds X-02 | R1#27 |
+| AUD-10 | Import: async job with progress, column mapping including custom fields, dry run, no 500-row cap, no global serial lock | P0 | M | review | Imports 100k rows through the job queue with mapping and a dry-run report | R1#30 |
 | AUD-11 | Merge and dedupe. Mautic has no REST merge, so OVELIO must own it: a duplicates queue, merge preview, Mautic's rules (sum points, union tags and companies, newest value wins per field) | P0 | L | todo | Duplicates are listed. A merge preview shows the result. The merge is executed and audited | R1#32 |
 | AUD-12 | Custom field definitions: all 18 types and the missing flags (unique identifier, listable, index, character limit, order) | P1 | S | todo | Parity with `lead_fields` | R1#3 |
 | AUD-13 | Segment-in-segment filters, and preference-centre and global segment flags | P1 | M | todo | — | R1#12 |
@@ -45,9 +45,9 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 | ID | Item | Pri | Eff | Status | Done when | Ref |
 |---|---|---|---|---|---|---|
 | AUT-01 | **BUG** The console route caps workflows at 12 steps while the library allows 20 (`route.ts:77` vs `workflows.ts:185`) | P0 | S | done | One shared limit | R2 |
-| AUT-02 | Branching workflow canvas: yes/no paths and nested events, stored as Mautic's `parent_id` plus `decision_path`. Any Mautic campaign graph opens and saves; nothing is read-only (`editable:false`, `workflows.ts:87-100`) | P0 | L | todo | Round-trips every campaign graph the engine can hold | R2#1 |
+| AUT-02 | Branching workflow canvas: yes/no paths and nested events, stored as Mautic's `parent_id` plus `decision_path`. Any Mautic campaign graph opens and saves; nothing is read-only (`editable:false`, `workflows.ts:87-100`) | P0 | L | review | Round-trips every campaign graph the engine can hold | R2#1 |
 | AUT-03 | Conditions: all 14 immediate yes/no evaluations | P0 | M | todo | — | R2#2,6 |
-| AUT-04 | "No action after X" paths: decisions get their negative branch after a wait. Today only the yes anchor is created, so a contact who never opens waits forever (`workflows.ts:233-235`) | P0 | M | todo | Contacts who don't act move down the no path at the deadline | R2#3 |
+| AUT-04 | "No action after X" paths: decisions get their negative branch after a wait. Today only the yes anchor is created, so a contact who never opens waits forever (`workflows.ts:233-235`) | P0 | M | review | Contacts who don't act move down the no path at the deadline | R2#3 |
 | AUT-05 | Action catalogue: from 5 to 26 | P0 | M | todo | Every registered Mautic action is configurable | R2#4 |
 | AUT-06 | Per-contact run state: event log with scheduled, executed and failed states, from `/campaigns/events/contact/{id}` | P0 | M | todo | The contact and workflow views show where each contact is and why | R2#11 |
 | AUT-07 | Form field types: from 5 to 24 | P0 | M | review | — | R2#16 |
@@ -102,12 +102,12 @@ The single scoreboard for reaching, then beating, Mautic 7.2.2, Listmonk 6.2.0 a
 | ANA-02 | **BUG** `IGNORE_BOT: 1` in `compose.yaml:340` is never read (Umami reads `DISABLE_BOT_CHECK`). Remove it and document the real variable | P0 | S | done | — | R4#34 |
 | ANA-03 | **BUG (inferred)** Tracked-link `/q/`, pixel `/p/` and `/share/` URLs go through Caddy to the Next app, which has no such routes (`deploy/Caddyfile:100-105`) | P0 | S | done | Each URL type works in the integration suite | R4#25-27 |
 | ANA-04 | **BUG** The adapter drops `channel` and `screen` filters that the route accepts. Route and adapter limits disagree (funnel window 1440 vs 10080, breakdown fields 4 vs 10, step length 200 vs 500). Attribution ignores filters and currency | P0 | S | done | One set of limits. Every accepted filter is applied | R4 |
-| ANA-05 | Snippet options UI (domains, do-not-track, exclude search and hash, tag, performance, before-send) and a consent wrapper | P0 | M | todo | — | R4#1,35 |
+| ANA-05 | Snippet options UI (domains, do-not-track, exclude search and hash, tag, performance, before-send) and a consent wrapper | P0 | M | review | — | R4#1,35 |
 | ANA-06 | Filter engine: from 18 equality-only dimensions to 23 dimensions × 16 operators, OR matching, segment and cohort parameters, property filters | P0 | M | review | — | R4#6 |
-| ANA-07 | ★ Channel classification: treat `utm_medium=newsletter`/`email` as email, `fbclid` as paid, and make the rules editable. Umami hard-codes a first-match SQL CASE | P0 | M | todo | Rules are applied the same way in every report | R4#10 |
-| ANA-08 | Attribution with filters, revenue and a cross-session lookback. Revenue by UTM and campaign | P0 | M | todo | — | R4#17-18 |
+| ANA-07 | ★ Channel classification: treat `utm_medium=newsletter`/`email` as email, `fbclid` as paid, and make the rules editable. Umami hard-codes a first-match SQL CASE | P0 | M | review | Rules are applied the same way in every report | R4#10 |
+| ANA-08 | Attribution with filters, revenue and a cross-session lookback. Revenue by UTM and campaign | P0 | M | review | — | R4#17-18 |
 | ANA-09 | Session properties (`session_data`) shown and filterable | P0 | M | review | — | R4#22 |
-| ANA-10 | Server-side events API: authenticated and idempotent, wrapping `/api/batch` and `/api/record` (not proxied today) | P0 | M | todo | — | R4#33 |
+| ANA-10 | Server-side events API: authenticated and idempotent, wrapping `/api/batch` and `/api/record` (not proxied today) | P0 | M | review | — | R4#33 |
 | ANA-11 | Goals, tracked links and pixels completed (after ANA-03) | P0 | S | review | — | R4#13,25-26 |
 | ANA-12 | Timezone, units and comparison periods (forced to UTC with hour and day units today) | P1 | S | todo | — | R4#7 |
 | ANA-13 | UTM builder and campaign link generator | P1 | S | todo | — | R4#12 |

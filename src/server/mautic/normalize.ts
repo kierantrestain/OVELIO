@@ -227,6 +227,11 @@ export function toPointAction(value: ApiRecord): PointAction {
     type: text(value.type),
     delta: number(value.delta) ?? 0,
     published: published(value),
+    properties: value.properties && typeof value.properties === 'object' && !Array.isArray(value.properties)
+      ? value.properties as Record<string, unknown> : {},
+    repeatable: flag(value.repeatable),
+    groupId: positiveId(value.group && typeof value.group === 'object' ? record(value.group).id : value.group),
+    groupName: value.group && typeof value.group === 'object' ? text(record(value.group).name) || null : null,
   };
 }
 

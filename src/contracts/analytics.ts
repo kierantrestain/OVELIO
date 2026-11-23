@@ -430,6 +430,12 @@ export type JourneyPath = {
 };
 
 export type AttributionResult = {
+  /** Set when a lookback window widened the date range sent to the analytics engine (ANA-08). */
+  lookbackDays?: number;
+  /** The first moment the engine searched for earlier visits (the range start minus the lookback). */
+  searchedFrom?: number;
+  /** Revenue recorded in the range under the same filters, when the site records revenue (ANA-08). */
+  revenue?: { currency: string; sum: number; count: number } | null;
   referrer: Point[];
   paidAds: Point[];
   utmSource: Point[];
@@ -636,3 +642,62 @@ export type SessionPropertyEntry = {
   value: string;
   dataType: number;
 };
+
+/* ── ANA-05: tracking snippet options and consent ─────────────────────────── */
+
+export type SnippetOptions = {
+  domains: string[];
+  doNotTrack: boolean;
+  excludeSearch: boolean;
+  excludeHash: boolean;
+  tag: string;
+  /** Turn off to stop automatic page views and clicks; the site then calls umami.track itself. */
+  autoTrack: boolean;
+  hostUrl: string;
+  /** Name of a global function the tracker calls before each send. */
+  beforeSend: string;
+  performance: boolean;
+  /** Load nothing until the site calls ovelioConsent.grant(). */
+  consentMode: boolean;
+};
+
+export const DEFAULT_SNIPPET_OPTIONS: SnippetOptions = {
+  domains: [], doNotTrack: false, excludeSearch: false, excludeHash: false, tag: '', autoTrack: true,
+  hostUrl: '', beforeSend: '', performance: false, consentMode: false,
+};
+
+export type SnippetPreferences = { websiteId: string; options: SnippetOptions; updatedAt: string | null };
+
+/* ── ANA-07: channel rules ────────────────────────────────────────────────── */
+
+export const CHANNEL_FIELDS = ['referrer', 'utmSource', 'utmMedium', 'query'] as const;
+export type ChannelField = (typeof CHANNEL_FIELDS)[number];
+export const CHANNEL_OPERATORS = ['contains', 'equals', 'present', 'absent'] as const;
+export type ChannelOperator = (typeof CHANNEL_OPERATORS)[number];
+
+export type ChannelCondition = { field: ChannelField; operator: ChannelOperator; values: string[] };
+/** Every condition must match (AND). Values inside one condition match if any of them does (OR). */
+export type ChannelRule = { id?: string; name: string; channel: string; conditions: ChannelCondition[] };
+export type ChannelVisit = { referrer?: string; utmSource?: string; utmMedium?: string; query?: string };
+export type ChannelRow = { channel: string; visits: number; visitors: number; share: number };
+export type ChannelReport = {
+  rows: ChannelRow[];
+  /** Sources that matched no rule, shown as "Unclassified". */
+  total: number;
+  precision: 'breakdown';
+  truncated: boolean;
+};
+
+/* ── ANA-08: revenue by UTM ───────────────────────────────────────────────── */
+
+export type RevenueUtmDimension = 'utmSource' | 'utmMedium' | 'utmCampaign';
+export type RevenueUtmRow = { name: string; sum: number; count: number };
+export type RevenueUtmReport = { currency: string; dimension: RevenueUtmDimension; rows: RevenueUtmRow[]; truncated: boolean };
+
+/* ── ANA-10: server-side events API ───────────────────────────────────────── */
+
+export type ApiKeySummary = {
+  id: string; name: string; prefix: string; rateLimitPerMinute: number;
+  createdAt: string; lastUsedAt: string | null; revokedAt: string | null;
+};
+export type CreatedApiKey = ApiKeySummary & { key: string };

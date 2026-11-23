@@ -226,8 +226,8 @@ function createInitialStore(): PreviewStore {
     stages,
     companies,
     pointActions: [
-      { id: 1, name: 'Download product guide', description: 'Award points when a contact downloads an asset', type: 'asset.download', delta: 15, published: true },
-      { id: 2, name: 'Submit lead capture form', description: 'Award points on form submission', type: 'form.submit', delta: 20, published: true },
+      { id: 1, name: 'Download product guide', description: 'Award points when a contact downloads an asset', type: 'asset.download', delta: 15, published: true, properties: {}, repeatable: false, groupId: null, groupName: null },
+      { id: 2, name: 'Submit lead capture form', description: 'Award points on form submission', type: 'form.submit', delta: 20, published: true, properties: {}, repeatable: false, groupId: null, groupName: null },
     ],
     pointTriggers: [
       { id: 1, name: 'Promote to Marketing Qualified', description: 'Triggered at 40+ points', points: 40, published: true, triggerExistingLeads: false, events: [] },
@@ -833,7 +833,7 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
     if (method === 'GET') return json(s.pointActions);
     if (method === 'POST') {
       const body = await readJson<Partial<PointAction>>(request);
-      const item: PointAction = { id: s.nextId++, name: body.name ?? 'Score rule', description: body.description ?? '', type: body.type ?? 'form.submit', delta: body.delta ?? 10, published: body.published ?? true };
+      const item: PointAction = { id: s.nextId++, name: body.name ?? 'Score rule', description: body.description ?? '', type: body.type ?? 'form.submit', delta: body.delta ?? 10, published: body.published ?? true, properties: body.properties ?? {}, repeatable: body.repeatable ?? false, groupId: null, groupName: null };
       s.pointActions.push(item);
       return json(item, 201);
     }
@@ -1009,7 +1009,7 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
     if (method === 'GET') return json(s.workflows);
     if (method === 'POST') {
       const body = await readJson<Partial<Workflow>>(request);
-      const item: Workflow = { id: s.nextId++, name: body.name ?? 'Workflow', description: body.description ?? '', enabled: false, editable: true, segmentId: body.segmentId ?? 1, formId: body.formId, steps: body.steps ?? [] };
+      const item: Workflow = { id: s.nextId++, name: body.name ?? 'Workflow', description: body.description ?? '', enabled: false, editable: true, segmentId: body.segmentId ?? 1, formId: body.formId, steps: body.steps ?? [], ...(body.graph ? { graph: body.graph } : {}) };
       s.workflows.push(item);
       return json(item, 201);
     }

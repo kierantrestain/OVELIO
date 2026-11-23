@@ -28,8 +28,12 @@ import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Token } from '@astryxdesign/core/Token';
 import type {
   Annotation,
+  ApiKeySummary,
   AttributionResult,
   BreakdownRow,
+  ChannelReport,
+  ChannelRule,
+  CreatedApiKey,
   Campaign,
   Dashboard,
   DateRange,
@@ -55,7 +59,11 @@ import type {
   RetentionRow,
   RevenueMetricType,
   RevenueReport,
+  RevenueUtmDimension,
+  RevenueUtmReport,
   SavedFunnel,
+  SnippetOptions,
+  SnippetPreferences,
   SessionActivityItem,
   SessionPropertyEntry,
   SessionPropertyStat,
@@ -72,7 +80,7 @@ import type {
   WeeklyTraffic,
 } from '@/contracts';
 import {
-  ANALYTICS_LIMITS, FILTER_DIMENSIONS, FILTER_DIMENSION_LABELS, PROPERTY_OPERATORS, SEGMENT_DIMENSION_OPERATORS,
+  ANALYTICS_LIMITS, CHANNEL_FIELDS, CHANNEL_OPERATORS, DEFAULT_SNIPPET_OPTIONS, FILTER_DIMENSIONS, FILTER_DIMENSION_LABELS, PROPERTY_OPERATORS, SEGMENT_DIMENSION_OPERATORS,
   UNFILTERABLE_DIMENSIONS, describeFilterRule, describePropertyFilter, equalityRule, filterQueryParams, goalMatchKind,
   hasFilters, operatorLabel,
 } from '@/contracts/analytics';
@@ -463,21 +471,86 @@ function CustomRange({ range, onClose, onDone }: { range: DateRange; onClose: ()
 
 function TrackingCode({ website, origin, onClose }: { website: Website; origin: string; onClose: () => void }) {
   const action = useAction();
-  const snippet = `<script defer src="${origin.replace(/\/$/, '')}/script.js" data-website-id="${website.id}"></script>`;
+  const base = `${websitesPath}/${website.id}/snippet`;
+  const saved = useResource<SnippetPreferences & { snippet: string }>(`${base}?origin=${encodeURIComponent(origin)}`);
+  const [draft, setDraft] = useState<SnippetOptions>();
+  const [snippet, setSnippet] = useState<string>();
+  const options = draft ?? saved.data?.options ?? DEFAULT_SNIPPET_OPTIONS;
+  const code = snippet ?? saved.data?.snippet ?? '';
+  const set = (patch: Partial<SnippetOptions>) => setDraft({ ...options, ...patch });
   return <Modal title="Tracking code" size="large" onClose={onClose}>
     <Text>Place this script in the &lt;head&gt; of each page on <strong>{website.domain}</strong> you want to measure.</Text>
-    <Snippet code={snippet} />
+    <AsyncState loading={saved.loading} error={saved.error} retry={saved.refresh} />
+    <Snippet code={code} />
+    <Heading level={3}>Options</Heading>
+    <div className="ov-form-grid">
+      <TextInput label="Only track these domains" placeholder="example.com, shop.example.com" value={options.domains.join(', ')}
+        onChange={value => set({ domains: value.split(',').map(item => item.trim()).filter(Boolean) })} />
+      <TextInput label="Tag" placeholder="spring-test" value={options.tag} onChange={tag => set({ tag })} />
+      <TextInput label="Send data to another address" placeholder="https://analytics.example.com" value={options.hostUrl} onChange={hostUrl => set({ hostUrl })} />
+      <TextInput label="Before-send function name" placeholder="beforeSend" value={options.beforeSend} onChange={beforeSend => set({ beforeSend })} />
+    </div>
+    <Switch label="Respect Do Not Track" value={options.doNotTrack} onChange={doNotTrack => set({ doNotTrack })} />
+    <Switch label="Leave out the query string from page URLs" value={options.excludeSearch} onChange={excludeSearch => set({ excludeSearch })} />
+    <Switch label="Leave out the #hash from page URLs" value={options.excludeHash} onChange={excludeHash => set({ excludeHash })} />
+    <Switch label="Track page views and clicks automatically" value={options.autoTrack} onChange={autoTrack => set({ autoTrack })} />
+    <Switch label="Record page speed (Core Web Vitals)" value={options.performance} onChange={performance => set({ performance })} />
+    <Switch label="Wait for consent before loading" value={options.consentMode} onChange={consentMode => set({ consentMode })} />
+    {options.consentMode ? <Banner
+      status="info"
+      title="Consent mode"
+      description="This snippet loads nothing and stores nothing until your site calls ovelioConsent.grant(), for example from your cookie banner's Accept button. Call ovelioConsent.revoke() when a visitor withdraws consent. Use it if you want consent before any measurement, which is the safer choice for UK PECR and EU GDPR if you cannot show your analytics is strictly necessary or exempt. Visitors who never consent are not counted at all."
+    /> : null}
     <Text type="supporting" color="secondary">Track a custom event by adding <Text type="code">{'data-umami-event="signed_up"'}</Text> to a button or link.</Text>
     <Text type="supporting" color="secondary">Website visitors are anonymous. OVELIO does not link visits to contacts unless an attribution has been established.</Text>
     <Feedback error={action.error} notice={action.notice} />
     <FormActions>
+      <Button label="Save options" isLoading={action.busy} onClick={() => void action.run(async () => {
+        const result = await api<SnippetPreferences & { snippet: string }>(base, 'PUT', { options, origin });
+        setDraft(result.options);
+        setSnippet(result.snippet);
+      }, 'Tracking options saved.')} />
       <Button
         label="Copy tracking code"
         icon={<Copy size={15} />}
-        onClick={() => void action.run(async () => navigator.clipboard.writeText(snippet), 'Tracking code copied.')}
+        onClick={() => void action.run(async () => navigator.clipboard.writeText(code), 'Tracking code copied. Save options first if you changed them.')}
       />
     </FormActions>
   </Modal>;
+}
+
+function ApiKeysSection() {
+  const keys = useResource<ApiKeySummary[]>('/api-keys');
+  const action = useAction();
+  const [name, setName] = useState('');
+  const [created, setCreated] = useState<CreatedApiKey>();
+  return <div className="ov-stack-sm">
+    <Heading level={3}>Server events API keys</Heading>
+    <Text type="supporting" color="secondary">Send purchases and sign-ups from your server with POST /api/v1/events and an Authorization: Bearer key. Each event needs an idempotency key so a retry is never counted twice. Keys are shown once.</Text>
+    {created ? <Banner status="warning" title="Copy this key now" description={created.key} /> : null}
+    <AsyncState loading={keys.loading} error={keys.error} retry={keys.refresh} />
+    {keys.data?.length ? <Rows>{keys.data.map(key => <li key={key.id}>
+      <span><strong>{key.name}</strong> <Text type="code">{key.prefix}…</Text> {key.revokedAt ? <Badge label="Revoked" variant="neutral" /> : null}</span>
+      <span>{key.rateLimitPerMinute}/min
+        {key.revokedAt ? null : <IconButton label={`Revoke ${key.name}`} icon={<Trash2 size={14} />} onClick={() => void action.run(async () => {
+          await api(`/api-keys/${key.id}`, 'DELETE');
+          keys.refresh();
+        }, 'API key revoked.')} />}
+      </span>
+    </li>)}</Rows> : null}
+    <form className="ov-actions" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        setCreated(await api<CreatedApiKey>('/api-keys', 'POST', { name: name.trim() }));
+        setName('');
+        keys.refresh();
+      }, 'API key created.');
+    }}>
+      <TextInput label="Key name" placeholder="Checkout server" value={name} onChange={setName} isRequired />
+      <Button type="submit" label="Create key" icon={<Plus size={14} />} isDisabled={!name.trim()} />
+    </form>
+    <Feedback error={action.error} notice={action.notice} />
+  </div>;
 }
 
 function WebsiteSettingsModal({
@@ -564,6 +637,8 @@ function WebsiteSettingsModal({
             </li>;
           })}</Rows> : <Text type="supporting" color="secondary">No active share links for this website.</Text>}
       </div>
+
+      {isAdmin ? <ApiKeysSection /> : null}
 
       {isAdmin ? <div className="ov-stack-sm">
         <Heading level={3}>Administration</Heading>
@@ -2458,15 +2533,17 @@ function RetentionView({ website, range, filters }: { website: Website; range: D
   </Panel>;
 }
 
-function AttributionView({ website, range }: { website: Website; range: DateRange }) {
+function AttributionView({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
   const [model, setModel] = useState<'first-click' | 'last-click'>('first-click');
   const [type, setType] = useState<'path' | 'event'>('path');
   const [step, setStep] = useState('');
-  const [submitted, setSubmitted] = useState<{ model: 'first-click' | 'last-click'; type: 'path' | 'event'; step: string }>();
+  const [lookback, setLookback] = useState('0');
+  const [submitted, setSubmitted] = useState<{ model: 'first-click' | 'last-click'; type: 'path' | 'event'; step: string; lookback: string }>();
 
   const attribution = useResource<AttributionResult>(
     submitted
-      ? `${websitesPath}/${website.id}/attribution?${rangeQuery(range, undefined, {
+      ? `${websitesPath}/${website.id}/attribution?${rangeQuery(range, filters, {
+        lookbackDays: submitted.lookback,
         model: submitted.model,
         type: submitted.type,
         step: submitted.step,
@@ -2479,7 +2556,7 @@ function AttributionView({ website, range }: { website: Website; range: DateRang
       <form className="ov-form-grid ov-form-grid--three" onSubmit={event => {
         event.preventDefault();
         if (!step.trim()) return;
-        setSubmitted({ model, type, step: step.trim() });
+        setSubmitted({ model, type, step: step.trim(), lookback });
       }}>
         <Selector
           label="Attribution model"
@@ -2503,6 +2580,7 @@ function AttributionView({ website, range }: { website: Website; range: DateRang
           value={step}
           onChange={setStep}
         />
+        <TextInput label="Lookback days (0 to 90)" value={lookback} onChange={value => setLookback(value.replace(/\D/g, '').slice(0, 2) || '0')} />
         <div className="ov-actions">
           <Button type="submit" variant="primary" label="Run attribution" icon={<Target size={15} />} isDisabled={!step.trim()} />
         </div>
@@ -2518,6 +2596,11 @@ function AttributionView({ website, range }: { website: Website; range: DateRang
         <Metric label="Attributed visitors" value={attribution.data.total.visitors} />
         <Metric label="Attributed visits" value={attribution.data.total.visits} />
         <Metric label="Attributed page views" value={attribution.data.total.pageviews} />
+        <Metric
+          label="Revenue in range"
+          formatted={attribution.data.revenue ? formatCurrency(attribution.data.revenue.sum, attribution.data.revenue.currency) : 'None recorded'}
+          hint={attribution.data.lookbackDays ? `Visits are searched ${attribution.data.lookbackDays} days before the range start, so conversions in that stretch are included. Revenue covers the chosen range only.` : 'Revenue recorded under the same filters. Umami does not split it by source here; see Revenue by UTM.'}
+        />
       </div>
       <div className="ov-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
         <Panel title="Referrers"><Distribution points={attribution.data.referrer} /></Panel>
@@ -2649,6 +2732,10 @@ function RevenueView({ website, range, filters }: { website: Website; range: Dat
     [revenue.data?.metrics],
   );
 
+  const [utmType, setUtmType] = useState<RevenueUtmDimension>('utmSource');
+  const utmRevenue = useResource<RevenueUtmReport>(
+    `${websitesPath}/${website.id}/revenue/utm?${rangeQuery(range, filters, { currency, type: utmType })}`,
+  );
   const breakdownLabel = revenueBreakdownOptions.find(option => option.value === breakdownType)?.label ?? 'Dimension';
   const stats = revenue.data?.stats;
   const prev = revenue.data?.comparison;
@@ -2751,6 +2838,25 @@ function RevenueView({ website, range, filters }: { website: Website; range: Dat
             },
           ]}
         />
+      </Panel>
+      <Panel
+        title="Revenue by UTM"
+        description="Revenue for the ten busiest values of the chosen UTM field, in the selected currency. Each value is a separate query, so values outside the top ten are not listed."
+      >
+        <Selector label="UTM field" value={utmType} onChange={value => setUtmType(value as RevenueUtmDimension)} options={[
+          { value: 'utmSource', label: 'UTM source' }, { value: 'utmMedium', label: 'UTM medium' }, { value: 'utmCampaign', label: 'UTM campaign' },
+        ]} />
+        <AsyncState loading={utmRevenue.loading} error={utmRevenue.error} retry={utmRevenue.refresh} />
+        {utmRevenue.data ? <Table
+          data={utmRevenue.data.rows.map(row => ({ ...row, _id: row.name }))}
+          idKey="_id"
+          emptyState={<Empty title="No revenue tied to a UTM value in this period" />}
+          columns={[
+            { key: 'name', header: 'Value', renderCell: row => <Text weight="medium">{row.name}</Text> },
+            { key: 'count', header: 'Transactions', align: 'end', renderCell: row => number(row.count) },
+            { key: 'sum', header: 'Revenue', align: 'end', renderCell: row => formatCurrency(row.sum, utmRevenue.data?.currency ?? currency) },
+          ]}
+        /> : null}
       </Panel>
     </>}
   </div>;
@@ -2869,7 +2975,126 @@ function PerformanceView({ website, range, filters }: { website: Website; range:
   </div>;
 }
 
-function InsightsTab({ website, range, filters }: { website: Website; range: DateRange; filters: ReportFilters }) {
+const channelOperatorLabels: Record<string, string> = { contains: 'contains', equals: 'is', present: 'is set', absent: 'is empty' };
+const channelFieldLabels: Record<string, string> = { referrer: 'Referrer domain', utmSource: 'UTM source', utmMedium: 'UTM medium', query: 'URL query' };
+
+function ChannelsView({ website, range, filters, canEdit }: { website: Website; range: DateRange; filters: ReportFilters; canEdit: boolean }) {
+  const report = useResource<ChannelReport & { customRules: boolean }>(`${websitesPath}/${website.id}/channels?${rangeQuery(range, filters)}`);
+  const rulesResource = useResource<{ rules: ChannelRule[]; custom: boolean }>('/channel-rules');
+  const action = useAction();
+  const [draft, setDraft] = useState<ChannelRule[]>();
+  const [editing, setEditing] = useState(false);
+  const [sample, setSample] = useState({ referrer: '', utmSource: '', utmMedium: '', query: '' });
+  const [tested, setTested] = useState<{ channel: string; rule?: string }>();
+  const rules = draft ?? rulesResource.data?.rules ?? [];
+  const move = (index: number, by: number) => {
+    const next = [...rules];
+    const [item] = next.splice(index, 1);
+    next.splice(Math.max(0, Math.min(next.length, index + by)), 0, item);
+    setDraft(next);
+  };
+  return <div className="ov-stack">
+    <Panel title="Channels" description="Visits grouped by OVELIO channel rules">
+      <Text type="supporting" color="secondary">
+        Umami sorts channels with fixed rules: it counts e-mail only from webmail referrers or a medium containing &ldquo;mail&rdquo;, and does not treat fbclid as paid.
+        OVELIO classifies the referrer, UTM source, UTM medium and URL query combinations Umami reports, using the rules below, so the totals can differ from Umami&apos;s Channels list.
+        This is a breakdown-level estimate, not a per-session classification: a visitor&apos;s later pages are not re-classified.
+      </Text>
+      <AsyncState loading={report.loading} error={report.error} retry={report.refresh} />
+      {report.data ? <Table
+        data={report.data.rows.map(row => ({ ...row, _id: row.channel }))}
+        idKey="_id"
+        emptyState={<Empty title="No visits in this period" />}
+        columns={[
+          { key: 'channel', header: 'Channel', renderCell: row => <Text weight="medium">{row.channel}</Text> },
+          { key: 'visits', header: 'Visits', align: 'end', renderCell: row => number(row.visits) },
+          { key: 'visitors', header: 'Visitors', align: 'end', renderCell: row => number(row.visitors) },
+          { key: 'share', header: 'Share', align: 'end', renderCell: row => formatPercent(row.share) },
+        ]}
+      /> : null}
+    </Panel>
+    <Panel title="Channel rules" description="The first rule that matches decides the channel. Use the arrows to reorder.">
+      {rulesResource.data && !rulesResource.data.custom && !draft ? <Text type="supporting" color="secondary">Showing the default rules. Edit them to save your own.</Text> : null}
+      <Rows>{rules.map((rule, index) => <li key={rule.id ?? `${index}-${rule.name}`}>
+        <span>
+          <strong>{index + 1}. {rule.name}</strong> sends to <Badge label={rule.channel} variant="info" />{' '}
+          <Text type="supporting" color="secondary">
+            {rule.conditions.map(c => `${channelFieldLabels[c.field]} ${channelOperatorLabels[c.operator]}${c.values.length ? ` ${c.values.slice(0, 4).join(' / ')}${c.values.length > 4 ? '…' : ''}` : ''}`).join(' and ')}
+          </Text>
+        </span>
+        {editing && canEdit ? <span className="ov-actions">
+          <Button label="Up" onClick={() => move(index, -1)} isDisabled={index === 0} />
+          <Button label="Down" onClick={() => move(index, 1)} isDisabled={index === rules.length - 1} />
+          <IconButton label={`Remove ${rule.name}`} icon={<Trash2 size={14} />} onClick={() => setDraft(rules.filter((_, i) => i !== index))} />
+        </span> : null}
+      </li>)}</Rows>
+      {editing && canEdit ? <ChannelRuleForm onAdd={rule => setDraft([...rules, rule])} /> : null}
+      <Feedback error={action.error} notice={action.notice} />
+      {canEdit ? <FormActions>
+        {editing
+          ? <>
+            <Button label="Discard changes" onClick={() => { setDraft(undefined); setEditing(false); }} />
+            <Button variant="primary" label="Save rules" isLoading={action.busy} onClick={() => void action.run(async () => {
+              await api('/channel-rules', 'PUT', { rules: rules.map(({ name, channel, conditions }) => ({ name, channel, conditions })) });
+              setDraft(undefined);
+              setEditing(false);
+              rulesResource.refresh();
+              report.refresh();
+            }, 'Channel rules saved.')} />
+          </>
+          : <Button label="Edit rules" icon={<Pencil size={14} />} onClick={() => setEditing(true)} />}
+      </FormActions> : null}
+    </Panel>
+    <Panel title="Test a visit" description="See which channel a sample visit would get with the rules above, including unsaved edits.">
+      <div className="ov-form-grid">
+        <TextInput label="Referrer domain" placeholder="news.ycombinator.com" value={sample.referrer} onChange={referrer => setSample({ ...sample, referrer })} />
+        <TextInput label="UTM source" value={sample.utmSource} onChange={utmSource => setSample({ ...sample, utmSource })} />
+        <TextInput label="UTM medium" placeholder="newsletter" value={sample.utmMedium} onChange={utmMedium => setSample({ ...sample, utmMedium })} />
+        <TextInput label="URL query" placeholder="fbclid=abc" value={sample.query} onChange={query => setSample({ ...sample, query })} />
+      </div>
+      <div className="ov-actions">
+        <Button label="Test visit" onClick={() => void action.run(async () => {
+          setTested(await api<{ channel: string; rule?: string }>('/channel-rules/test', 'POST', {
+            visit: sample,
+            ...(draft ? { rules: rules.map(({ name, channel, conditions }) => ({ name, channel, conditions })) } : {}),
+          }));
+        })} />
+        {tested ? <Text>Channel: <strong>{tested.channel}</strong>{tested.rule ? ` (rule: ${tested.rule})` : ' (no rule matched)'}</Text> : null}
+      </div>
+    </Panel>
+  </div>;
+}
+
+function ChannelRuleForm({ onAdd }: { onAdd: (rule: ChannelRule) => void }) {
+  const [name, setName] = useState('');
+  const [channel, setChannel] = useState('');
+  const [field, setField] = useState<(typeof CHANNEL_FIELDS)[number]>('utmMedium');
+  const [operator, setOperator] = useState<(typeof CHANNEL_OPERATORS)[number]>('equals');
+  const [values, setValues] = useState('');
+  const needsValues = operator === 'contains' || operator === 'equals';
+  const list = values.split(',').map(item => item.trim()).filter(Boolean);
+  return <div className="ov-stack-sm">
+    <Heading level={3}>Add a rule</Heading>
+    <div className="ov-form-grid ov-form-grid--three">
+      <TextInput label="Rule name" value={name} onChange={setName} />
+      <TextInput label="Channel" placeholder="Affiliate" value={channel} onChange={setChannel} />
+      <Selector label="Field" value={field} onChange={value => setField(value as typeof field)}
+        options={CHANNEL_FIELDS.map(value => ({ value, label: channelFieldLabels[value] }))} />
+      <Selector label="Condition" value={operator} onChange={value => setOperator(value as typeof operator)}
+        options={CHANNEL_OPERATORS.map(value => ({ value, label: channelOperatorLabels[value] }))} />
+      {needsValues ? <TextInput label="Values (comma separated)" value={values} onChange={setValues} /> : null}
+    </div>
+    <div className="ov-actions">
+      <Button label="Add rule" icon={<Plus size={14} />} isDisabled={!name.trim() || !channel.trim() || (needsValues && !list.length)}
+        onClick={() => {
+          onAdd({ name: name.trim(), channel: channel.trim(), conditions: [{ field, operator, values: needsValues ? list : [] }] });
+          setName(''); setChannel(''); setValues('');
+        }} />
+    </div>
+  </div>;
+}
+
+function InsightsTab({ website, range, filters, canEdit }: { website: Website; range: DateRange; filters: ReportFilters; canEdit: boolean }) {
   const [subview, setSubview] = useState('journeys');
   return <div className="ov-stack">
     <div className="ov-actions">
@@ -2877,6 +3102,7 @@ function InsightsTab({ website, range, filters }: { website: Website; range: Dat
         <SegmentedControlItem value="journeys" label="User journeys" />
         <SegmentedControlItem value="retention" label="Retention cohorts" />
         <SegmentedControlItem value="attribution" label="Attribution" />
+        <SegmentedControlItem value="channels" label="Channels" />
         <SegmentedControlItem value="breakdown" label="Breakdown" />
         <SegmentedControlItem value="revenue" label="Revenue" />
         <SegmentedControlItem value="performance" label="Performance" />
@@ -2884,7 +3110,8 @@ function InsightsTab({ website, range, filters }: { website: Website; range: Dat
     </div>
     {subview === 'journeys' ? <JourneysView website={website} range={range} filters={filters} /> : null}
     {subview === 'retention' ? <RetentionView website={website} range={range} filters={filters} /> : null}
-    {subview === 'attribution' ? <AttributionView website={website} range={range} /> : null}
+    {subview === 'attribution' ? <AttributionView website={website} range={range} filters={filters} /> : null}
+    {subview === 'channels' ? <ChannelsView website={website} range={range} filters={filters} canEdit={canEdit} /> : null}
     {subview === 'breakdown' ? <BreakdownView website={website} range={range} filters={filters} /> : null}
     {subview === 'revenue' ? <RevenueView website={website} range={range} filters={filters} /> : null}
     {subview === 'performance' ? <PerformanceView website={website} range={range} filters={filters} /> : null}
@@ -3707,7 +3934,7 @@ export function Analytics({ trackingOrigin, initialTab }: { trackingOrigin?: str
               {tab === 'Realtime' ? <RealtimeTab key={`${website.id}:${siteRevision}`} website={website} /> : null}
               {tab === 'Sessions' ? <SessionsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} onAddProperty={addPropertyFilter} /> : null}
               {tab === 'Goals & Funnels' ? <GoalsAndFunnelsTab key={`${website.id}:${siteRevision}`} website={website} range={range} canEdit={canEdit} /> : null}
-              {tab === 'Insights' ? <InsightsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} /> : null}
+              {tab === 'Insights' ? <InsightsTab key={`${website.id}:${siteRevision}`} website={website} range={range} filters={filters} canEdit={canEdit} /> : null}
             </div>}
 
     {modal === 'website' && canEdit ? <WebsiteForm
