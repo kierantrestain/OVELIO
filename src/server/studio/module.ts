@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import type { User } from '@/contracts';
 import type { SearchResult } from '@/contracts/platform';
-import { renderMergeTags, unknownMergeTags } from '@/contracts/merge-tags';
+import { mergeTags, renderMergeTags, unknownMergeTags } from '@/contracts/merge-tags';
 import type {
   AudienceEstimate, DesignStatus, EmailTemplateSummary, EngineExport, RenderedPreview, SampleContact, SentMessage, StoredMessage, TestSendResult,
 } from '@/contracts/studio';
@@ -59,6 +59,14 @@ const blankEmail = `<mjml lang="en"><mj-body width="600px" background-color="#f3
 
 let templateCache: { brandKey: string; html: Map<string, string> } | undefined;
 
+/** Thumbnails and gallery previews show example values (Ada, your company) instead of raw merge tags. */
+async function withExamples(html: string) {
+  const company = await workspaceProfile();
+  const values: Record<string, string> = Object.fromEntries(mergeTags.map(tag => [tag.tag, tag.example]));
+  Object.assign(values, { 'workspace.name': company.name, 'workspace.address': company.postalAddress || values['workspace.address'], 'workspace.website': company.website || values['workspace.website'], unsubscribe_url: '#' });
+  return renderMergeTags(html, values);
+}
+
 async function templateHtml(key: string) {
   const template = findTemplate(key);
   if (!template) throw new AppError(404, 'That template was not found.');
@@ -68,8 +76,9 @@ async function templateHtml(key: string) {
   const cached = templateCache.html.get(key);
   if (cached) return cached;
   const compiled = await compileMjml(applyBrand(template.mjml, brand), { preheader: applyBrand(template.preheader, brand), title: applyBrand(template.subject, brand) });
-  templateCache.html.set(key, compiled.html);
-  return compiled.html;
+  const html = await withExamples(compiled.html);
+  templateCache.html.set(key, html);
+  return html;
 }
 
 async function workspaceValues() {
@@ -118,7 +127,10 @@ async function audience(listIds: number[]): Promise<AudienceEstimate> {
       const ok = members.filter(contact => contact.consent === 'opted_in' && !contact.suppressed);
       ok.forEach(contact => reached.add(contact.id));
       members.filter(contact => !ok.includes(contact)).forEach(contact => left.add(contact.id));
-      return { id: list.id, name: list.name, subscribers: members.length, eligible: ok.length, excluded: members.length - ok.length, optin: list.optin ?? '' };
+      // Subscribers with no matching contact have no consent record, so they are excluded too.
+      const subscribers = Math.max(list.subscriberCount ?? members.length, members.length);
+      for (let extra = members.length; extra < subscribers; extra++) left.add(-(list.id * 100_000 + extra));
+      return { id: list.id, name: list.name, subscribers, eligible: ok.length, excluded: subscribers - ok.length, optin: list.optin ?? '' };
     });
     for (const id of reached) left.delete(id);
     return { lists: rows, eligible: reached.size, excluded: left.size, sampled: false, note: 'Counted from the sample contacts in this preview.' };
@@ -219,7 +231,7 @@ export const studioModule: LaneModule = {
     route('GET', new RegExp(`^studio/designs/${uuid}/html$`), async ({ params }) => {
       const found = (await db.query<{ html: string }>(`SELECT html FROM designs WHERE id = $1 AND kind IN ('email', 'email_block')`, [params[0]])).rows[0];
       if (!found) throw new AppError(404, 'That email design was not found.');
-      return { html: found.html };
+      return { html: await withExamples(found.html) };
     }),
     route('GET', new RegExp(`^studio/designs/${uuid}$`), async ({ params }) => getDesign(params[0])),
     route('PATCH', new RegExp(`^studio/designs/${uuid}$`), async ({ params, request, user }) =>

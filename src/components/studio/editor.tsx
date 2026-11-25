@@ -240,7 +240,10 @@ export function EmailStudio({ id }: { id: string }) {
       assetRequest.select(asset, true);
       assetRequest.close();
     } else {
-      editor?.getSelected()?.addAttributes({ src: url });
+      // Image components keep `src` as a property (rendered into the attribute); set both so the canvas and MJML agree.
+      const target = editor?.getSelected();
+      target?.set('src', url);
+      target?.addAttributes({ src: url });
     }
     setAssetRequest(null);
     setPanel(null);
