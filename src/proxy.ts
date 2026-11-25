@@ -16,6 +16,8 @@ async function isVerified(host: string) {
   } catch {
     ok = false;
   }
+  // Hosts come from the client, so bound the cache instead of letting random Host headers grow it.
+  if (verified.size >= 500) verified.clear();
   verified.set(host, { ok, until: Date.now() + (ok ? 60_000 : 15_000) });
   return ok;
 }
