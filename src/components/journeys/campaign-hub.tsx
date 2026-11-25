@@ -63,7 +63,7 @@ function CampaignForm({ campaign, onClose, onSaved }: { campaign?: CampaignDetai
     <form className="ov-stack-sm" onSubmit={event => {
       event.preventDefault();
       void action.run(async () => {
-        const input: CampaignInput = { ...form, utmCampaign: slug || undefined, startsOn: form.startsOn || null, endsOn: form.endsOn || null, currency: form.currency.toUpperCase() };
+        const input: CampaignInput = { ...form, utmCampaign: (slugTouched || campaign) && slug ? slug : undefined, startsOn: form.startsOn || null, endsOn: form.endsOn || null, currency: form.currency.toUpperCase() };
         onSaved(campaign ? await api<CampaignDetail>(`/journeys/campaigns/${campaign.id}`, 'PATCH', input) : await api<CampaignDetail>('/journeys/campaigns', 'POST', input));
       });
     }}>
@@ -83,7 +83,7 @@ function CampaignForm({ campaign, onClose, onSaved }: { campaign?: CampaignDetai
         <TextInput label="Currency" value={form.currency} onChange={currency => set({ currency: currency.toUpperCase().slice(0, 3) })} />
       </div>
       <div className="ov-form-grid--three ov-form-grid">
-        <TextInput label="UTM campaign" value={slug} onChange={value => { setSlugTouched(true); set({ utmCampaign: slugify(value) }); }} description="Links visits and form leads to this campaign." />
+        <TextInput label="UTM campaign" value={slug} onChange={value => { setSlugTouched(true); set({ utmCampaign: slugify(value) }); }} description={slugTouched ? "Links visits and form leads to this campaign." : "Suggested from the name; made unique when you save."} />
         <TextInput label="Default UTM source" isOptional value={form.utmSource} onChange={utmSource => set({ utmSource })} placeholder="newsletter" />
         <TextInput label="Default UTM medium" isOptional value={form.utmMedium} onChange={utmMedium => set({ utmMedium })} placeholder="email" />
       </div>
@@ -342,7 +342,7 @@ export function CampaignWorkspace({ id }: { id: string }) {
     {action.error ? <Banner status="error" title={action.error} /> : null}
     {data.description ? <Text color="secondary">{data.description}</Text> : null}
 
-    {!p ? <AsyncState loading={performance.loading} error={performance.error} retry={performance.refresh} /> : <div className="ov-metrics">
+    {!p ? <AsyncState loading={performance.loading} error={performance.error} retry={performance.refresh} /> : <div className="ov-metrics ov-journeys-metrics">
       <Metric label="Leads" value={p.leads} hint={`${number(p.formSubmissions)} form submissions`} info="Distinct contacts who submitted a form attributed to this campaign." />
       <Metric label="Conversions" value={p.conversions} info="Landing page conversions attributed to this campaign." />
       <Metric label="Emails sent" value={p.emails.sent + newsletterSent}

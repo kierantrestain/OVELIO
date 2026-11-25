@@ -112,7 +112,7 @@ export async function seedJourneys(sql: Sql): Promise<void> {
     const enrolment = (await sql.query<{ id: string }>(
       `INSERT INTO journey_enrolments (flow_id, version, contact_id, status, current_node, step_seq, trigger_type, entry_key, enrolled_at, updated_at, finished_at, next_run_at)
        VALUES ($1, 1, $2, $3, $4, $5, 'form.submitted', $6, $7, $8, $9, $10) RETURNING id`,
-      [followUp, run.contact, run.status, run.node, run.seq, `once:${followUp}:${run.contact}`, enrolledAt, at(run.enrolledDays + 1),
+      [followUp, run.contact, run.status, run.node, run.seq, `once:${followUp}:${run.contact}`, enrolledAt, at(Math.min(run.enrolledDays + 1, 0)),
         run.status === 'completed' ? at(run.enrolledDays + 1) : null, run.status === 'waiting' ? at(run.enrolledDays + 1) : null],
     )).rows[0].id;
     await sql.query(`INSERT INTO journey_step_logs (enrolment_id, seq, node_id, node_type, action, status, detail, at) VALUES ($1, 0, 'start', 'start', 'Enrolled', 'ok', 'Sample run · Trigger: Form submitted · version 1', $2)`, [enrolment, enrolledAt]);

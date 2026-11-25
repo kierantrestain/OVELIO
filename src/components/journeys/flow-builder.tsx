@@ -149,11 +149,12 @@ function Builder({ initial }: { initial: FlowDetail }) {
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
 
-  const displayEdges = useMemo(() => edges.map(edge => {
-    const source = graph.nodes.find(node => node.id === edge.source);
-    const label = handleLabel((edge.sourceHandle ?? 'next') as FlowHandle, source);
-    return { ...edge, label: label || undefined, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 4 };
-  }), [edges, graph.nodes]);
+
+  const refreshCounts = useCallback(() => {
+    void api<FlowDetail>(`/journeys/flows/${initial.id}`).then(next => setDetail(current => ({
+      ...current, counts: next.counts, nodeStats: next.nodeStats, lastRunAt: next.lastRunAt, versions: next.versions,
+    })), () => {});
+  }, [initial.id]);
 
   const select = useCallback((id: string | null) => {
     setSelectedId(id);
@@ -195,7 +196,7 @@ function Builder({ initial }: { initial: FlowDetail }) {
     const laid = tidyLayout(graph);
     const positions = new Map(laid.nodes.map(node => [node.id, node.position]));
     setNodes(current => current.map(node => ({ ...node, position: positions.get(node.id) ?? node.position })));
-    setTimeout(() => void flowApi.fitView({ padding: 0.2, duration: 300, maxZoom: 1 }), 60);
+    setTimeout(() => void flowApi.fitView({ padding: 0.15, duration: 300, maxZoom: 1, minZoom: 0.6 }), 60);
   }
 
   async function save(): Promise<FlowDetail> {
@@ -264,7 +265,7 @@ function Builder({ initial }: { initial: FlowDetail }) {
       </header>
       {action.error ? <Banner status="error" title={action.error} /> : null}
       {readOnly ? <Banner status="info" title="This workflow is archived" description="Restore it to a draft to edit or publish it again." /> : null}
-      <TabList value={tab} onChange={setTab} hasDivider aria-label="Workflow view">
+      <TabList value={tab} onChange={next => { setTab(next); refreshCounts(); }} hasDivider aria-label="Workflow view">
         <Tab value="canvas" label="Canvas" />
         <Tab value="enrolments" label={`Enrolments (${number(detail.counts.enrolled)})`} />
         <Tab value="versions" label={`Versions (${detail.versions.length})`} />
@@ -300,14 +301,14 @@ function Builder({ initial }: { initial: FlowDetail }) {
             <Button size="sm" label={errors.length ? `${errors.length} to fix` : 'Ready to publish'} variant={errors.length ? 'secondary' : 'ghost'} onClick={() => select(null)} />
           </div>
           <ReactFlow<StepNodeType, Edge>
-            nodes={nodes} edges={displayEdges} nodeTypes={nodeTypes} colorMode={mode === 'dark' ? 'dark' : 'light'}
+            nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode={mode === 'dark' ? 'dark' : 'light'}
             onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
             onConnect={(connection: Connection) => { if (connection.source && connection.target) connect(connection.source, (connection.sourceHandle ?? 'next') as FlowHandle, connection.target); }}
             isValidConnection={connection => connection.source !== connection.target && nodes.find(node => node.id === connection.target)?.data.type !== 'start'}
             onNodeClick={(_, node) => setSelectedId(node.id)} onPaneClick={() => setSelectedId(null)}
             onNodesDelete={deleted => { if (deleted.some(node => node.id === selectedId)) setSelectedId(null); }}
             nodesDraggable={!readOnly} nodesConnectable={!readOnly} deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']}
-            defaultEdgeOptions={{ type: 'smoothstep', markerEnd: marker }} fitView fitViewOptions={{ padding: 0.25, maxZoom: 1 }} minZoom={0.2} maxZoom={1.6}
+            defaultEdgeOptions={{ type: 'smoothstep', markerEnd: marker }} fitView fitViewOptions={{ padding: 0.15, maxZoom: 1, minZoom: 0.6 }} minZoom={0.2} maxZoom={1.6}
             proOptions={{ hideAttribution: true }} aria-label="Workflow canvas">
             <Background gap={20} size={1} />
             <Controls showInteractive={false} position="bottom-left" />
@@ -350,7 +351,7 @@ function Builder({ initial }: { initial: FlowDetail }) {
       }} /> : null}
       {tab === 'settings' ? <FlowSettings detail={detail} lookups={lookups} readOnly={readOnly} onSaved={setDetail} /> : null}
 
-      {testing ? <TestRunDrawer detail={detail} dirty={dirty} onClose={() => setTesting(false)} onEnrolled={() => { setTesting(false); setTab('enrolments'); }} /> : null}
+      {testing ? <TestRunDrawer detail={detail} dirty={dirty} onClose={() => setTesting(false)} onEnrolled={() => { setTesting(false); setTab('enrolments'); refreshCounts(); }} /> : null}
       {confirm ? <ConfirmDialog title={confirm.title} description={confirm.description} actionLabel={confirm.actionLabel} busy={action.busy}
         onClose={() => setConfirm(undefined)} onConfirm={() => void action.run(async () => { await confirm.run(); setConfirm(undefined); })} /> : null}
     </div>

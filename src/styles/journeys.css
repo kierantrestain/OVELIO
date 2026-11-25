@@ -85,6 +85,8 @@
 .ov-journeys-counts { display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
 .ov-journeys-counts [data-tone="failed"] { color: var(--color-text-error, #c0362c); font-weight: 600; }
 
+.ov-journeys-metrics { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+
 /* Template gallery and static diagrams */
 .ov-journeys-cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 .ov-journeys-card { display: grid; grid-template-rows: auto 1fr auto; gap: 12px; height: 100%; padding: 16px; }
