@@ -34,7 +34,9 @@ export async function POST(request: Request) {
       if (file.size > maxBytes) throw new AppError(413, 'Upload a file smaller than 8 MB.');
       const contentType = file.type || 'application/octet-stream';
       if (!allowedTypes.has(contentType)) throw new AppError(400, 'Supported formats: PNG, JPEG, GIF, WebP, SVG and PDF.');
-      return json(devPreviewMediaUpload(file.name, contentType), 201);
+      // The preview has no file store: small files stay viewable as data URLs.
+      const dataUrl = file.size <= 2 * 1024 * 1024 ? `data:${contentType};base64,${Buffer.from(await file.arrayBuffer()).toString('base64')}` : undefined;
+      return json(devPreviewMediaUpload(file.name, contentType, dataUrl), 201);
     }
     assertOrigin(request);
     await rateLimit('console:media:' + user.id, 30, 60);
