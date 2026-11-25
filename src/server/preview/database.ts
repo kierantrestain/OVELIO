@@ -42,7 +42,11 @@ export async function applyMigrations(raw: Raw) {
   return names;
 }
 
-export async function prepareEmbeddedDatabase(raw: Raw) {
+/**
+ * Migrates the preview database and loads the preview team and lane sample data. The embedded database is new on
+ * every boot; a hosted preview database (`seedOnce`) is seeded the first time only and keeps what people create.
+ */
+export async function prepareEmbeddedDatabase(raw: Raw, options: { seedOnce?: boolean } = {}) {
   if (!process.env.CONTACT_HMAC_KEY) process.env.CONTACT_HMAC_KEY = PREVIEW_HMAC_KEY;
   await applyMigrations(raw);
   const sql: Sql = {
@@ -52,6 +56,10 @@ export async function prepareEmbeddedDatabase(raw: Raw) {
     },
   };
   if (!isDevPreviewMode()) return;
+  if (options.seedOnce) {
+    const seeded = await raw.query(`SELECT 1 FROM settings WHERE key = 'preview_seeded'`);
+    if (seeded.rows.length) return;
+  }
   for (const member of devPreviewTeam()) {
     await sql.query(
       `INSERT INTO users (id, email, name, role, password_hash) VALUES ($1, $2, $3, $4, 'preview-sign-in-disabled')
@@ -66,5 +74,8 @@ export async function prepareEmbeddedDatabase(raw: Raw) {
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', scope: 'preview-seed', lane: lane.name, error: (error as Error).message }));
     }
+  }
+  if (options.seedOnce) {
+    await raw.query(`INSERT INTO settings (key, value) VALUES ('preview_seeded', to_jsonb(now())) ON CONFLICT (key) DO NOTHING`);
   }
 }
