@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test as base, expect } from '@playwright/test';
-import type { Page, TestInfo } from '@playwright/test';
+import type { APIResponse, Page, TestInfo } from '@playwright/test';
 
 /** True only when playwright.preview.config.ts loaded the spec; the CI config (Compose stack) skips these files. */
 export const isPreviewRun = process.env.OVELIO_PREVIEW_E2E === '1';
@@ -27,16 +27,16 @@ function watch(page: Page): Guard {
 
 /** Signed-out browser with the error guard. */
 export const anonymous = base.extend<{ guard: Guard }>({
-  guard: async ({ page }, use) => { await use(watch(page)); },
+  guard: async ({ page }, provide) => { await provide(watch(page)); },
 });
 
 /** Signed in as the preview's developer admin through POST /api/auth/dev-login (same Origin check as the button). */
 export const test = anonymous.extend({
-  context: async ({ context, baseURL }, use) => {
+  context: async ({ context, baseURL }, provide) => {
     const origin = new URL(baseURL ?? 'http://localhost:3206').origin;
     const response = await context.request.post('/api/auth/dev-login', { headers: { origin } });
     if (!response.ok()) throw new Error(`Preview sign-in failed: HTTP ${response.status()} ${await response.text()}`);
-    await use(context);
+    await provide(context);
   },
 });
 
@@ -56,8 +56,9 @@ export async function horizontalOverflow(page: Page) {
     const doc = document.documentElement;
     const found: string[] = [];
     if (doc.scrollWidth > window.innerWidth + 1) found.push(`document ${doc.scrollWidth}px > viewport ${window.innerWidth}px`);
-    const main = document.querySelector('main, [role="main"]');
-    if (main && main.scrollWidth > main.clientWidth + 1) {
+    // The shell's main region and the layout box that scrolls it.
+    for (const main of new Set(document.querySelectorAll<HTMLElement>('main, [role="main"], .astryx-layout-content'))) {
+      if (main.scrollWidth <= main.clientWidth + 1) continue;
       // Name the widest offenders so the report says what to fix.
       const limit = main.getBoundingClientRect().right + 1;
       const offenders = [...main.querySelectorAll<HTMLElement>('*')]
@@ -66,18 +67,55 @@ export async function horizontalOverflow(page: Page) {
           if (!rect.width || rect.right <= limit) return false;
           // Content inside its own horizontal scroller is fine.
           for (let parent = element.parentElement; parent && parent !== main; parent = parent.parentElement) {
-            const style = getComputedStyle(parent);
-            if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) return false;
+            if (/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowX)) return false;
           }
           return true;
         })
         .slice(0, 3)
-        .map(element => `${element.tagName.toLowerCase()}${element.className && typeof element.className === 'string' ? '.' + element.className.trim().split(/\s+/).filter(name => name.startsWith('ov-')).join('.') : ''} right=${Math.round(element.getBoundingClientRect().right)}`);
-      found.push(`main ${main.scrollWidth}px > ${main.clientWidth}px: ${offenders.join(', ') || 'unknown element'}`);
+        .map(element => `${element.tagName.toLowerCase()}${typeof element.className === 'string' ? '.' + element.className.trim().split(/\s+/).filter(name => name.startsWith('ov-')).join('.') : ''} right=${Math.round(element.getBoundingClientRect().right)}`);
+      found.push(`${main.tagName.toLowerCase()} ${main.scrollWidth}px > ${main.clientWidth}px: ${offenders.join(', ') || 'unknown element'}`);
     }
     return found;
   });
 }
+
+/** Controls cut off by an ancestor that clips instead of scrolling (a filter row wider than its card, say). */
+export async function clippedControls(page: Page) {
+  return page.evaluate(() => {
+    const main = document.querySelector('main[aria-label], [role="main"], main');
+    if (!main) return [];
+    const controls = main.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="combobox"]');
+    const found: string[] = [];
+    for (const element of controls) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1 || element.closest('[aria-hidden="true"], [inert]')) continue;
+      for (let parent = element.parentElement; parent && parent !== main; parent = parent.parentElement) {
+        const overflow = getComputedStyle(parent).overflowX;
+        if (overflow === 'visible') continue;
+        if (overflow === 'hidden' || overflow === 'clip') {
+          const box = parent.getBoundingClientRect();
+          // Far off to the side means deliberately hidden (a carousel slide), not cut off.
+          if (rect.right > box.right + 2 && rect.left < box.right + 240) {
+            const name = (element.getAttribute('aria-label') || element.textContent || element.getAttribute('placeholder') || element.tagName).trim().slice(0, 40);
+            found.push(`${element.tagName.toLowerCase()} "${name}" ends at ${Math.round(rect.right)}px, clipped at ${Math.round(box.right)}px`);
+          }
+        }
+        break;
+      }
+      if (found.length >= 5) break;
+    }
+    return found;
+  });
+}
+
+/** Parses a console API response, failing with the server's message when it is not OK. */
+export async function json<T>(response: APIResponse): Promise<T> {
+  if (!response.ok()) throw new Error(`HTTP ${response.status()} ${response.url()}: ${await response.text()}`);
+  return await response.json() as T;
+}
+
+/** A short unique suffix for records a test creates. */
+export const unique = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 /**
  * Visible interactive elements without an accessible name. A small approximation of the accessible-name algorithm:

@@ -1,37 +1,74 @@
 import { workspaces } from '../../../src/components/nav';
-import { anonymous, evidence, expect, horizontalOverflow, isPreviewRun, settle, test, unnamedControls } from './fixtures';
+import {
+  anonymous, clippedControls, evidence, expect, horizontalOverflow, isPreviewRun, json, settle, test, unnamedControls,
+} from './fixtures';
 import type { Guard } from './fixtures';
-import type { Page, TestInfo } from '@playwright/test';
+import type { APIRequestContext, Page, TestInfo } from '@playwright/test';
 
 // Every workspace route in the navigation, at 1440×900 (desktop project) and 390×844 (mobile project).
 const routes = [...new Set(workspaces.flatMap(space => [space.href, ...space.items.map(item => item.href)]))];
 
+// Lane 5 (Analytics) is still building these; they are reported as pending, not tested.
+const stillBuilding = (route: string) => route === '/overview' || (route.startsWith('/analytics') && route !== '/analytics/website');
+
+type Items<T> = { items: T[] };
+type Id = { id: string };
+
+// Detail pages and studios, resolved from the preview's seeded records.
+const details: { name: string; studio?: boolean; resolve: (api: APIRequestContext) => Promise<string> }[] = [
+  { name: 'deal', resolve: async api => '/sales/deals/' + (await json<Items<Id>>(await api.get('/api/console/sales/deals'))).items[0].id },
+  { name: 'contact', resolve: async api => '/crm/contacts/' + (await json<{ id: number }[]>(await api.get('/api/console/crm/lookup/contacts')))[0].id },
+  { name: 'campaign', resolve: async api => '/marketing/campaigns/' + (await json<Items<Id>>(await api.get('/api/console/journeys/campaigns'))).items[0].id },
+  { name: 'flow', resolve: async api => '/automations/flows/' + (await json<Items<Id>>(await api.get('/api/console/journeys/flows'))).items[0].id },
+  { name: 'email studio', studio: true, resolve: async api => '/studio/email/' + (await json<Items<Id>>(await api.get('/api/console/studio/designs?kind=email'))).items[0].id },
+  { name: 'page studio', studio: true, resolve: async api => '/studio/page/' + (await json<Items<Id>>(await api.get('/api/console/sites/pages'))).items[0].id },
+  {
+    name: 'published page',
+    resolve: async api => (await json<Items<{ url: string; status: string }>>(await api.get('/api/console/sites/pages?status=published'))).items[0].url,
+  },
+];
+
 test.skip(!isPreviewRun, 'Preview harness only: npm run build && npm run test:e2e:preview');
 
-async function audit(page: Page, guard: Guard, testInfo: TestInfo, route: string) {
+async function audit(page: Page, guard: Guard, testInfo: TestInfo, route: string, file = route) {
   const problems = {
     errors: guard.problems(),
-    overflow: await horizontalOverflow(page),
+    overflow: [...await horizontalOverflow(page), ...await clippedControls(page)],
     unnamed: await unnamedControls(page),
   };
-  await evidence(page, testInfo, route);
+  await evidence(page, testInfo, file);
   expect.soft(problems.errors, `${route}: page errors, console errors or console API 5xx`).toEqual([]);
-  expect.soft(problems.overflow, `${route}: horizontal page overflow`).toEqual([]);
+  expect.soft(problems.overflow, `${route}: horizontal overflow or clipped controls`).toEqual([]);
   expect.soft(problems.unnamed, `${route}: visible controls without an accessible name`).toEqual([]);
 }
 
 for (const route of routes) {
   test(`UX-01 ${route} renders without errors, overflow or unnamed controls`, async ({ page, guard }, testInfo) => {
+    if (stillBuilding(route)) {
+      testInfo.annotations.push({ type: 'pending', description: 'Analytics lane still building' });
+      return;
+    }
     await page.goto(route);
     await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
     await settle(page);
     if (await page.getByText('Not built yet', { exact: true }).isVisible()) {
-      const owner = (await page.getByText(/^Owned by /).first().textContent().catch(() => null))?.trim() ?? 'another lane';
+      const owner = (await page.getByText(/^Owned by /).first().textContent().catch(() => null))?.trim().replace(/\.$/, '') ?? 'another lane';
       testInfo.annotations.push({ type: 'pending', description: `lane placeholder (${owner})` });
       await evidence(page, testInfo, route);
       return;
     }
     await audit(page, guard, testInfo, route);
+  });
+}
+
+for (const detail of details) {
+  test(`UX-01 ${detail.name} detail renders without errors, overflow or unnamed controls`, async ({ page, guard }, testInfo) => {
+    const route = await detail.resolve(page.request);
+    await page.goto(route);
+    // Full-screen studios have no page title; their canvas is a labelled main region instead.
+    await expect(detail.studio ? page.locator('main[aria-label]') : page.getByRole('heading', { level: 1 }).first()).toBeVisible();
+    await settle(page);
+    await audit(page, guard, testInfo, route, detail.name);
   });
 }
 
