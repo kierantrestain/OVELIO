@@ -36,7 +36,8 @@ async function renumber(client: Sql, pipelineId: string, order?: string[]) {
   );
   const rank = (outcome: string) => outcome === 'open' ? 0 : outcome === 'won' ? 1 : 2;
   const ids = order ?? stages.rows.map(row => row.id);
-  const sorted = [...stages.rows].sort((a, b) => rank(a.outcome) - rank(b.outcome) || ids.indexOf(a.id) - ids.indexOf(b.id));
+  const place = (id: string, position: number) => ids.includes(id) ? ids.indexOf(id) : ids.length + position;
+  const sorted = [...stages.rows].sort((a, b) => rank(a.outcome) - rank(b.outcome) || place(a.id, a.position) - place(b.id, b.position));
   for (const [index, stage] of sorted.entries()) {
     if (stage.position !== index) await client.query('UPDATE pipeline_stages SET position = $2 WHERE id = $1', [stage.id, index]);
   }
