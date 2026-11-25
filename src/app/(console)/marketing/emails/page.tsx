@@ -1,7 +1,8 @@
-import { CampaignsSection } from '@/components/section';
+import { Suspense } from 'react';
+import { EmailsPage } from '@/components/studio/emails';
 
 export const metadata = { title: 'Emails' };
 
 export default function Page() {
-  return <CampaignsSection tab="Newsletters" title="Emails" description="Newsletters and broadcasts: compose, test, schedule and report." />;
+  return <Suspense><EmailsPage /></Suspense>;
 }
