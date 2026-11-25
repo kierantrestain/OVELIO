@@ -2,7 +2,7 @@
 
 import { ArrowLeft } from 'lucide-react';
 import { createContext, useContext } from 'react';
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { AlertDialog } from '@astryxdesign/core/AlertDialog';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Banner } from '@astryxdesign/core/Banner';
@@ -18,7 +18,6 @@ import { Link } from '@astryxdesign/core/Link';
 import { Pagination } from '@astryxdesign/core/Pagination';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { Skeleton } from '@astryxdesign/core/Skeleton';
-import { Spinner } from '@astryxdesign/core/Spinner';
 import { Tab, TabList } from '@astryxdesign/core/TabList';
 import { Text } from '@astryxdesign/core/Text';
 import { Token } from '@astryxdesign/core/Token';
@@ -97,12 +96,75 @@ export function Feedback({ error, notice }: { error?: string; notice?: string })
 
 export function AsyncState({ loading, error, retry }: { loading: boolean; error?: string; retry?: () => void }) {
   if (error) return <Banner status="error" title={error} endContent={retry ? <Button label="Try again" size="sm" onClick={retry} /> : undefined} />;
-  if (loading) return <div className="ov-stack-sm" role="status" aria-label="Loading">
-    <div className="ov-actions"><Spinner size="sm" /><Text color="secondary">Loading…</Text></div>
-    <Skeleton height={14} width="65%" />
-    <Skeleton height={14} width="45%" />
-  </div>;
+  if (loading) return <SkeletonRows rows={3} />;
   return null;
+}
+
+/** Loading placeholder shaped like table rows; announces "Loading…" to assistive technology. */
+export function SkeletonRows({ rows = 5, columns = 3, label = 'Loading' }: { rows?: number; columns?: number; label?: string }) {
+  const widths = ['72%', '48%', '60%', '36%', '54%'];
+  return <div className="ov-skeleton-rows" role="status" aria-label={label}
+    style={{ '--ov-skeleton-cols': `2fr ${'1fr '.repeat(Math.max(0, columns - 1))}`.trim() } as CSSProperties}>
+    <span className="ov-visually-hidden">Loading…</span>
+    {Array.from({ length: rows }, (_, row) => <div key={row} className="ov-skeleton-row" aria-hidden="true">
+      {Array.from({ length: columns }, (_, column) => <Skeleton key={column} height={column === 0 ? 14 : 12} width={widths[(row + column) % widths.length]} radius={1} index={row * columns + column} />)}
+    </div>)}
+  </div>;
+}
+
+/**
+ * Responsive table frame. Wrap an Astryx <Table> (or a plain <table>): narrow screens scroll it sideways instead of
+ * crushing columns, the header sticks while a tall table scrolls inside `maxHeight`, and numbers use tabular figures.
+ */
+export function DataTable({ children, label, maxHeight, minWidth }: {
+  children: ReactNode; label?: string; maxHeight?: number | string; minWidth?: number;
+}) {
+  const style = {
+    ...(maxHeight != null ? { '--ov-table-max-height': typeof maxHeight === 'number' ? `${maxHeight}px` : maxHeight } : {}),
+    ...(minWidth != null ? { '--ov-table-min-width': `${minWidth}px` } : {}),
+  } as CSSProperties;
+  return <div className="ov-table" style={style} data-min-width={minWidth != null ? '' : undefined}
+    role={label ? 'region' : undefined} aria-label={label}>{children}</div>;
+}
+
+/** Page or panel toolbar: search and filters at the start, actions at the end; wraps cleanly and stacks on phones. */
+export function Toolbar({ children, end, label }: { children?: ReactNode; end?: ReactNode; label?: string }) {
+  return <div className="ov-tbar" role={label ? 'group' : undefined} aria-label={label}>
+    {children ? <div className="ov-tbar-start">{children}</div> : null}
+    {end ? <div className="ov-tbar-end">{end}</div> : null}
+  </div>;
+}
+
+/** A row of filter controls (selectors, inputs, toggles) with consistent spacing; each control fills the row on phones. */
+export function FilterRow({ children, label = 'Filters' }: { children: ReactNode; label?: string }) {
+  return <div className="ov-filter-row" role="group" aria-label={label}>{children}</div>;
+}
+
+/**
+ * KPI tile: label, a large tabular value, an optional change against the previous period and a hint. Mark modelled
+ * numbers (forecasts, weighted pipeline) with `estimate` so they are never read as recorded results.
+ */
+export function KpiTile({ label, value, delta, hint, info, icon, estimate, flat }: {
+  label: string; value: ReactNode; delta?: { value: number; label?: string; goodWhen?: 'up' | 'down' };
+  hint?: string; info?: string; icon?: ReactNode; estimate?: boolean; flat?: boolean;
+}) {
+  const good = delta ? (delta.goodWhen === 'down' ? delta.value < 0 : delta.value > 0) : false;
+  const body = <div className="ov-kpi">
+    <span className="ov-kpi-label">
+      <span className="ov-actions">{label}{info ? <InfoTip content={info} label={`About ${label}`} size="sm" /> : null}</span>
+      {icon}
+    </span>
+    <span className="ov-kpi-value">{value}</span>
+    {delta || hint || estimate ? <span className="ov-kpi-foot">
+      {estimate ? <Badge label="Estimate" variant="neutral" /> : null}
+      {delta ? <span className={`ov-kpi-delta ${delta.value === 0 ? '' : good ? 'ov-kpi-delta--good' : 'ov-kpi-delta--bad'}`}>
+        {delta.value > 0 ? '+' : delta.value < 0 ? '−' : ''}{number(Math.abs(delta.value))}%
+      </span> : null}
+      {delta?.label ? <span>{delta.label}</span> : null}
+      {hint ? <span>{hint}</span> : null}
+    </span> : null}
+  </div>;
+  return flat ? body : <Card>{body}</Card>;
 }
 
 export function Empty({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
