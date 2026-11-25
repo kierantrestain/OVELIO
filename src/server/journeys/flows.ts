@@ -107,6 +107,14 @@ export async function getVersion(id: string, version: number): Promise<FlowVersi
   return { version: row.version, graph: row.graph, triggers: row.triggers, reentry: row.reentry, publishedAt: new Date(row.published_at).toISOString(), publishedBy: row.name };
 }
 
+/** Keeps the campaign's asset list in step with the flow's campaign. */
+async function syncCampaignAsset(flowId: string, from: string | null, to: string | null, label: string) {
+  if (from) await db.query(`DELETE FROM campaign_assets WHERE campaign_id = $1 AND asset_type = 'flow' AND asset_id = $2`, [from, flowId]);
+  if (to) {
+    await db.query(`INSERT INTO campaign_assets (campaign_id, asset_type, asset_id, label) VALUES ($1, 'flow', $2, $3) ON CONFLICT DO NOTHING`, [to, flowId, label]);
+  }
+}
+
 export async function createFlow(input: FlowInput & { templateKey?: string }, actorId: string | null): Promise<FlowDetail> {
   const template = input.templateKey ? flowTemplates.find(item => item.key === input.templateKey) : undefined;
   if (input.templateKey && !template) throw new AppError(404, 'That template was not found.');
@@ -119,6 +127,7 @@ export async function createFlow(input: FlowInput & { templateKey?: string }, ac
       JSON.stringify(triggers), input.reentry ?? template?.reentry ?? 'once', JSON.stringify(graph), input.campaignId ?? null,
       input.ownerId ?? actorId, template?.key ?? null, actorId],
   );
+  await syncCampaignAsset(result.rows[0].id, null, input.campaignId ?? null, input.name ?? template?.name ?? 'Workflow');
   await audit(actorId, 'create', 'flow', result.rows[0].id, input.name ?? template?.name ?? '');
   return getFlow(result.rows[0].id);
 }
@@ -133,6 +142,7 @@ export async function updateFlow(id: string, input: FlowInput, actorId: string |
       input.reentry ?? current.reentry, JSON.stringify(input.graph ?? current.graph),
       input.campaignId === undefined ? current.campaign_id : input.campaignId, input.ownerId === undefined ? current.owner_id : input.ownerId],
   );
+  if (input.campaignId !== undefined && input.campaignId !== current.campaign_id) await syncCampaignAsset(id, current.campaign_id, input.campaignId, input.name ?? current.name);
   await audit(actorId, 'update', 'flow', id, input.name ?? current.name);
   return getFlow(id);
 }

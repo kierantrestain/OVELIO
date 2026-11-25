@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Suspense } from 'react';
+import { CampaignHub } from '@/components/journeys/campaign-hub';
 
 export const metadata = { title: 'Campaigns' };
 
 export default function Page() {
-  return <LaneStub title="Campaigns" lane="Agent 4 · Campaigns & Automations" />;
+  return <Suspense><CampaignHub /></Suspense>;
 }
