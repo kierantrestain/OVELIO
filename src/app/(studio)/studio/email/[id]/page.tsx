@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { EmailStudio } from '@/components/studio/editor';
 
-export const metadata = { title: 'Studio' };
+export const metadata = { title: 'Email studio' };
 
-export default function Page() {
-  return <LaneStub title="Studio" lane="Agent 2 · Email Studio" />;
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  return <EmailStudio key={id} id={id} />;
 }

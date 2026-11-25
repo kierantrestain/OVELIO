@@ -205,6 +205,11 @@ export const studioModule: LaneModule = {
       if (input.link) await linkDesign(created.id, input.link);
       return json(created, 201);
     }, 'marketer'),
+    route('GET', /^studio\/blocks$/, async () => {
+      const result = await db.query<{ id: string; name: string; source: string; html: string }>(
+        `SELECT id, name, source, html FROM designs WHERE kind = 'email_block' AND status <> 'archived' ORDER BY updated_at DESC LIMIT 100`);
+      return { items: result.rows };
+    }, 'marketer'),
     route('GET', new RegExp(`^studio/designs/${uuid}$`), async ({ params }) => getDesign(params[0])),
     route('PATCH', new RegExp(`^studio/designs/${uuid}$`), async ({ params, request, user }) =>
       saveDesign(params[0], await readBody(request, patchInput, 4 * 1024 * 1024), user.id), 'marketer'),
