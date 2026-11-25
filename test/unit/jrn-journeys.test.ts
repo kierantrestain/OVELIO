@@ -123,7 +123,9 @@ test('JRN-02 a real form.submitted event enrols the contact; tag, wait, email, t
   assert.deepEqual(message, { status: 'not_sent', campaign_id: campaign.id, source: `flow:${flow.id}` });
   const task = (await db.query<{ title: string; assignee_id: string; contact_id: string }>(`SELECT * FROM tasks WHERE source = $1`, [`flow:${flow.id}`])).rows[0];
   assert.equal(task.title, 'Call Hannah about the webinar');
-  assert.equal(task.assignee_id, ADMIN, 'assigned to the flow owner when the contact has none');
+  // The contact's record owner when it has one (the CRM preview seed assigns owners), otherwise the flow owner.
+  const recordOwner = (await db.query<{ owner_id: string }>(`SELECT owner_id FROM record_owners WHERE object = 'contact' AND record_id = $1`, [task.contact_id])).rows[0]?.owner_id;
+  assert.equal(task.assignee_id, recordOwner ?? ADMIN, 'assigned to the record owner, or the flow owner when the contact has none');
   const deal = (await db.query<{ name: string; campaign_id: string; amount: string; source: string }>(`SELECT * FROM deals WHERE source = $1`, [`flow:${flow.id}`])).rows[0];
   assert.equal(deal.name, 'Webinar lead: Hannah Morris');
   assert.equal(deal.campaign_id, campaign.id);
