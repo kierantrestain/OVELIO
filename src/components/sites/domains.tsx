@@ -3,7 +3,7 @@
 // /sites/domains: connect a custom domain or subdomain, see the exact DNS records to create, and verify them.
 import '@/styles/sites.css';
 import { Globe, Plus, RefreshCw } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Selector } from '@astryxdesign/core/Selector';
@@ -44,7 +44,7 @@ export function Domains() {
     {state.error ? <Banner status="error" title={state.error} /> : null}
     {state.notice ? <Banner status="success" title={state.notice} /> : null}
     <Panel title="Workspace address" description="Every page is also available here without any DNS set-up.">
-      <Text><code>{typeof window === 'undefined' ? '' : window.location.origin}/s/&lt;page-address&gt;</code></Text>
+      <Text><code><WorkspaceOrigin />/s/&lt;page-address&gt;</code></Text>
     </Panel>
     {!domains.data ? <AsyncState loading={domains.loading} error={domains.error} retry={domains.refresh} />
       : !domains.data.items.length ? <Panel><Empty title="No domains connected" description="Connect a subdomain (recommended) or a root domain, add two DNS records, then verify."
@@ -105,4 +105,11 @@ function AddDomain({ onClose, onAdded }: { onClose: () => void; onAdded: () => v
       </div>
     </form>
   </Modal>;
+}
+
+const noSubscription = () => () => {};
+
+/** The workspace origin, read after hydration so the server and client render the same text first. */
+function WorkspaceOrigin() {
+  return <>{useSyncExternalStore(noSubscription, () => window.location.origin, () => '')}</>;
 }
