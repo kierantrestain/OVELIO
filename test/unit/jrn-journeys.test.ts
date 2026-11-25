@@ -128,7 +128,7 @@ test('JRN-02 a real form.submitted event enrols the contact; tag, wait, email, t
   assert.equal(deal.name, 'Webinar lead: Hannah Morris');
   assert.equal(deal.campaign_id, campaign.id);
   assert.equal(Number(deal.amount), 2500);
-  const types = (await listEvents({ contactId: 3, types: ['flow.enrolled', 'flow.completed'] })).map(item => item.type).sort();
+  const types = (await listEvents({ contactId: 3, entityId: flow.id, types: ['flow.enrolled', 'flow.completed'] })).map(item => item.type).sort();
   assert.deepEqual(types, ['flow.completed', 'flow.enrolled']);
 
   // Duplicates: the same event delivered again, and a second submission (once-only flow), enrol nobody.
@@ -341,4 +341,28 @@ test('JRN-07 deal triggers move the triggering deal without re-triggering, and c
   assert.deepEqual(performance.deals.wonRevenue, [{ currency: 'GBP', amount: 900 }]);
   assert.equal(performance.roi, 80, 'ROI shown once budget and revenue exist');
   assert.match(performance.notes.costPerLead ?? '', /No leads/);
+});
+
+test('JRN-08 the preview seed adds labelled campaigns, flows and runs, and search finds them', async () => {
+  const list = await campaigns.listCampaigns();
+  const spring = list.find(item => item.name === 'Spring webinar series');
+  assert.ok(spring && spring.status === 'active' && spring.budget === 2500);
+  assert.ok(list.some(item => item.name === 'Q4 renewals push' && item.status === 'planned'));
+  const detail = await campaigns.getCampaign(spring.id);
+  assert.match(detail.description, /Sample campaign/);
+  assert.ok(detail.assets.some(asset => asset.type === 'link' && String(asset.meta.url).includes('utm_campaign=spring-webinar-series')));
+  assert.ok(detail.assets.some(asset => asset.type === 'flow'));
+  const all = await flows.listFlows();
+  const followUp = all.find(item => item.name === 'Webinar sign-up follow-up')!;
+  assert.equal(followUp.status, 'published');
+  assert.equal(followUp.triggers[0].type, 'form.submitted');
+  assert.ok(followUp.counts.enrolled >= 3);
+  assert.ok(all.some(item => item.name === 'Renewal reminders' && item.status === 'draft'));
+  const performance = await campaigns.campaignPerformance(spring.id);
+  assert.ok(performance.leads >= 4);
+  assert.equal(performance.roi, 92);
+  const { journeysModule } = await import('../../src/server/journeys/module');
+  const results = await journeysModule.search('webinar', { id: ADMIN, email: 'a@example.com', name: 'Admin', role: 'admin' });
+  assert.ok(results.some(item => item.kind === 'campaign' && item.href === `/marketing/campaigns/${spring.id}`));
+  assert.ok(results.some(item => item.kind === 'flow' && item.href === `/automations/flows/${followUp.id}`));
 });
