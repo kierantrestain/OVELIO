@@ -48,6 +48,7 @@ SMTP_FROM_EMAIL=hello@ovelio.test
 MAIL_FROM_NAME=OVELIO
 SMTP_MAUTIC_PASSWORD=$(openssl rand -hex 24)
 SMTP_LISTMONK_PASSWORD=$(openssl rand -hex 24)
+SMTP_OVELIO_PASSWORD=$(openssl rand -hex 24)
 SMTP_RELAY_HOST=mailpit
 SMTP_RELAY_PORT=1025
 SMTP_RELAY_TLS=local

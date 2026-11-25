@@ -1534,3 +1534,96 @@ function previewRunEntries(s: PreviewStore, contactId: number): WorkflowRunEntry
   }
   return [entry('new_a1', 'Send email', 'email.send', 'executed'), entry('new_a2', 'Change tags', 'lead.changetags', 'executed', { triggeredAt: new Date(Date.parse(daysAgo(18)) + 60_000).toISOString() })];
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Directory accessors (OVELIO 2.0). `src/server/directory.ts` reads and writes preview contacts and companies here,
+// so CRM, forms, sequences and flows behave in the preview exactly as they do against Mautic.
+
+export function devPreviewTeam(): User[] {
+  return store().team;
+}
+
+export function devPreviewContacts(): ContactDetail[] {
+  return store().contacts;
+}
+
+export function devPreviewCompanies(): Company[] {
+  return store().companies;
+}
+
+export function devPreviewSuppressed(email: string): boolean {
+  const s = store();
+  const normalized = email.trim().toLowerCase();
+  const contact = s.contacts.find(item => item.email === normalized);
+  return Boolean(contact?.suppressed || contact?.consent === 'suppressed');
+}
+
+export function devPreviewUpsertContact(input: {
+  email: string; firstName?: string; lastName?: string; company?: string; phone?: string; position?: string;
+  city?: string; country?: string; website?: string; tags?: string[]; consent?: 'opted_in' | 'unknown'; evidence?: string; source?: string;
+}): { contact: ContactDetail; created: boolean } {
+  const s = store();
+  const email = input.email.trim().toLowerCase();
+  const now = new Date().toISOString();
+  const existing = s.contacts.find(item => item.email === email);
+  if (existing) {
+    for (const key of ['firstName', 'lastName', 'company', 'phone', 'position', 'city', 'country', 'website'] as const) {
+      const value = input[key];
+      if (value) existing[key] = value;
+    }
+    for (const tag of input.tags ?? []) if (!existing.tags.includes(tag)) existing.tags.push(tag);
+    if (input.consent === 'opted_in' && existing.consent === 'unknown' && !existing.suppressed) {
+      existing.consent = 'opted_in';
+      existing.consentHistory = [...(existing.consentHistory ?? []), { id: String(s.nextId++), action: 'opted_in', evidence: input.evidence || 'Preview form', at: now }];
+    }
+    existing.updatedAt = now;
+    existing.activity.unshift({ label: `Updated from ${input.source ?? 'OVELIO'}`, at: now, type: 'lead.updated' });
+    return { contact: existing, created: false };
+  }
+  const contact: ContactDetail = {
+    id: s.nextId++, email, firstName: input.firstName ?? '', lastName: input.lastName ?? '', company: input.company ?? '',
+    phone: input.phone ?? '', position: input.position ?? '', city: input.city ?? '', country: input.country ?? '', website: input.website ?? '',
+    stageId: null, stageName: null, points: 0, createdAt: now, updatedAt: now, tags: input.tags ?? [], suppressed: false,
+    consent: input.consent === 'opted_in' ? 'opted_in' : 'unknown',
+    consentHistory: input.consent === 'opted_in' ? [{ id: String(s.nextId++), action: 'opted_in', evidence: input.evidence || 'Preview form', at: now }] : [],
+    segments: [], mailingListIds: [], workflowIds: [], linkedCompanies: [], devices: [], notes: [],
+    activity: [{ label: `Created from ${input.source ?? 'OVELIO'}`, at: now, type: 'lead.created' }],
+    newsletterActivity: { views: [], clicks: [] }, subscriberBounces: [],
+  };
+  s.contacts.unshift(contact);
+  return { contact, created: true };
+}
+
+export function devPreviewTagContact(id: number, add: string[], remove: string[]): ContactDetail | null {
+  const contact = store().contacts.find(item => item.id === id);
+  if (!contact) return null;
+  contact.tags = [...new Set([...contact.tags.filter(tag => !remove.includes(tag)), ...add])];
+  contact.updatedAt = new Date().toISOString();
+  return contact;
+}
+
+export function devPreviewAdjustPoints(id: number, delta: number): ContactDetail | null {
+  const contact = store().contacts.find(item => item.id === id);
+  if (!contact) return null;
+  contact.points += delta;
+  return contact;
+}
+
+export function devPreviewCreateCompany(input: { name: string; email?: string; website?: string; industry?: string; city?: string; country?: string }): Company {
+  const s = store();
+  const item: Company = { id: s.nextId++, name: input.name, email: input.email ?? '', website: input.website ?? '', industry: input.industry ?? '', city: input.city ?? '', country: input.country ?? '', score: 0 };
+  s.companies.push(item);
+  return item;
+}
+
+export function devPreviewLinkCompany(contactId: number, companyId: number) {
+  const s = store();
+  const contact = s.contacts.find(item => item.id === contactId);
+  const company = s.companies.find(item => item.id === companyId);
+  if (!contact || !company) return;
+  contact.linkedCompanies ??= [];
+  if (!contact.linkedCompanies.some(item => item.id === companyId)) {
+    contact.linkedCompanies.push({ id: company.id, name: company.name, isPrimary: contact.linkedCompanies.length === 0 });
+  }
+  if (!contact.company) contact.company = company.name;
+}

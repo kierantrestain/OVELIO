@@ -128,3 +128,16 @@ body { background: var(--color-background-body); color: var(--color-text-primary
   .ov-login { grid-template-columns: 1fr; }
   .ov-login-art { display: none; }
 }
+
+/* OVELIO 2.0 shell */
+.ov-brand-link { display: inline-flex; align-items: center; width: 236px; padding-inline: 8px; text-decoration: none; }
+.ov-cmd-item { display: grid; gap: 2px; min-width: 0; }
+.ov-cmd-item-title { font-weight: var(--font-weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-cmd-item-meta { font-size: var(--font-size-xs); color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-page { max-width: 1560px; }
+/* Data-dense workspaces (boards, tables, canvases) use the full width. */
+.ov-page:has(> .ov-wide), .ov-page:has(> * > .ov-wide) { max-width: none; }
+@media (max-width: 860px) {
+  .ov-brand-link { width: auto; }
+  .ov-cmd-trigger span { display: none; }
+}

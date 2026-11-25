@@ -1,6 +1,7 @@
 'use client';
 
 import { ArrowLeft } from 'lucide-react';
+import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
 import { AlertDialog } from '@astryxdesign/core/AlertDialog';
 import { Badge } from '@astryxdesign/core/Badge';
@@ -26,9 +27,22 @@ import { number } from './client';
 
 export type Tone = 'neutral' | 'success' | 'info' | 'warning' | 'error';
 
-export function PageHeader({ title, description, actions, back }: {
+/**
+ * Re-homes an existing tabbed section under the OVELIO 2.0 navigation: the side navigation replaces its top-level
+ * tab strip, and its list header takes the workspace page's title. Detail headers (with `back`) are left as they are.
+ */
+export type SectionFrame = { title: string; description?: string; hiddenTabs: string[] };
+const SectionFrameContext = createContext<SectionFrame | null>(null);
+export function SectionFrameProvider({ frame, children }: { frame: SectionFrame; children: ReactNode }) {
+  return <SectionFrameContext.Provider value={frame}>{children}</SectionFrameContext.Provider>;
+}
+
+export function PageHeader({ title: ownTitle, description: ownDescription, actions, back }: {
   title: string; description?: string; actions?: ReactNode; back?: { href: string; label: string };
 }) {
+  const frame = useContext(SectionFrameContext);
+  const title = frame && !back ? frame.title : ownTitle;
+  const description = frame && !back ? frame.description : ownDescription;
   return <header className="ov-page-header">
     <div>
       {back ? <Link href={back.href} type="supporting" color="secondary"><span className="ov-actions"><ArrowLeft size={14} aria-hidden="true" />{back.label}</span></Link> : null}
@@ -134,6 +148,8 @@ export function FormActions({ children }: { children: ReactNode }) {
 }
 
 export function Tabs<T extends string>({ value, onChange, items, label }: { value: T; onChange: (value: T) => void; items: readonly T[]; label: string }) {
+  const frame = useContext(SectionFrameContext);
+  if (frame?.hiddenTabs.includes(label)) return null;
   return <TabList value={value} onChange={next => onChange(next as T)} hasDivider aria-label={label}>
     {items.map(item => <Tab key={item} value={item} label={item} />)}
   </TabList>;

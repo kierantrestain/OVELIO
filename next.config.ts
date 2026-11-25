@@ -3,7 +3,11 @@ import type { NextConfig } from 'next';
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   experimental: { cpus: 2, optimizePackageImports: ['@astryxdesign/core'] },
-  serverExternalPackages: ['pg'],
+  serverExternalPackages: ['pg', '@electric-sql/pglite', 'mjml'],
+  // The developer preview runs the SQL migrations on an embedded PGlite database, so ship both with every route.
+  outputFileTracingIncludes: {
+    '/**': ['./migrations/*.sql', './node_modules/@electric-sql/pglite/dist/**/*'],
+  },
   async headers() {
     return [{
       source: '/:path*',

@@ -1,8 +1,5 @@
-import { ContactView } from '@/components/audience';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Contact' };
-
-export default async function ContactPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  return <ContactView id={id} />;
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  redirect(`/crm/contacts/${encodeURIComponent((await params).id)}`);
 }

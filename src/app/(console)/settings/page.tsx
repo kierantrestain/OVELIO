@@ -1,21 +1,13 @@
-import { Settings } from '@/components/settings';
-import type { SettingsTab } from '@/components/settings';
+import { redirect } from 'next/navigation';
+import { SettingsSection } from '@/components/section';
 
 export const metadata = { title: 'Settings' };
 
-const validTabs: readonly SettingsTab[] = ['Company', 'Team', 'Connections', 'Data & privacy'];
+const moved: Record<string, string> = { team: '/settings/team', connections: '/settings/connections', 'data & privacy': '/settings/privacy' };
 
-function resolveTab(tab?: string, view?: string): SettingsTab {
-  const candidate = (tab ?? view)?.trim().toLowerCase();
-  return validTabs.find(item => item.toLowerCase() === candidate) ?? 'Company';
-}
-
-export default async function SettingsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ view?: string; tab?: string }>;
-}) {
+export default async function Page({ searchParams }: { searchParams: Promise<{ view?: string; tab?: string }> }) {
   const params = await searchParams;
-  const initialTab = resolveTab(params.tab, params.view);
-  return <Settings key={initialTab} initialTab={initialTab} />;
+  const view = (params.tab ?? params.view)?.trim().toLowerCase();
+  if (view && moved[view]) redirect(moved[view]);
+  return <SettingsSection tab="Company" title="Company" description="Workspace name, branding and the postal address in every email." />;
 }

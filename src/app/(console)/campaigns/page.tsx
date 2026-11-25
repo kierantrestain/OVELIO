@@ -1,15 +1,8 @@
-import { Campaigns } from '@/components/campaigns';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Campaigns' };
+const moved: Record<string, string> = { newsletters: '/marketing/emails', templates: '/marketing/templates', media: '/marketing/media', transactional: '/marketing/transactional' };
 
-const validTabs = ['Newsletters', 'Templates', 'Media', 'Transactional'] as const;
-
-function resolveTab(raw?: string) {
-  const normalized = raw?.trim().toLowerCase();
-  return validTabs.find(item => item.toLowerCase() === normalized) ?? 'Newsletters';
-}
-
-export default async function CampaignsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
-  const tab = resolveTab((await searchParams).tab);
-  return <Campaigns key={tab} initialTab={tab} />;
+export default async function Page({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+  const tab = (await searchParams).tab?.trim().toLowerCase();
+  redirect(tab && moved[tab] ? moved[tab] : '/marketing/emails');
 }

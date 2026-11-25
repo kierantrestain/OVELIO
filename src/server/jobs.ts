@@ -11,6 +11,8 @@ export type JobData = {
   campaign_refresh: { campaignId: number; runId: string };
   erase: { contactId: number };
   contact_import: { importId: string };
+  /** OVELIO 2.0 module jobs, dispatched by name through src/server/platform/jobs.ts. */
+  platform: { handler: string; data: unknown };
 };
 export type Job = {
   [Kind in keyof JobData]: {
