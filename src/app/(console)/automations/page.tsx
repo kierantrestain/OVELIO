@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { AutomationsSection } from '@/components/section';
+import { WorkflowsList } from '@/components/journeys/automation-pages';
 
 export const metadata = { title: 'Workflows' };
 
@@ -13,5 +13,5 @@ const moved: Record<string, string> = {
 export default async function Page({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
   const tab = (await searchParams).tab?.trim().toLowerCase();
   if (tab && moved[tab]) redirect(moved[tab]);
-  return <AutomationsSection tab="Workflows" title="Workflows" description="Multi-step journeys that act on segments, forms and engagement." />;
+  return <WorkflowsList />;
 }

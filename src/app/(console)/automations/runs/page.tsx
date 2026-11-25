@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Suspense } from 'react';
+import { RunHistory } from '@/components/journeys/automation-pages';
 
 export const metadata = { title: 'Run history' };
 
 export default function Page() {
-  return <LaneStub title="Run history" lane="Agent 4 · Campaigns & Automations" />;
+  return <Suspense><RunHistory /></Suspense>;
 }
