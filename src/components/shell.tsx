@@ -120,6 +120,8 @@ export function Shell({ user, workspace, devPreview = false, children }: {
   const logout = useAction();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const { workspace: current, leaf, isDetail } = locate(pathname);
+  // A sub-page other than the workspace's own landing page (whose href equals the workspace href).
+  const onLeaf = Boolean(leaf && leaf.href !== current?.href);
   const { source, lookup } = useCommandSource(user);
   const normalizedAccent = (workspace.accent ?? '').trim().toLowerCase();
   const accent = /^#[0-9a-f]{6}$/.test(normalizedAccent) && normalizedAccent !== defaultAccent
@@ -177,8 +179,8 @@ export function Shell({ user, workspace, devPreview = false, children }: {
     heading={<NextLink href="/overview" aria-label="OVELIO overview" className="ov-brand-link"><Brand /></NextLink>}
     startContent={<Breadcrumbs label="Location">
       <BreadcrumbItem href="/overview">{workspace.name || 'Workspace'}</BreadcrumbItem>
-      {current ? <BreadcrumbItem href={leaf || isDetail ? current.href : undefined} isCurrent={!leaf && !isDetail}>{current.label}</BreadcrumbItem> : null}
-      {leaf && leaf.href !== current?.href ? <BreadcrumbItem href={isDetail ? leaf.href : undefined} isCurrent={!isDetail}>{leaf.label}</BreadcrumbItem> : null}
+      {current ? <BreadcrumbItem href={onLeaf || isDetail ? current.href : undefined} isCurrent={!onLeaf && !isDetail}>{current.label}</BreadcrumbItem> : null}
+      {onLeaf && leaf ? <BreadcrumbItem href={isDetail ? leaf.href : undefined} isCurrent={!isDetail}>{leaf.label}</BreadcrumbItem> : null}
       {isDetail ? <BreadcrumbItem isCurrent>Details</BreadcrumbItem> : null}
     </Breadcrumbs>}
     endContent={<div className="ov-actions">
