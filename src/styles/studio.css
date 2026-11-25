@@ -128,7 +128,8 @@
 .ov-studio-steps li[data-done="true"] { color: var(--color-text-primary); }
 .ov-studio-choice { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 .ov-studio-choice-item { text-align: left; display: grid; gap: 6px; padding: 10px; border: 1px solid var(--color-border, #e5e7eb); border-radius: 10px; background: var(--color-background-surface, #fff); cursor: pointer; font: 13px inherit; font-family: inherit; color: var(--color-text-primary); }
-.ov-studio-choice-item[aria-pressed="true"] { border-color: var(--color-accent, #2457d6); box-shadow: 0 0 0 2px var(--color-accent, #2457d6); }
+.ov-studio-choice-item[aria-pressed="true"], .ov-studio-choice-item[aria-checked="true"] { border-color: var(--color-accent, #2457d6); box-shadow: 0 0 0 2px var(--color-accent, #2457d6); }
+.ov-studio-thumb-wrap { display: block; min-width: 0; }
 .ov-studio-choice-item .ov-studio-thumb { height: 180px; border-radius: 6px; border: 0; }
 .ov-studio-choice-item .ov-studio-thumb iframe { transform: translateX(-50%) scale(.3); }
 .ov-studio-count { font-variant-numeric: tabular-nums; font-weight: 600; }

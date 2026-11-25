@@ -21,7 +21,7 @@ type Tab = typeof tabs[number];
 
 /** A live thumbnail: the compiled email in a scaled, sandboxed frame, fetched only when the card scrolls into view. */
 export function Thumb({ path, label, onOpen }: { path: string; label: string; onOpen?: () => void }) {
-  const ref = useRef<HTMLButtonElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [html, setHtml] = useState<string>();
   const [failed, setFailed] = useState(false);
@@ -40,10 +40,11 @@ export function Thumb({ path, label, onOpen }: { path: string; label: string; on
     request<{ html: string }>('/api/console' + path).then(data => { if (active) setHtml(data.html); }, () => { if (active) setFailed(true); });
     return () => { active = false; };
   }, [visible, path]);
-  return <button ref={ref} type="button" className="ov-studio-thumb" onClick={onOpen} aria-label={`Preview ${label}`} tabIndex={onOpen ? 0 : -1}>
-    {html ? <iframe title={`Thumbnail of ${label}`} sandbox="" srcDoc={html} loading="lazy" tabIndex={-1} aria-hidden="true" />
-      : <span className="ov-studio-thumb-empty">{failed ? 'Preview unavailable' : 'Loading preview…'}</span>}
-  </button>;
+  const body = html ? <iframe title={`Thumbnail of ${label}`} sandbox="" srcDoc={html} loading="lazy" tabIndex={-1} aria-hidden="true" />
+    : <span className="ov-studio-thumb-empty">{failed ? 'Preview unavailable' : 'Loading preview…'}</span>;
+  return <div ref={ref} className="ov-studio-thumb-wrap">
+    {onOpen ? <button type="button" className="ov-studio-thumb" onClick={onOpen} aria-label={`Preview ${label}`}>{body}</button> : <div className="ov-studio-thumb">{body}</div>}
+  </div>;
 }
 
 function TemplatePreview({ template, onUse, busy, onClose }: { template: EmailTemplateSummary; onUse: () => void; busy: boolean; onClose: () => void }) {

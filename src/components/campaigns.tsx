@@ -31,6 +31,7 @@ import type {
 import { api, date, number, saveFile, upload, useAction, useFields, useResource } from './client';
 import { EmailMetrics } from './overview';
 import { useUser } from './shell';
+import { EditDesignButton } from './studio/emails';
 import {
   AsyncState, Bars, ConfirmDialog, Distribution, Empty, Feedback, FormActions, Modal, PageHeader, Pager, Panel,
   SendProgress, StatusBadge, Tabs,
@@ -874,7 +875,7 @@ export function Campaigns({ initialTab }: { initialTab?: string } = {}) {
                 key: 'name',
                 header: 'Newsletter',
                 renderCell: item => <span className="ov-cell">
-                  <Link href={`/campaigns/${item.id}`}>{item.name}</Link>
+                  <Link href={`/marketing/emails/${item.id}`}>{item.name}</Link>
                   <Text type="supporting" color="secondary">{item.subject}</Text>
                 </span>,
               },
@@ -1009,7 +1010,7 @@ export function Campaigns({ initialTab }: { initialTab?: string } = {}) {
     </Panel> : tab === 'Media' ? <MediaTab canEdit={canEdit} />
       : <TransactionalTab canEdit={canEdit} onCreateTxTemplate={() => { setTab('Templates'); openNewTemplate('tx'); }} />}
 
-    {createCampaign ? <CampaignForm onClose={() => setCreateCampaign(false)} onDone={campaign => router.push(`/campaigns/${campaign.id}`)} /> : null}
+    {createCampaign ? <CampaignForm onClose={() => setCreateCampaign(false)} onDone={campaign => router.push(`/marketing/emails/${campaign.id}`)} /> : null}
     {templateModal ? <TemplateForm
       template={templateModal.template}
       defaultType={templateModal.defaultType}
@@ -1243,10 +1244,11 @@ export function CampaignView({ id }: { id: string }) {
 
   return <>
     <PageHeader
-      back={{ href: '/campaigns', label: 'Campaigns' }}
+      back={{ href: '/marketing/emails', label: 'Emails' }}
       title={campaign?.name || 'Newsletter'}
       description={campaign?.subject || 'Newsletter details and performance.'}
       actions={campaign && canEdit ? <>
+        <EditDesignButton campaign={campaign} />
         <Button label="Preview" icon={<Eye size={15} />} onClick={() => setModal('preview')} />
         <Button label="Send test" icon={<MailCheck size={15} />} onClick={() => setModal('test')} />
         {['draft', 'paused', 'scheduled'].includes(campaign.status) ? (
@@ -1272,7 +1274,7 @@ export function CampaignView({ id }: { id: string }) {
           isLoading={action.busy}
           onClick={() => void action.run(async () => {
             const cloned = await api<Campaign>(`${path}/${campaign.id}/clone`, 'POST');
-            router.push(`/campaigns/${cloned.id}`);
+            router.push(`/marketing/emails/${cloned.id}`);
           }, 'Newsletter cloned.')}
         />
         {campaign.status === 'draft' ? (
@@ -1396,7 +1398,7 @@ export function CampaignView({ id }: { id: string }) {
       onClose={() => setModal(undefined)}
       onConfirm={() => void action.run(async () => {
         await api(`${path}/${campaign.id}`, 'DELETE');
-        router.push('/campaigns');
+        router.push('/marketing/emails');
       }, 'Newsletter deleted.')}
     /> : null}
     {campaign && (modal === 'test' || modal === 'schedule' || modal === 'send' || modal === 'pause')
