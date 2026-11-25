@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Suspense } from 'react';
+import { FunnelAnalytics } from '@/components/insights/detail';
 
 export const metadata = { title: 'Funnel analytics' };
 
 export default function Page() {
-  return <LaneStub title="Funnel analytics" lane="Agent 5 · Analytics" />;
+  return <Suspense><FunnelAnalytics /></Suspense>;
 }

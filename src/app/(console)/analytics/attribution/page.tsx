@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Suspense } from 'react';
+import { AttributionAnalytics } from '@/components/insights/detail';
 
 export const metadata = { title: 'Attribution' };
 
 export default function Page() {
-  return <LaneStub title="Attribution" lane="Agent 5 · Analytics" />;
+  return <Suspense><AttributionAnalytics /></Suspense>;
 }
