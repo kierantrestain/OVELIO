@@ -52,3 +52,16 @@ test('PLT-23 delayed platform jobs wait for their run time', async () => {
   const row = await db.query<{ status: string }>(`SELECT status FROM jobs WHERE dedupe_key = 'platform:event.dispatch:later'`);
   assert.equal(row.rows[0].status, 'pending');
 });
+
+test('PLT-24 a job that reschedules its own key keeps the requested run time', async () => {
+  const { finishJob } = await import('../../src/server/jobs');
+  await schedulePlatformJob('event.dispatch', 'self', { eventId: '0' });
+  const claimed = (await db.query(`UPDATE jobs SET status = 'working', lease_id = gen_random_uuid(), attempts = attempts + 1
+    WHERE dedupe_key = 'platform:event.dispatch:self' RETURNING id, kind, payload, attempts, generation, lease_id`)).rows[0];
+  const later = new Date(Date.now() + 3_600_000);
+  await schedulePlatformJob('event.dispatch', 'self', { eventId: '1' }, { runAt: later });
+  await finishJob(claimed as never);
+  const row = (await db.query<{ status: string; run_at: Date }>(`SELECT status, run_at FROM jobs WHERE dedupe_key = 'platform:event.dispatch:self'`)).rows[0];
+  assert.equal(row.status, 'pending');
+  assert.ok(new Date(row.run_at).getTime() >= later.getTime() - 1000, 'the rescheduled time is kept');
+});

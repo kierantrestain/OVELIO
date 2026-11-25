@@ -28,7 +28,7 @@ export async function schedulePlatformJob(handler: string, key: string, data: un
     `INSERT INTO jobs (kind, dedupe_key, payload, run_at) VALUES ('platform', $1, $2, coalesce($3::timestamptz, now()))
      ON CONFLICT (dedupe_key) WHERE status IN ('pending', 'working')
      DO UPDATE SET payload = EXCLUDED.payload, generation = jobs.generation + 1,
-       run_at = CASE WHEN jobs.status = 'working' THEN jobs.run_at ELSE EXCLUDED.run_at END,
+       run_at = EXCLUDED.run_at,
        attempts = CASE WHEN jobs.status = 'working' THEN jobs.attempts ELSE 0 END`,
     ['platform:' + handler + ':' + key, JSON.stringify({ handler, data }), options.runAt ? options.runAt.toISOString() : null],
   );

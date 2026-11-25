@@ -13,6 +13,7 @@ pg.types.setTypeParser(1082, (value: string) => value);
 const globalPg = globalThis as typeof globalThis & {
   ovelioPool?: pg.Pool;
   ovelioEmbedded?: Promise<Embedded>;
+  ovelioPreviewReady?: Promise<void>;
 };
 
 /**
@@ -32,11 +33,55 @@ function getPool() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required.');
   globalPg.ovelioPool ??= new pg.Pool({
     connectionString: process.env.DATABASE_URL,
-    max: 12,
+    max: Number(process.env.DATABASE_POOL_MAX) || 12,
     connectionTimeoutMillis: 4000,
     idleTimeoutMillis: 30000,
+    ssl: /[?&]sslmode=(require|verify-full|verify-ca)/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: !/sslmode=require/.test(process.env.DATABASE_URL) } : undefined,
   });
   return globalPg.ovelioPool;
+}
+
+/**
+ * A hosted preview (for example Vercel with no engines) may set DATABASE_URL to a managed PostgreSQL so that sample
+ * data persists and every serverless instance shares it. That database migrates and seeds itself on first use;
+ * full deployments migrate with scripts/migrate.ts instead.
+ */
+function hostedPreview(): boolean {
+  if (!process.env.DATABASE_URL || process.env.OVELIO_ENV === 'production') return false;
+  if (process.env.OVELIO_DEV_PREVIEW === 'true') return true;
+  return process.env.VERCEL === '1' && !process.env.MAUTIC_URL && !process.env.LISTMONK_URL && !process.env.UMAMI_URL;
+}
+
+const preparing = new AsyncLocalStorage<boolean>();
+
+async function prepareHostedPreview() {
+  const client = await getPool().connect();
+  try {
+    await client.query('SELECT pg_advisory_lock(64337000)');
+    const raw = {
+      query: async <T>(text: string, params?: unknown[]) => {
+        const result = await client.query(text, params);
+        return { rows: result.rows as T[], affectedRows: result.rowCount ?? 0 };
+      },
+      exec: async (text: string) => client.query(text),
+    };
+    const { prepareEmbeddedDatabase } = await import('./preview/database');
+    await preparing.run(true, () => prepareEmbeddedDatabase(raw, { seedOnce: true }));
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(64337000)').catch(() => {});
+    client.release();
+  }
+}
+
+async function readyPool() {
+  if (hostedPreview() && !preparing.getStore()) {
+    globalPg.ovelioPreviewReady ??= prepareHostedPreview().catch(error => {
+      delete globalPg.ovelioPreviewReady;
+      throw error;
+    });
+    await globalPg.ovelioPreviewReady;
+  }
+  return getPool();
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -141,10 +186,10 @@ async function embeddedConnect(): Promise<DbClient> {
 }
 
 export const db: Sql & { connect: () => Promise<PoolClient>; close: () => Promise<void> } = {
-  query: <T extends QueryResultRow = QueryResultRow>(sql: string, values?: unknown[]) => usesEmbeddedDatabase()
+  query: async <T extends QueryResultRow = QueryResultRow>(sql: string, values?: unknown[]) => usesEmbeddedDatabase()
     ? embeddedQuery<T>(sql, values)
-    : getPool().query<T>(sql, values),
-  connect: () => usesEmbeddedDatabase() ? embeddedConnect() as Promise<PoolClient> : getPool().connect(),
+    : (await readyPool()).query<T>(sql, values),
+  connect: async () => usesEmbeddedDatabase() ? embeddedConnect() as Promise<PoolClient> : (await readyPool()).connect(),
   close: async () => {
     await globalPg.ovelioPool?.end();
     delete globalPg.ovelioPool;

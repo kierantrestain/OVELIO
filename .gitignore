@@ -11,3 +11,6 @@ backups/
 
 # Pinned engine sources for reading (scripts/fetch-refs.sh)
 .refs/
+
+# Agent worktrees (local only)
+.claude/worktrees/

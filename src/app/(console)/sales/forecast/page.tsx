@@ -1,7 +1,7 @@
-import { LaneStub } from '@/components/lane-stub';
+import { SalesForecast } from '@/components/crm/forecast';
 
 export const metadata = { title: 'Forecast' };
 
 export default function Page() {
-  return <LaneStub title="Forecast" lane="Agent 1 · CRM & Sales" />;
+  return <SalesForecast />;
 }

@@ -125,7 +125,7 @@ export async function createDeal(input: CreateDealInput): Promise<DealRow> {
  * Moves a deal to a stage (any pipeline) and an optional board position. Entering a won or lost stage closes the
  * deal and emits deal.won (with the measured amount) or deal.lost; leaving one re-opens it.
  */
-export async function moveDeal(dealId: string, input: { stageId: string; boardPosition?: number; lostReason?: string; actorId?: string | null }): Promise<DealRow> {
+export async function moveDeal(dealId: string, input: { stageId: string; boardPosition?: number; lostReason?: string; actorId?: string | null; source?: string }): Promise<DealRow> {
   return transaction(async (client: PoolClient) => {
     const current = (await client.query<DealRow>('SELECT * FROM deals WHERE id = $1 FOR UPDATE', [dealId])).rows[0];
     if (!current) throw new AppError(404, 'That deal was not found.');
@@ -146,7 +146,7 @@ export async function moveDeal(dealId: string, input: { stageId: string; boardPo
         [dealId, current.stage_id, target.id, input.actorId ?? null]);
       const base = {
         dealId, contactId: updated.contact_id ? Number(updated.contact_id) : null, companyId: updated.company_id ? Number(updated.company_id) : null,
-        campaignId: updated.campaign_id, actorId: input.actorId ?? null, currency: updated.currency,
+        campaignId: updated.campaign_id, actorId: input.actorId ?? null, currency: updated.currency, source: input.source || 'ovelio',
       };
       await emitEvent({ ...base, type: 'deal.stage_changed', properties: { fromStageId: current.stage_id, toStageId: target.id, stageName: target.name, pipelineId: target.pipeline_id } }, client);
       if (status === 'won' && current.status !== 'won') {

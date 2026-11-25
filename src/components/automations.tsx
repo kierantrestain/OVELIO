@@ -3,6 +3,7 @@
 import {
   Code2, Copy, ExternalLink, Eye, FileText, Pause, Pencil, Play, Plus, Route, Trash2, Users,
 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core/Button';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
@@ -27,7 +28,7 @@ import type {
 import { formActionSpecs, formFieldSpecs } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
 import { useUser } from './shell';
-import { describeSources, WorkflowCanvasEditor, WorkflowOutline, workflowGraphOf } from './workflow-canvas';
+import { describeSources, useWorkflowLookups, WorkflowCanvasEditor, WorkflowOutline, workflowGraphOf } from './workflow-canvas';
 import { WorkflowRunModal } from './workflow-run-log';
 import {
   AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal,
@@ -2041,4 +2042,40 @@ export function Automations({ initialTab }: { initialTab?: string }) {
       }}
     /> : null}
   </>;
+}
+
+/* ── Mautic journey page (/automations/journeys/[id]) ──────────────────────────────────────────────────────
+   The unified workflow list (src/components/journeys/) opens engine journeys here, on the existing canvas. */
+
+export function MauticJourneyEditor({ id }: { id: string }) {
+  const router = useRouter();
+  const isNew = id === 'new';
+  const workflow = useResource<Workflow>(isNew ? null : `${workflowPath}/${id}`);
+  const action = useAction();
+  const [contacts, setContacts] = useState(false);
+  const item = workflow.data;
+  const { lookups } = useWorkflowLookups(item ? workflowGraphOf(item) : null, ['emails', 'segments', 'forms', 'stages']);
+  const back = () => router.push('/automations');
+  if (!isNew && !item) return <div className="ov-stack"><AsyncState loading={workflow.loading} error={workflow.error} retry={workflow.refresh} /></div>;
+  if (item && (item.enabled || item.editable === false)) {
+    return <div className="ov-stack">
+      <PageHeader title={item.name} description={item.description || 'Segment journey run by the automation engine.'} back={{ href: '/automations', label: 'Workflows' }}
+        actions={<>
+          <Button label="Enrolled contacts" icon={<Users size={16} />} onClick={() => setContacts(true)} />
+          {item.enabled ? <Button label="Disable to edit" icon={<Pause size={16} />} isLoading={action.busy}
+            onClick={() => void action.run(async () => { await api(`${workflowPath}/${item.id}/status`, 'POST', { enabled: false }); workflow.refresh(); }, 'Journey disabled. You can edit it now.')} /> : null}
+        </>} />
+      <Feedback error={action.error} notice={action.notice} />
+      <Panel title="Journey steps" description={item.readOnlyReason || 'Active journeys are read-only: disable the journey to change its steps.'}>
+        <div className="ov-stack-sm">
+          <StatusBadge label={item.enabled ? 'Active' : 'Inactive'} tone={item.enabled ? 'success' : 'neutral'} />
+          <WorkflowOutline graph={workflowGraphOf(item)} lookups={lookups} />
+        </div>
+      </Panel>
+      {contacts ? <WorkflowContactsDrawer workflow={item} onClose={() => setContacts(false)} /> : null}
+    </div>;
+  }
+  return <div className="ov-stack">
+    <WorkflowCanvasEditor workflow={item} onClose={back} onDone={back} />
+  </div>;
 }

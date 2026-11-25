@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { MailboxSettings } from '@/components/crm/settings';
 
 export const metadata = { title: 'Mailboxes' };
 
-export default function Page() {
-  return <LaneStub title="Mailboxes" lane="Agent 1 · CRM & Sales" />;
+export default async function Page({ searchParams }: { searchParams: Promise<{ connected?: string; error?: string }> }) {
+  const params = await searchParams;
+  return <MailboxSettings connected={params.connected?.slice(0, 254)} error={params.error?.slice(0, 300)} />;
 }
