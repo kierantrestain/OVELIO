@@ -1,7 +1,7 @@
-import { LaneStub } from '@/components/lane-stub';
+import { PipelineSettings } from '@/components/crm/settings';
 
 export const metadata = { title: 'Pipelines' };
 
 export default function Page() {
-  return <LaneStub title="Pipelines" lane="Agent 1 · CRM & Sales" />;
+  return <PipelineSettings />;
 }

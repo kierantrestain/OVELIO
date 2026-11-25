@@ -1,0 +1,362 @@
+'use client';
+
+// Sales › Pipelines (stages with drag reorder), Sales › Sequences, Settings › Mailboxes and Sales › Inbox.
+import '@/styles/crm.css';
+import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core';
+import type { DragEndEvent } from '@dnd-kit/core';
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { ArrowDown, ArrowUp, GripVertical, Inbox, Plus, Trash2 } from 'lucide-react';
+import NextLink from 'next/link';
+import { useState } from 'react';
+import { Banner } from '@astryxdesign/core/Banner';
+import { Button } from '@astryxdesign/core/Button';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { NumberInput } from '@astryxdesign/core/NumberInput';
+import { Selector } from '@astryxdesign/core/Selector';
+import { Switch } from '@astryxdesign/core/Switch';
+import { Table } from '@astryxdesign/core/Table';
+import { Text } from '@astryxdesign/core/Text';
+import { TextArea } from '@astryxdesign/core/TextArea';
+import { TextInput } from '@astryxdesign/core/TextInput';
+import { useToast } from '@astryxdesign/core/Toast';
+import type {
+  InboxConversation, MailboxOverview, Pipeline, PipelineStage, Sequence, SequenceEnrolment, SequenceInput, SequenceStep, TaskType,
+} from '@/contracts/crm';
+import { taskTypeLabels } from '@/contracts/crm';
+import { mergeTags } from '@/contracts/merge-tags';
+import { api, message, useAction, useResource } from '../client';
+import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, SlideDrawer, StatusBadge } from '../ui';
+import { ContactPicker, relative, shortDate, dateTime } from './common';
+import type { RecordOption } from './common';
+
+/* ── Pipelines ────────────────────────────────────────────────────────── */
+
+function StageRow({ stage, pipeline, onSaved, onDelete }: { stage: PipelineStage; pipeline: Pipeline; onSaved: (pipeline: Pipeline) => void; onDelete: (stage: PipelineStage) => void }) {
+  const { setNodeRef, setActivatorNodeRef, attributes, listeners, transform, transition } = useSortable({ id: stage.id, disabled: stage.outcome !== 'open' });
+  const action = useAction();
+  const [name, setName] = useState(stage.name);
+  const save = (body: Record<string, unknown>) => void action.run(async () => onSaved(await api<Pipeline>(`/sales/stages/${stage.id}`, 'PATCH', body)));
+  return <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className="ov-crm-stage-row">
+    {stage.outcome === 'open' ? <button type="button" ref={setActivatorNodeRef} className="ov-crm-handle" aria-label={`Reorder ${stage.name}`} {...attributes} {...listeners}><GripVertical size={16} /></button> : <span />}
+    <TextInput label="Stage name" isLabelHidden value={name} onChange={setName} onBlur={() => { if (name.trim() && name.trim() !== stage.name) save({ name: name.trim() }); }} />
+    <NumberInput label="Win probability" isLabelHidden units="%" min={0} max={100} isIntegerOnly value={stage.probability}
+      onChange={value => { if (value != null && value !== stage.probability) save({ probability: value }); }} />
+    <StatusBadge label={stage.outcome === 'won' ? 'Won stage' : stage.outcome === 'lost' ? 'Lost stage' : 'Open'} tone={stage.outcome === 'won' ? 'success' : stage.outcome === 'lost' ? 'error' : 'neutral'} />
+    {stage.outcome === 'open' ? <NumberInput label="Rotting after (days)" isLabelHidden placeholder="Rotting days" min={1} max={365} isIntegerOnly value={stage.rottingDays}
+      onChange={value => { if (value !== stage.rottingDays) save({ rottingDays: value ?? null }); }} /> : <span />}
+    <IconButton variant="ghost" label={`Delete ${stage.name}`} icon={<Trash2 size={15} />} onClick={() => onDelete(stage)}
+      isDisabled={stage.outcome === 'open' && pipeline.stages.filter(item => item.outcome === 'open').length <= 1} />
+    {action.error ? <Text type="supporting" color="secondary">{action.error}</Text> : null}
+  </div>;
+}
+
+function PipelineFields({ pipeline, onSaved }: { pipeline: Pipeline; onSaved: (pipeline: Pipeline) => void }) {
+  const action = useAction();
+  const [name, setName] = useState(pipeline.name);
+  const [currency, setCurrency] = useState(pipeline.currency);
+  const save = (body: Record<string, string>, done: string) => void action.run(async () => onSaved(await api<Pipeline>(`/sales/pipelines/${pipeline.id}`, 'PATCH', body)), done);
+  return <div className="ov-stack-sm">
+    <div className="ov-form-grid">
+      <TextInput label="Pipeline name" value={name} onChange={setName} onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) save({ name: name.trim() }, 'Pipeline renamed.'); }} />
+      <TextInput label="Currency" value={currency} onChange={value => setCurrency(value.toUpperCase().slice(0, 3))}
+        onBlur={() => { if (currency.length === 3 && currency !== pipeline.currency) save({ currency }, 'Currency changed.'); }} />
+    </div>
+    <Feedback error={action.error} />
+  </div>;
+}
+
+export function PipelineSettings() {
+  const pipelines = useResource<{ items: Pipeline[] }>('/sales/pipelines?archived=true');
+  const toast = useToast();
+  const action = useAction();
+  const [selected, setSelected] = useState('');
+  const [local, setLocal] = useState<Pipeline | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newCurrency, setNewCurrency] = useState('GBP');
+  const [stageName, setStageName] = useState('');
+  const [removing, setRemoving] = useState<PipelineStage | null>(null);
+  const [target, setTarget] = useState<string | null>(null);
+  const items = pipelines.data?.items ?? [];
+  const current = selected || items.find(item => item.isDefault)?.id || items[0]?.id || '';
+  const fetched = items.find(item => item.id === current);
+  const pipeline = local?.id === current ? local : fetched;
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
+  const saved = (next: Pipeline) => { setLocal(next); pipelines.refresh(); };
+
+  async function onDragEnd(event: DragEndEvent) {
+    if (!pipeline || !event.over || event.active.id === event.over.id) return;
+    const open = pipeline.stages.filter(stage => stage.outcome === 'open');
+    const from = open.findIndex(stage => stage.id === event.active.id);
+    const to = open.findIndex(stage => stage.id === event.over!.id);
+    if (from < 0 || to < 0) return;
+    const reordered = arrayMove(open, from, to);
+    const previous = pipeline;
+    setLocal({ ...pipeline, stages: [...reordered, ...pipeline.stages.filter(stage => stage.outcome !== 'open')] });
+    try {
+      saved(await api<Pipeline>(`/sales/pipelines/${pipeline.id}/stages/order`, 'POST', { ids: reordered.map(stage => stage.id) }));
+    } catch (error) {
+      setLocal(previous);
+      toast({ body: `Stages were not reordered: ${message(error)}`, type: 'error' });
+    }
+  }
+
+  return <div className="ov-stack">
+    <PageHeader title="Pipelines" description="Stages, win probabilities and the outcome each stage stands for."
+      actions={<Button label="New pipeline" variant="primary" icon={<Plus size={16} />} onClick={() => setCreating(true)} />} />
+    <AsyncState loading={pipelines.loading && !pipelines.data} error={pipelines.error} retry={pipelines.refresh} />
+    <Feedback error={action.error} />
+    {pipeline ? <Panel title={pipeline.name} description={`${pipeline.openDeals ?? 0} open deals · ${pipeline.currency}${pipeline.isDefault ? ' · default pipeline' : ''}${pipeline.archived ? ' · archived' : ''}`}
+      action={<div className="ov-actions">
+        <Selector label="Pipeline" isLabelHidden width={220} value={current} onChange={value => { setSelected(value ?? ''); setLocal(null); }}
+          options={items.map(item => ({ value: item.id, label: `${item.name}${item.archived ? ' (archived)' : ''}` }))} />
+        {!pipeline.isDefault && !pipeline.archived ? <Button size="sm" label="Make default" onClick={() => void action.run(async () => saved(await api<Pipeline>(`/sales/pipelines/${pipeline.id}`, 'PATCH', { isDefault: true })), 'Default pipeline changed.')} /> : null}
+        {!pipeline.isDefault ? <Button size="sm" variant="ghost" label={pipeline.archived ? 'Restore' : 'Archive'}
+          onClick={() => void action.run(async () => saved(await api<Pipeline>(`/sales/pipelines/${pipeline.id}/archive`, 'POST', { archived: !pipeline.archived })), pipeline.archived ? 'Pipeline restored.' : 'Pipeline archived.')} /> : null}
+      </div>}>
+      <PipelineFields key={pipeline.id + pipeline.name + pipeline.currency} pipeline={pipeline} onSaved={saved} />
+      <div className="ov-stack-sm">
+        <Text type="supporting" color="secondary">Drag open stages to reorder them. Probability drives the weighted forecast; rotting days flag deals that sit too long in a stage.</Text>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={event => void onDragEnd(event)}>
+          <SortableContext items={pipeline.stages.filter(stage => stage.outcome === 'open').map(stage => stage.id)} strategy={verticalListSortingStrategy}>
+            {pipeline.stages.map(stage => <StageRow key={stage.id + stage.name + stage.probability + (stage.rottingDays ?? '')} stage={stage} pipeline={pipeline} onSaved={saved}
+              onDelete={item => { setRemoving(item); setTarget(null); }} />)}
+          </SortableContext>
+        </DndContext>
+        <form className="ov-actions" onSubmit={event => {
+          event.preventDefault();
+          void action.run(async () => { saved(await api<Pipeline>(`/sales/pipelines/${pipeline.id}/stages`, 'POST', { name: stageName.trim(), probability: 50 })); setStageName(''); }, 'Stage added.');
+        }}>
+          <TextInput label="New stage" isLabelHidden placeholder="New stage name" value={stageName} onChange={setStageName} width={240} />
+          <Button type="submit" label="Add stage" icon={<Plus size={14} />} isDisabled={!stageName.trim()} />
+        </form>
+      </div>
+    </Panel> : !pipelines.loading ? <Panel><Empty title="No pipelines yet" action={<Button label="New pipeline" onClick={() => setCreating(true)} />} /></Panel> : null}
+    {creating ? <Modal title="New pipeline" onClose={() => setCreating(false)}>
+      <form className="ov-stack-sm" onSubmit={event => {
+        event.preventDefault();
+        void action.run(async () => {
+          const created = await api<Pipeline>('/sales/pipelines', 'POST', { name: newName.trim(), currency: newCurrency.trim() || 'GBP' });
+          setCreating(false); setNewName(''); setSelected(created.id); saved(created);
+        }, 'Pipeline created with standard stages.');
+      }}>
+        <TextInput label="Name" isRequired value={newName} onChange={setNewName} placeholder="Renewals" />
+        <TextInput label="Currency" value={newCurrency} onChange={value => setNewCurrency(value.toUpperCase().slice(0, 3))} description="Three-letter code, e.g. GBP, EUR, USD." />
+        <Text type="supporting" color="secondary">Starts with Lead in, Qualified, Proposal, Negotiation, Won and Lost. Rename or reorder them afterwards.</Text>
+        <Feedback error={action.error} />
+        <FormActions><Button label="Cancel" onClick={() => setCreating(false)} /><Button type="submit" variant="primary" label="Create pipeline" isDisabled={!newName.trim()} isLoading={action.busy} /></FormActions>
+      </form>
+    </Modal> : null}
+    {removing && pipeline ? <Modal title={`Delete “${removing.name}”`} onClose={() => setRemoving(null)}>
+      <div className="ov-stack-sm">
+        <Text>Deals in this stage move to the stage you choose. Their history is kept.</Text>
+        <Selector label="Move its deals to" placeholder="Choose a stage" hasClear value={target} onChange={setTarget}
+          options={pipeline.stages.filter(stage => stage.id !== removing.id).map(stage => ({ value: stage.id, label: stage.name }))} />
+        <Feedback error={action.error} />
+        <FormActions>
+          <Button label="Cancel" onClick={() => setRemoving(null)} />
+          <Button variant="destructive" label="Delete stage" isLoading={action.busy} onClick={() => void action.run(async () => {
+            saved(await api<Pipeline>(`/sales/stages/${removing.id}${target ? `?targetStageId=${target}` : ''}`, 'DELETE'));
+            setRemoving(null);
+          }, 'Stage deleted.')} />
+        </FormActions>
+      </div>
+    </Modal> : null}
+  </div>;
+}
+
+/* ── Sequences ────────────────────────────────────────────────────────── */
+
+type DraftStep = Omit<SequenceStep, 'id' | 'position'> & { key: number };
+let stepKey = 1;
+const newStep = (kind: 'email' | 'task', delayDays = 2): DraftStep => ({ key: stepKey++, kind, delayDays, businessHours: true, subject: '', body: '', taskTitle: '', taskType: 'call' });
+
+function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; onClose: () => void; onSaved: (sequence: Sequence) => void }) {
+  const action = useAction();
+  const [name, setName] = useState(sequence?.name ?? '');
+  const [description, setDescription] = useState(sequence?.description ?? '');
+  const [steps, setSteps] = useState<DraftStep[]>(sequence?.steps.map(step => ({ ...step, key: stepKey++ })) ?? [newStep('email', 0)]);
+  const update = (key: number, patch: Partial<DraftStep>) => setSteps(current => current.map(step => step.key === key ? { ...step, ...patch } : step));
+  const move = (index: number, by: number) => setSteps(current => arrayMove(current, index, index + by));
+  return <SlideDrawer title={sequence ? 'Edit sequence' : 'New sequence'} subtitle="Emails send through OVELIO’s mailer with consent checks. A reply, unsubscribe, bounce or won deal stops it." onClose={onClose} width={680}>
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        const body: SequenceInput = { name: name.trim(), description: description.trim(), steps: steps.map(step => ({
+          kind: step.kind, delayDays: step.delayDays, businessHours: step.businessHours, subject: step.subject, body: step.body, taskTitle: step.taskTitle, taskType: step.taskType,
+        })) };
+        onSaved(await api<Sequence>(sequence ? `/sales/sequences/${sequence.id}` : '/sales/sequences', sequence ? 'PATCH' : 'POST', body));
+      }, 'Sequence saved.');
+    }}>
+      <TextInput label="Name" isRequired value={name} onChange={setName} placeholder="New lead follow-up" />
+      <TextInput label="Description" isOptional value={description} onChange={setDescription} />
+      {steps.map((step, index) => <div key={step.key} className="ov-crm-step">
+        <div className="ov-actions ov-actions--between">
+          <Text weight="semibold">Step {index + 1} · {step.kind === 'email' ? 'Email' : 'Task'}</Text>
+          <div className="ov-actions">
+            <IconButton size="sm" variant="ghost" label="Move up" icon={<ArrowUp size={14} />} isDisabled={index === 0} onClick={() => move(index, -1)} />
+            <IconButton size="sm" variant="ghost" label="Move down" icon={<ArrowDown size={14} />} isDisabled={index === steps.length - 1} onClick={() => move(index, 1)} />
+            <IconButton size="sm" variant="ghost" label="Remove step" icon={<Trash2 size={14} />} isDisabled={steps.length === 1} onClick={() => setSteps(current => current.filter(item => item.key !== step.key))} />
+          </div>
+        </div>
+        <div className="ov-form-grid">
+          <NumberInput label={index === 0 ? 'Days after enrolment' : 'Days after previous step'} min={0} max={365} isIntegerOnly value={step.delayDays} onChange={value => update(step.key, { delayDays: value ?? 0 })} />
+          <Switch label="Business hours only" description="Mon–Fri, 09:00–17:00 UTC" value={step.businessHours} onChange={value => update(step.key, { businessHours: value })} />
+        </div>
+        {step.kind === 'email' ? <>
+          <TextInput label="Subject" isRequired value={step.subject} onChange={value => update(step.key, { subject: value })} />
+          <TextArea label="Message" rows={6} value={step.body} onChange={value => update(step.key, { body: value })}
+            description={`Merge tags: ${mergeTags.filter(tag => tag.group === 'Contact').slice(0, 5).map(tag => `{{${tag.tag}}}`).join(', ')} — add a fallback with {{contact.first_name | there}}.`} />
+        </> : <div className="ov-form-grid">
+          <TextInput label="Task title" isRequired value={step.taskTitle} onChange={value => update(step.key, { taskTitle: value })} />
+          <Selector label="Task type" value={step.taskType} onChange={value => update(step.key, { taskType: (value as TaskType) || 'todo' })}
+            options={Object.entries(taskTypeLabels).map(([value, label]) => ({ value, label }))} />
+        </div>}
+      </div>)}
+      <div className="ov-actions">
+        <Button size="sm" label="Add email step" icon={<Plus size={14} />} onClick={() => setSteps(current => [...current, newStep('email')])} />
+        <Button size="sm" label="Add task step" icon={<Plus size={14} />} onClick={() => setSteps(current => [...current, newStep('task')])} />
+      </div>
+      <Feedback error={action.error} />
+      <FormActions><Button label="Cancel" onClick={onClose} /><Button type="submit" variant="primary" label="Save sequence" isLoading={action.busy} isDisabled={!name.trim()} /></FormActions>
+    </form>
+  </SlideDrawer>;
+}
+
+const runLabel: Record<string, [string, 'success' | 'warning' | 'error' | 'info' | 'neutral']> = {
+  sent: ['Sent', 'success'], not_sent: ['Not delivered', 'warning'], blocked: ['Blocked', 'error'], failed: ['Failed', 'error'], task_created: ['Task created', 'info'], skipped: ['Skipped', 'neutral'],
+};
+
+function Enrolments({ sequence, onChanged }: { sequence: Sequence; onChanged: () => void }) {
+  const enrolments = useResource<SequenceEnrolment[]>(`/sales/sequences/${sequence.id}/enrolments`);
+  const action = useAction();
+  const [contact, setContact] = useState<RecordOption | null>(null);
+  return <Panel title={`Enrolments · ${sequence.name}`} description="Each step’s real result is listed, including why an email was not delivered.">
+    <div className="ov-actions" style={{ alignItems: 'flex-end' }}>
+      <div style={{ minWidth: 280, flex: 1 }}><ContactPicker label="Enrol a contact" value={contact} onChange={setContact} /></div>
+      <Button label="Enrol" variant="primary" isDisabled={!contact || sequence.status !== 'active'} isLoading={action.busy}
+        onClick={() => void action.run(async () => {
+          const result = await api<{ results: { status: string }[] }>(`/sales/sequences/${sequence.id}/enrol`, 'POST', { contactIds: [contact!.auxiliaryData!.id] });
+          const status = result.results[0]?.status;
+          setContact(null); enrolments.refresh(); onChanged();
+          if (status !== 'enrolled') throw new Error(status === 'already_active' ? 'That contact is already active in this sequence.' : 'That contact has no email address.');
+        }, 'Contact enrolled.')} />
+    </div>
+    {sequence.status !== 'active' ? <Text type="supporting" color="secondary">Activate the sequence to enrol contacts.</Text> : null}
+    <Feedback error={action.error} />
+    {!enrolments.data ? <AsyncState loading={enrolments.loading} error={enrolments.error} retry={enrolments.refresh} /> : enrolments.data.length ? <ul className="ov-rows">
+      {enrolments.data.map(item => <li key={item.id}>
+        <span>
+          <NextLink href={`/crm/contacts/${item.contactId}`}><Text weight="medium">{item.contactName || item.contactEmail}</Text></NextLink>
+          <Text type="supporting" color="secondary">{item.status === 'active' ? `Step ${Math.min(item.nextPosition + 1, item.stepCount)} of ${item.stepCount}${item.nextRunAt ? ` · next ${dateTime(item.nextRunAt)}` : ''}` : item.stoppedReason || `Completed ${shortDate(item.finishedAt)}`}</Text>
+          <span className="ov-actions">{item.runs.map(run => <span key={run.position} title={run.reason}><StatusBadge label={`${run.position + 1}: ${runLabel[run.status]?.[0] ?? run.status}`} tone={runLabel[run.status]?.[1] ?? 'neutral'} /></span>)}</span>
+          {item.runs.filter(run => run.reason && run.status !== 'sent').slice(-1).map(run => <Text key={run.position} type="supporting" color="secondary">{run.reason}</Text>)}
+        </span>
+        {item.status === 'active' ? <Button size="sm" variant="ghost" label="Stop" onClick={() => void action.run(async () => { await api(`/sales/enrolments/${item.id}/stop`, 'POST'); enrolments.refresh(); onChanged(); }, 'Stopped.')} />
+          : <StatusBadge label={item.status === 'completed' ? 'Completed' : 'Stopped'} tone={item.status === 'completed' ? 'success' : 'warning'} />}
+      </li>)}
+    </ul> : <Empty title="Nobody enrolled yet" description="Enrol contacts here or from a contact’s page." />}
+  </Panel>;
+}
+
+export function SalesSequences() {
+  const sequences = useResource<Sequence[]>('/sales/sequences');
+  const action = useAction();
+  const [editing, setEditing] = useState<Sequence | 'new' | null>(null);
+  const [selected, setSelected] = useState('');
+  const items = sequences.data ?? [];
+  const current = items.find(item => item.id === selected) ?? items[0];
+  return <div className="ov-stack">
+    <PageHeader title="Sequences" description="Timed follow-up emails and tasks for one contact at a time."
+      actions={<Button label="New sequence" variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')} />} />
+    <Feedback error={action.error} />
+    {!sequences.data ? <Panel><AsyncState loading={sequences.loading} error={sequences.error} retry={sequences.refresh} /></Panel> : items.length ? <>
+      <Panel>
+        <Table data={items} idKey="id" hasHover columns={[
+          { key: 'name', header: 'Sequence', renderCell: item => <span className="ov-cell"><Button variant="ghost" size="sm" label={item.name} onClick={() => setSelected(item.id)} /><Text type="supporting" color="secondary">{item.steps.length} steps · {item.steps.filter(step => step.kind === 'email').length} emails</Text></span> },
+          { key: 'status', header: 'Status', renderCell: item => <StatusBadge label={item.status === 'active' ? 'Active' : item.status === 'paused' ? 'Paused' : 'Archived'} tone={item.status === 'active' ? 'success' : 'neutral'} /> },
+          { key: 'active', header: 'Active', renderCell: item => item.counts.active },
+          { key: 'completed', header: 'Completed', renderCell: item => item.counts.completed },
+          { key: 'stopped', header: 'Stopped', renderCell: item => item.counts.stopped },
+          { key: 'actions', header: '', renderCell: item => <div className="ov-actions ov-actions--end">
+            <Button size="sm" label="Edit" onClick={() => setEditing(item)} />
+            <Button size="sm" variant="ghost" label={item.status === 'active' ? 'Pause' : 'Activate'}
+              onClick={() => void action.run(async () => { await api(`/sales/sequences/${item.id}/status`, 'POST', { status: item.status === 'active' ? 'paused' : 'active' }); sequences.refresh(); })} />
+          </div> },
+        ]} />
+      </Panel>
+      {current ? <Enrolments key={current.id} sequence={current} onChanged={sequences.refresh} /> : null}
+    </> : <Panel><Empty title="No sequences yet" description="Build a sequence of follow-up emails and call tasks, then enrol contacts." action={<Button label="New sequence" onClick={() => setEditing('new')} />} /></Panel>}
+    {editing ? <SequenceEditor sequence={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={saved => { setEditing(null); setSelected(saved.id); sequences.refresh(); }} /> : null}
+  </div>;
+}
+
+/* ── Mailboxes ────────────────────────────────────────────────────────── */
+
+export function MailboxSettings({ connected, error }: { connected?: string; error?: string }) {
+  const overview = useResource<MailboxOverview>('/mailboxes');
+  const action = useAction();
+  const [disconnect, setDisconnect] = useState<string | null>(null);
+  const data = overview.data;
+  return <div className="ov-stack">
+    <PageHeader title="Mailboxes" description="Connect Gmail or Outlook so sales email sends from your own address and replies are logged against contacts." />
+    {connected ? <Banner status="success" title={`${connected} is connected`} description="Recent conversations with known contacts sync every 15 minutes." /> : null}
+    {error ? <Banner status="error" title="The mailbox was not connected" description={error} /> : null}
+    <Feedback error={action.error} />
+    {!data ? <Panel><AsyncState loading={overview.loading} error={overview.error} retry={overview.refresh} /></Panel> : <>
+      <div className="ov-grid">
+        {data.providers.map(provider => <Panel key={provider.provider} title={provider.label}
+          description={provider.provider === 'google' ? 'Google OAuth 2.0 and the Gmail API (send and read).' : 'Microsoft identity platform and Microsoft Graph (Mail.Send, Mail.Read).'}
+          action={<StatusBadge label={provider.configured ? 'Ready to connect' : 'Not configured'} tone={provider.configured ? 'success' : 'warning'} />}>
+          {provider.configured ? <Button variant="primary" label={`Connect ${provider.label}`} isLoading={action.busy}
+            onClick={() => void action.run(async () => { const { url } = await api<{ url: string }>(`/mailboxes/connect/${provider.provider}`, 'POST'); window.location.assign(url); })} />
+            : <div className="ov-stack-sm">
+              <Text>An administrator must set these server environment variables, then restart OVELIO:</Text>
+              <div className="ov-actions">{provider.missing.map(name => <code key={name} className="ov-crm-code">{name}</code>)}</div>
+            </div>}
+          <Text type="supporting" color="secondary">Redirect URI to register with {provider.provider === 'google' ? 'Google Cloud' : 'Microsoft Entra'}: <code className="ov-crm-code">{provider.redirectUri}</code></Text>
+        </Panel>)}
+      </div>
+      <Panel title={data.canManageAll ? 'Connected mailboxes (whole team)' : 'Your mailboxes'}>
+        {data.mailboxes.length ? <Table data={data.mailboxes} idKey="id" columns={[
+          { key: 'email', header: 'Mailbox', renderCell: item => <span className="ov-cell"><Text weight="medium">{item.email}</Text><Text type="supporting" color="secondary">{item.provider === 'google' ? 'Gmail' : 'Outlook'} · {item.userName}</Text></span> },
+          { key: 'status', header: 'Status', renderCell: item => <span className="ov-cell"><StatusBadge label={item.status === 'connected' ? 'Connected' : item.status === 'error' ? 'Needs attention' : 'Revoked'} tone={item.status === 'connected' ? 'success' : 'error'} />{item.lastError ? <Text type="supporting" color="secondary">{item.lastError}</Text> : null}</span> },
+          { key: 'sync', header: 'Last sync', renderCell: item => item.lastSyncedAt ? relative(item.lastSyncedAt) : 'Not yet' },
+          { key: 'actions', header: '', renderCell: item => <div className="ov-actions ov-actions--end">
+            <Button size="sm" label="Sync now" onClick={() => void action.run(async () => { await api(`/mailboxes/${item.id}/sync`, 'POST'); overview.refresh(); }, 'Mailbox synced.')} />
+            <Button size="sm" variant="ghost" label="Disconnect" onClick={() => setDisconnect(item.id)} />
+          </div> },
+        ]} /> : <Empty title="No mailboxes connected" description="Until a mailbox is connected, sales email goes through OVELIO’s email gateway with replies to your address." />}
+      </Panel>
+    </>}
+    {disconnect ? <ConfirmDialog title="Disconnect mailbox" description="OVELIO deletes the stored tokens and stops syncing. Logged activities stay on contacts." actionLabel="Disconnect"
+      busy={action.busy} onClose={() => setDisconnect(null)} onConfirm={() => void action.run(async () => { await api(`/mailboxes/${disconnect}`, 'DELETE'); setDisconnect(null); overview.refresh(); }, 'Mailbox disconnected.')} /> : null}
+  </div>;
+}
+
+const sourceLabel: Record<InboxConversation['source'], string> = { mailbox: 'Synced', logged: 'Logged', sent: 'Sent from OVELIO' };
+
+export function SalesInbox() {
+  const inbox = useResource<InboxConversation[]>('/sales/inbox');
+  return <div className="ov-stack">
+    <PageHeader title="Inbox" description="Latest email conversation with each contact: synced from connected mailboxes, logged by hand or sent from OVELIO."
+      actions={<Button label="Mailbox settings" href="/settings/mailboxes" icon={<Inbox size={15} />} />} />
+    <Panel>
+      {!inbox.data ? <AsyncState loading={inbox.loading} error={inbox.error} retry={inbox.refresh} /> : inbox.data.length ? <ul className="ov-rows">
+        {inbox.data.map((item, index) => <li key={`${item.contactId}-${index}`}>
+          <span>
+            <span className="ov-actions">
+              {item.contactId ? <NextLink href={`/crm/contacts/${item.contactId}`}><Text weight="semibold">{item.contactName}</Text></NextLink> : <Text weight="semibold">{item.contactName}</Text>}
+              <StatusBadge label={item.direction === 'inbound' ? 'Received' : 'Sent'} tone={item.direction === 'inbound' ? 'info' : 'neutral'} />
+              <Text type="supporting" color="secondary">{sourceLabel[item.source]}{item.count > 1 ? ` · ${item.count} emails` : ''}</Text>
+            </span>
+            <Text weight="medium">{item.subject || '(no subject)'}</Text>
+            {item.snippet ? <Text type="supporting" color="secondary">{item.snippet}</Text> : null}
+          </span>
+          <time className="ov-crm-when" dateTime={item.at}>{relative(item.at)}</time>
+        </li>)}
+      </ul> : <Empty title="No email conversations yet" description="Send an email from a contact, log one, or connect a mailbox in Settings › Mailboxes." />}
+    </Panel>
+  </div>;
+}
