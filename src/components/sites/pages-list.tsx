@@ -103,7 +103,7 @@ export function LandingPages() {
         : <div className="ov-sites-cards">
           {items.map(page => <article key={page.id} className="ov-sites-card">
             <NextLink href={`/studio/page/${page.id}`} aria-label={`Edit ${page.name}`}>
-              <Thumbnail label={`Preview of ${page.name}`} load={() => request<string>(`/api/console/sites/pages/${page.id}/preview`)} />
+              <Thumbnail label={`Preview of ${page.name}`} load={() => request<string>(`/api/console/sites/pages/${page.id}/preview`).then(html => html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<div style="position:sticky[^"]*">[^<]*<\/div>/, ''))} />
             </NextLink>
             <div className="ov-sites-card-body">
               <div className="ov-sites-card-title">

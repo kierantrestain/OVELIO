@@ -134,7 +134,6 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
   const blocksRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const stylesRef = useRef<HTMLDivElement>(null);
-  const selectorsRef = useRef<HTMLDivElement>(null);
   const traitsRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<Editor | null>(null);
   const versionRef = useRef(0);
@@ -227,7 +226,8 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
           panels: { defaults: [] },
           showOffsets: true,
           deviceManager: { devices },
-          selectorManager: { appendTo: selectorsRef.current!, componentFirst: true },
+          selectorManager: { componentFirst: true },
+          canvasCss: formPreviewCss,
           styleManager: { appendTo: stylesRef.current!, sectors: styleSectors() },
           layerManager: { appendTo: layersRef.current! },
           traitManager: { appendTo: traitsRef.current! },
@@ -245,11 +245,6 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
         instance = created;
         editorRef.current = created;
         setEditor(created);
-        created.on('canvas:frame:load', ({ window }: { window: Window }) => {
-          const style = window.document.createElement('style');
-          style.textContent = formPreviewCss;
-          window.document.head.appendChild(style);
-        });
         const refreshSelection = () => {
           const component = created.getSelected();
           if (!component) { setSelected(null); return; }
@@ -382,7 +377,6 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
         </div>
         <div className="ov-sites-panel" hidden={rightTab !== 'style'}>
           {!selected ? <Empty title="Select an element" description={`Click anything on the page to style it. Changes in ${device} view apply ${device === 'Desktop' ? 'to every screen size' : `to ${device.toLowerCase()} screens and smaller`}.`} /> : null}
-          <div ref={selectorsRef} hidden={!selected} />
           <div ref={stylesRef} hidden={!selected} />
         </div>
         <div className="ov-sites-panel" hidden={rightTab !== 'settings'}>
