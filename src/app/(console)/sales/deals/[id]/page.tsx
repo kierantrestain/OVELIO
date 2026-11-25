@@ -1,7 +1,7 @@
-import { LaneStub } from '@/components/lane-stub';
+import { DealView } from '@/components/crm/deals';
 
 export const metadata = { title: 'Deal' };
 
-export default function Page() {
-  return <LaneStub title="Deal" lane="Agent 1 · CRM & Sales" />;
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  return <DealView id={(await params).id} />;
 }
