@@ -164,6 +164,7 @@ export function EmailStudio({ id }: { id: string }) {
         height: '100%',
         width: 'auto',
         storageManager: false,
+        cssIcons: '',
         fromElement: false,
         panels: { defaults: [] },
         showDevices: false,

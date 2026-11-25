@@ -64,7 +64,9 @@
 .ov-studio-blocks .gjs-block { width: auto; min-height: 76px; margin: 0; padding: 10px 4px 8px; border: 1px solid var(--ov-studio-border); border-radius: 8px; box-shadow: none; color: var(--ov-studio-text); background: var(--ov-studio-panel); display: grid; place-items: center; gap: 6px; transition: border-color .12s, box-shadow .12s; }
 .ov-studio-blocks .gjs-block:hover { border-color: var(--ov-studio-accent); box-shadow: 0 2px 8px rgb(36 87 214 / .12); color: var(--ov-studio-accent); }
 .ov-studio-blocks .gjs-block-label { font: 500 11.5px/1.25 inherit; font-family: inherit; text-align: center; }
-.ov-studio-blocks .gjs-block svg { width: 26px; height: 26px; }
+.ov-studio-blocks .gjs-block svg { width: 26px; height: 26px; fill: none; }
+.ov-studio-blocks .gjs-block { justify-items: center; text-align: center; }
+.ov-studio-blocks .gjs-block-label { width: 100%; }
 .ov-studio .gjs-layer { background: transparent; color: var(--ov-studio-text); font-size: 13px; }
 .ov-studio .gjs-layer.gjs-selected .gjs-layer-item { background: var(--color-accent-muted, #dbe5fb); }
 .ov-studio .gjs-layer-item { border-bottom: 1px solid var(--ov-studio-border); padding: 8px 10px; }

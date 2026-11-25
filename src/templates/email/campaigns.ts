@@ -132,8 +132,8 @@ export const campaignTemplates: EmailTemplate[] = [
       + section(column(heading('Thanks for your order, {{contact.first_name | there}}', 24, { padding: '24px 32px 4px' })
         + text('Order <strong>#10234</strong> · placed on 12 March')))
       + section(column(rows([['Annual plan × 1', '£480.00'], ['Extra seats × 3', '£90.00'], ['Subtotal', '£570.00'], ['VAT (20%)', '£114.00']]) + rows([['Total paid', '£684.00']], { bold: true })))
-      + section(column(heading('Billed to', 14, { padding: '16px 24px 0' }) + text('{{contact.full_name}}<br>{{contact.company}}<br>{{contact.email}}', { size: 14, padding: '4px 24px 16px' }), { width: '50%', background: '[[brand.background]]' })
-        + column(heading('Payment', 14, { padding: '16px 24px 0' }) + text('Card ending 4242<br>12 March, 10:24', { size: 14, padding: '4px 24px 16px' }), { width: '50%', background: '[[brand.background]]' }), { padding: '16px 32px' })
+      + section(column(heading('Billed to', 14, { padding: '18px 32px 0' }) + text('{{contact.full_name}}<br>{{contact.company}}<br>{{contact.email}}', { size: 14, padding: '4px 32px 18px' }), { width: '50%' })
+        + column(heading('Payment', 14, { padding: '18px 32px 0' }) + text('Card ending 4242<br>12 March, 10:24', { size: 14, padding: '4px 32px 18px' }), { width: '50%' }), { background: '[[brand.background]]', padding: '8px 0' })
       + section(column(button('View your invoice') + text('Questions about this charge? Reply to this email and we will help.', { size: 13, color: '[[brand.muted]]', padding: '0 32px 20px' })))
       + footer({ transactional: true })),
   },

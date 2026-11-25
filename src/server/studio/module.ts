@@ -210,6 +210,11 @@ export const studioModule: LaneModule = {
         `SELECT id, name, source, html FROM designs WHERE kind = 'email_block' AND status <> 'archived' ORDER BY updated_at DESC LIMIT 100`);
       return { items: result.rows };
     }, 'marketer'),
+    route('GET', new RegExp(`^studio/designs/${uuid}/html$`), async ({ params }) => {
+      const found = (await db.query<{ html: string }>(`SELECT html FROM designs WHERE id = $1 AND kind IN ('email', 'email_block')`, [params[0]])).rows[0];
+      if (!found) throw new AppError(404, 'That email design was not found.');
+      return { html: found.html };
+    }),
     route('GET', new RegExp(`^studio/designs/${uuid}$`), async ({ params }) => getDesign(params[0])),
     route('PATCH', new RegExp(`^studio/designs/${uuid}$`), async ({ params, request, user }) =>
       saveDesign(params[0], await readBody(request, patchInput, 4 * 1024 * 1024), user.id), 'marketer'),
