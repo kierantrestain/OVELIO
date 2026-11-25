@@ -31,6 +31,7 @@ OVELIO_ADMIN_NAME=Administrator
 OVELIO_ADMIN_PASSWORD=$(openssl rand -hex 16)
 CONTACT_HMAC_KEY=$(openssl rand -hex 32)
 SUPPRESSION_WEBHOOK_SECRET=$(openssl rand -hex 32)
+MAILBOX_ENCRYPTION_KEY=$(openssl rand -hex 32)
 OVELIO_DB_PASSWORD=$(openssl rand -hex 24)
 MAUTIC_USERNAME=ovelio
 MAUTIC_ADMIN_EMAIL=journeys@ovelio.test
