@@ -1,7 +1,7 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Domains } from '@/components/sites/domains';
 
 export const metadata = { title: 'Domains' };
 
 export default function Page() {
-  return <LaneStub title="Domains" lane="Agent 3 · Sites & Forms" />;
+  return <Domains />;
 }

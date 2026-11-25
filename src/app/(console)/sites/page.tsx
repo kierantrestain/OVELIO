@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Suspense } from 'react';
+import { LandingPages } from '@/components/sites/pages-list';
 
 export const metadata = { title: 'Landing pages' };
 
 export default function Page() {
-  return <LaneStub title="Landing pages" lane="Agent 3 · Sites & Forms" />;
+  return <Suspense><LandingPages /></Suspense>;
 }
