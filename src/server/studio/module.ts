@@ -163,6 +163,12 @@ async function designsEndpoint({ query }: Context) {
 async function seed(sql: Sql) {
   const existing = await sql.query(`SELECT 1 FROM designs WHERE kind = 'email' LIMIT 1`);
   if (existing.rows.length) return;
+  const { updatedAt: _updatedAt, ...defaults } = await getBrand(sql);
+  void _updatedAt;
+  await sql.query(`INSERT INTO studio_brand_kits (id, kit) VALUES ('default', $1) ON CONFLICT (id) DO NOTHING`, [JSON.stringify({
+    ...defaults, footerText: 'You are receiving this sample email because you subscribed to OVELIO product news.',
+    social: [{ network: 'linkedin', url: 'https://linkedin.example/company/ovelio' }, { network: 'instagram', url: 'https://instagram.example/ovelio' }],
+  })]);
   const brand = await getBrand(sql);
   const samples: [string, string][] = [
     ['newsletter-digest', 'Spring product dispatch'], ['event-webinar', 'Webinar invite: email meets analytics'],
