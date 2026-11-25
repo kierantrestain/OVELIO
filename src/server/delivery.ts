@@ -9,6 +9,7 @@ import { AppError, logError, requiredEnv } from './config';
 import { db, transaction } from './db';
 import { listmonk } from './listmonk';
 import { mautic } from './mautic';
+import { studioMarker, studioNewsletterBody } from './studio/sanitize';
 
 const metricKeys: Exclude<keyof CampaignMetrics, 'unavailable'>[] = ['sent', 'delivered', 'opens', 'clicks', 'bounces', 'unsubscribes'];
 const contentSlot = '{{ template "content" . }}';
@@ -76,7 +77,10 @@ export function approvedCampaign(input: CampaignInput): CampaignInput {
     throw new AppError(400, 'Choose the configured sender email address.');
   }
   const contentType = input.contentType ?? 'html';
-  const body = contentType === 'plain' || contentType === 'markdown' ? input.body.trim() : mailContent(input.body, false, true);
+  // Email studio exports keep their responsive <style> blocks and Outlook comments; they get the studio's own
+  // parser-based sanitiser and Listmonk tag allow-list instead of the plainer body sanitiser.
+  const body = contentType === 'plain' || contentType === 'markdown' ? input.body.trim()
+    : input.body.includes(studioMarker) ? studioNewsletterBody(input.body) : mailContent(input.body, false, true);
   if (!body) throw new AppError(400, 'Enter email content.');
   return { ...input, fromEmail: approved, contentType, body };
 }
