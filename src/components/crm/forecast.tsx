@@ -79,16 +79,16 @@ export function SalesForecast() {
         ]} />
         {data && data.currencies.length > 1 ? <Selector label="Currency" isLabelHidden width={110} value={cur} onChange={value => setCurrency(value ?? '')}
           options={data.currencies.map(item => ({ value: item, label: item }))} /> : null}
-        <NumberInput label="Commit threshold %" isLabelHidden width={120} min={0} max={100} isIntegerOnly units="%" value={threshold} onChange={value => setThreshold(value ?? 75)} />
+         <NumberInput label="Commit threshold %" isLabelHidden width={150} min={0} max={100} isIntegerOnly units="% commit" value={threshold} onChange={value => setThreshold(value ?? 75)} />
       </>} />
     {!data ? <Panel><AsyncState loading={forecast.loading} error={forecast.error} retry={forecast.refresh} /></Panel> : <>
       <Text color="secondary">{shortDate(data.from)} – {shortDate(data.to)} · {cur}. Weighted, committed and best case are <Estimate>estimates</Estimate> from open deals’ values and probabilities; closed won is measured from deals marked won.</Text>
-      <div className="ov-metrics">
+      <div className="ov-crm-metrics">
         <Metric label="Weighted pipeline" formatted={money(data.totals.weighted, cur)} hint="Estimate · value × probability" info="Each open deal's value multiplied by its win probability (the deal's own, or its stage's)." />
         <Metric label="Committed" formatted={money(data.totals.committed, cur)} hint={`Estimate · deals at ≥ ${data.threshold}%`} />
         <Metric label="Best case" formatted={money(data.totals.bestCase, cur)} hint={`Estimate · all ${data.totals.openCount} open deals`} />
         <Metric label="Closed won" formatted={money(data.totals.closedWon, cur)} hint={`Measured · ${data.totals.wonCount} deals`} />
-        <Metric label="Win rate" formatted={data.totals.winRate == null ? '—' : `${data.totals.winRate}%`} hint={data.totals.winRate == null ? 'No deals closed in this period' : `${data.totals.wonCount} won of ${data.totals.wonCount + data.totals.lostCount} closed`} />
+        <Metric label="Win rate" formatted={data.totals.winRate == null ? '—' : `${Math.round(data.totals.winRate)}%`} hint={data.totals.winRate == null ? 'No deals closed in this period' : `${data.totals.wonCount} won of ${data.totals.wonCount + data.totals.lostCount} closed`} />
         <Metric label="Average deal size" formatted={money(data.totals.averageDealSize, cur)} hint="Won deals" />
         <Metric label="Average sales cycle" formatted={data.totals.averageCycleDays == null ? '—' : `${data.totals.averageCycleDays} days`} hint="Created to won" />
       </div>

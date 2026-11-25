@@ -4,12 +4,12 @@
 // rollback) and a table view with saved views, plus the deal page.
 import '@/styles/crm.css';
 import {
-  DndContext, DragOverlay, KeyboardSensor, PointerSensor, closestCorners, useDroppable, useSensor, useSensors,
+  DndContext, DragOverlay, KeyboardSensor, MouseSensor, TouchSensor, closestCorners, useDroppable, useSensor, useSensors,
 } from '@dnd-kit/core';
 import type { DragEndEvent, DragOverEvent, DragStartEvent } from '@dnd-kit/core';
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { Download, Filter, Flame, LayoutGrid, Plus, Rows3, Trophy, XCircle } from 'lucide-react';
+import { Download, Filter, Flame, LayoutGrid, MoreHorizontal, Plus, Rows3, Trophy, XCircle } from 'lucide-react';
 import NextLink from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useRef, useState } from 'react';
@@ -60,9 +60,9 @@ function DealCard({ deal, overlay, onClose }: { deal: Deal; overlay?: boolean; o
     aria-roledescription="Deal card. Press space to pick up, arrow keys to move, space to drop."
     aria-label={`${deal.name}, ${money(deal.amount, deal.currency)}, ${deal.stageName}`}>
     <div className="ov-crm-card-top">
-      <NextLink href={`/sales/deals/${deal.id}`} className="ov-crm-card-name" onPointerDown={event => event.stopPropagation()}>{deal.name}</NextLink>
-      {onClose && !overlay ? <div onPointerDown={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-        <DropdownMenu button={{ label: `Actions for ${deal.name}`, isIconOnly: true, variant: 'ghost', size: 'sm' }} hasChevron={false} items={[
+      <NextLink href={`/sales/deals/${deal.id}`} className="ov-crm-card-name" draggable={false}>{deal.name}</NextLink>
+      {onClose && !overlay ? <div onMouseDown={event => event.stopPropagation()} onTouchStart={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+        <DropdownMenu button={{ label: `Actions for ${deal.name}`, isIconOnly: true, icon: <MoreHorizontal size={16} />, variant: 'ghost', size: 'sm' }} hasChevron={false} items={[
           { label: 'Open deal', href: `/sales/deals/${deal.id}` },
           { label: 'Mark as won', icon: <Trophy size={14} />, onClick: () => onClose(deal, 'won') },
           { label: 'Mark as lost', icon: <XCircle size={14} />, onClick: () => onClose(deal, 'lost') },
@@ -122,7 +122,9 @@ function Board({ board, onChanged, onNotice }: { board: DealBoard; onChanged: ()
   const [synced, setSynced] = useState(initial);
   if (synced !== initial) { setSynced(initial); setColumns(initial); }
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    // Touch waits for a short press so a swipe still scrolls the board sideways.
+    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const canClose = board.pipeline.stages.some(stage => stage.outcome === 'won');

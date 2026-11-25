@@ -131,7 +131,7 @@ export function ContactProfileView({ id }: { id: string }) {
     {drawer === 'email' ? <EmailDrawer contact={{ id: contactId, name, email: contact.email }} onClose={() => setDrawer(null)} onDone={() => { setDrawer(null); profile.refresh(); }} /> : null}
     {drawer === 'deal' && pipelines.data ? <DealDrawer pipelines={pipelines.data.items} onClose={() => setDrawer(null)}
       defaults={{ contactId, contactName: name, companyId: company?.id ?? null, companyName: company?.name ?? '', name: `${contact.company || name} — ` }}
-      onCreated={() => { setDrawer(null); profile.refresh(); }} /> : null}
+      onCreated={() => { setDrawer(null); refresh(); }} /> : null}
     {task || editing ? <TaskDrawer task={editing ?? undefined} defaults={task ?? undefined} onClose={() => { setTask(null); setEditing(null); }}
       onSaved={() => { setTask(null); setEditing(null); profile.refresh(); }} /> : null}
   </div>;

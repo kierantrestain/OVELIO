@@ -5,7 +5,7 @@
 .ov-crm-estimate { font-size: var(--font-size-xs); padding: 1px 6px; border-radius: 999px; background: var(--color-background-muted); color: var(--color-text-secondary); border: 1px dashed var(--color-border-emphasized); white-space: nowrap; }
 
 /* Board */
-.ov-crm-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(272px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; min-height: 420px; scroll-snap-type: x proximity; }
+.ov-crm-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(248px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; min-height: 420px; scroll-snap-type: x proximity; }
 .ov-crm-column { display: grid; grid-template-rows: auto 1fr; background: var(--color-background-muted); border: 1px solid var(--color-border); border-radius: var(--radius-container); min-width: 0; max-height: calc(100dvh - 260px); scroll-snap-align: start; }
 .ov-crm-column--over { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 .ov-crm-column-head { display: grid; gap: 4px; padding: 12px 12px 10px; border-bottom: 1px solid var(--color-border); position: sticky; top: 0; background: inherit; border-radius: var(--radius-container) var(--radius-container) 0 0; }
@@ -72,6 +72,7 @@
 .ov-crm-group { font-size: var(--font-size-xs); text-transform: uppercase; letter-spacing: .05em; color: var(--color-text-secondary); font-weight: var(--font-weight-semibold); padding-top: 12px; }
 
 /* Forecast */
+.ov-crm-metrics { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .ov-crm-bar { display: flex; height: 10px; border-radius: 999px; background: var(--color-background-muted); overflow: hidden; min-width: 80px; }
 .ov-crm-bar > span:first-child { background: #1d7a45; }
 .ov-crm-bar > span:last-child { background: repeating-linear-gradient(135deg, var(--ov-chart) 0 4px, var(--ov-chart-muted) 4px 8px); }
@@ -87,6 +88,7 @@
 
 @media (max-width: 1100px) {
   .ov-crm-detail { grid-template-columns: minmax(0, 1fr); }
+  .ov-crm-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 860px) {
   .ov-crm-board { grid-auto-columns: minmax(260px, 84vw); }
