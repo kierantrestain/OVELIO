@@ -327,7 +327,7 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
   useEffect(() => {
     if (!watching) return;
     const timer = setInterval(() => {
-      void api<ImportRun>(`/contacts/imports/${watching}`).then(next => {
+      void api<ImportRun>(`/crm/imports/${watching}`).then(next => {
         setRun(next);
         if (next.status === 'done' && !next.dryRun) onImported();
       }).catch(() => undefined);
@@ -337,7 +337,7 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
 
   async function start(dryRun: boolean) {
     if (!draft) return;
-    setRun(await api<ImportRun>(`/contacts/imports/${draft.run.id}/start`, 'POST', {
+    setRun(await api<ImportRun>(`/crm/imports/${draft.run.id}/start`, 'POST', {
       mapping, dryRun, updateExisting, evidence: evidence.trim() || undefined,
     }));
   }
@@ -351,7 +351,7 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
       void action.run(async () => {
         if (!file?.size) throw new Error('Choose a CSV file to import.');
         if (file.size > 25_000_000) throw new Error('Choose a CSV file smaller than 25 MB.');
-        const next = await api<ImportDraft>('/contacts/imports', 'POST', { csv: await file.text(), fileName: file.name, evidence: evidence.trim() || undefined });
+        const next = await api<ImportDraft>('/crm/imports', 'POST', { csv: await file.text(), fileName: file.name, evidence: evidence.trim() || undefined });
         setDraft(next);
         setMapping(next.preview.mapping);
       });
@@ -388,7 +388,7 @@ function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: 
           {run.dryRun ? 'Would create' : 'Created'} {number(run.created)} · {run.dryRun ? 'would update' : 'updated'} {number(run.updated)} · skipped {number(run.skipped)} · errors {number(run.errors)}
         </Text>
         {issues && run.status === 'done' ? <Button size="sm" label="Download skipped and failed rows" icon={<Download size={14} />}
-          onClick={() => void action.run(async () => saveFile(await api<string>(`/contacts/imports/${run.id}/issues`), 'ovelio-import-issues.csv', 'text/csv'))} /> : null}
+          onClick={() => void action.run(async () => saveFile(await api<string>(`/crm/imports/${run.id}/issues`), 'ovelio-import-issues.csv', 'text/csv'))} /> : null}
       </div> : null}
       <Feedback error={action.error} />
       <FormActions>
@@ -1593,7 +1593,9 @@ export function Audience({ initialTab }: { initialTab?: string }) {
   const lists = useResource<MailingList[]>(tab === 'Mailing lists' ? listPath : null);
   const tags = useResource<Tag[]>(tab === 'Contacts' || tab === 'Tags & stages' ? tagPath : null);
   const stages = useResource<Stage[]>(tab === 'Tags & stages' ? stagePath : null);
-  const companies = useResource<Company[]>(tab === 'Companies' ? (companySearch ? `${companyPath}?${new URLSearchParams({ q: companySearch })}` : companyPath) : null);
+  const companies = useResource<Company[] | Page<Company>>(tab === 'Companies' ? (companySearch ? `${companyPath}?${new URLSearchParams({ q: companySearch })}` : companyPath) : null);
+  // The engine returns a list; the developer preview a page. Both render the same table.
+  const companyRows = Array.isArray(companies.data) ? companies.data : companies.data?.items;
   const pointActions = useResource<PointAction[]>(tab === 'Lead scoring' ? pointActionPath : null);
   const pointActionTypes = useResource<Record<string, string>>(tab === 'Lead scoring' ? `${pointActionPath}/types` : null);
   const pointTriggers = useResource<PointTrigger[]>(tab === 'Lead scoring' ? pointTriggerPath : null);
@@ -1784,7 +1786,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
               key: 'email',
               header: 'Contact',
               renderCell: contact => <span className="ov-cell ov-cell--nowrap">
-                <Link href={`/audience/${contact.id}`}>{fullName(contact) || contact.email || `Contact ${contact.id}`}</Link>
+                <Link href={`/crm/contacts/${contact.id}`}>{fullName(contact) || contact.email || `Contact ${contact.id}`}</Link>
                 {fullName(contact) && contact.email ? <Text type="supporting" color="secondary">{contact.email}</Text> : null}
               </span>,
             },
@@ -1994,8 +1996,8 @@ export function Audience({ initialTab }: { initialTab?: string }) {
           {companySearch ? <Button variant="ghost" label="Clear" onClick={() => { setCompanyQuery(''); setCompanySearch(''); }} /> : null}
         </form>
       </div>
-      {!companies.data ? <AsyncState loading={companies.loading} error={companies.error} retry={companies.refresh} />
-        : <Table data={companies.data} idKey="id" hasHover
+      {!companyRows ? <AsyncState loading={companies.loading} error={companies.error} retry={companies.refresh} />
+        : <Table data={companyRows} idKey="id" hasHover
           emptyState={<Empty title={companySearch ? 'No companies match this search' : 'No companies yet'}
             description={companySearch ? undefined : 'Add organisations to group B2B accounts.'} />}
           columns={[
@@ -2003,7 +2005,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
               key: 'name',
               header: 'Company',
               renderCell: item => <span className="ov-cell">
-                <Text weight="medium">{item.name}</Text>
+                <Link href={`/crm/companies/${item.id}`}>{item.name}</Link>
                 {item.industry ? <Text type="supporting" color="secondary">{item.industry}</Text> : null}
               </span>,
             },
@@ -2295,7 +2297,9 @@ export function Audience({ initialTab }: { initialTab?: string }) {
 
 /* ── Unified Contact Detail View ───────────────────────────────────────────── */
 
-export function ContactView({ id }: { id: string }) {
+/** The engine record: consent, do-not-contact, segments, lists, notes, devices and GDPR export or erasure. `embedded` drops
+ * the page header so the CRM profile (src/components/crm/profiles.tsx) can show it as a tab. */
+export function ContactView({ id, embedded = false }: { id: string; embedded?: boolean }) {
   const user = useUser();
   const router = useRouter();
   const path = `${contactsPath}/${id}`;
@@ -2346,11 +2350,8 @@ export function ContactView({ id }: { id: string }) {
     mutate(() => api(`${path}/points`, 'POST', { delta }), `Lead score adjusted (${delta > 0 ? '+' : ''}${delta}).`);
   }
 
-  return <>
-    <PageHeader back={{ href: '/audience', label: 'Audience' }} title={contact ? fullName(contact) || contact.email || 'Contact' : 'Contact'}
-      description={contact?.email || 'Contact record and preferences.'}
-      actions={contact ? <>
-        <Button label="Send email" icon={<Send size={15} />} isDisabled={action.busy || !canSendEmail}
+  const headerActions = contact ? <>
+        <Button label={embedded ? "Send journey email" : "Send email"} icon={<Send size={15} />} isDisabled={action.busy || !canSendEmail}
           tooltip={!contact.email
             ? 'Add an email address before sending.'
             : contact.suppressed || contact.consent === 'suppressed'
@@ -2365,7 +2366,12 @@ export function ContactView({ id }: { id: string }) {
           <Button label="Delete contact" variant="destructive" onClick={() => setModal('delete')} />
         </> : null}
         <Button label="Edit contact" variant="primary" onClick={() => setModal('edit')} />
-      </> : undefined} />
+      </> : undefined;
+
+  return <>
+    {embedded ? (headerActions ? <div className="ov-actions ov-actions--end">{headerActions}</div> : null)
+      : <PageHeader back={{ href: '/crm', label: 'Contacts' }} title={contact ? fullName(contact) || contact.email || 'Contact' : 'Contact'}
+        description={contact?.email || 'Contact record and preferences.'} actions={headerActions} />}
 
     {!contact ? <Panel><AsyncState loading={resource.loading} error={resource.error} retry={resource.refresh} /></Panel> : <div className="ov-stack">
       <Feedback error={action.error} notice={action.notice || notice} />
@@ -2527,7 +2533,7 @@ export function ContactView({ id }: { id: string }) {
         </Panel>
 
         <Panel title="Linked companies" description="Organisations linked to this contact profile."
-          action={<Link href="/audience?tab=Companies" type="supporting">Manage companies</Link>}>
+          action={<Link href="/crm/companies" type="supporting">Manage companies</Link>}>
           {linkedCompanies.length ? <Rows>{linkedCompanies.map(company => <li key={company.id}>
             <Text weight="medium">{company.name || `Company #${company.id}`}</Text>
             {company.isPrimary ? <StatusBadge label="Primary" tone="info" /> : <StatusBadge label="Linked" tone="neutral" />}
@@ -2634,7 +2640,7 @@ export function ContactView({ id }: { id: string }) {
       onConfirm={() => void action.run(async () => {
         try {
           await api(path, 'DELETE');
-          router.replace('/audience');
+          router.replace('/crm');
         } finally {
           setModal(undefined);
         }
