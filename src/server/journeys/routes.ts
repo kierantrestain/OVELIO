@@ -1,6 +1,7 @@
 // Console endpoints for lane 4 under /api/console/journeys/ (docs/rebuild/TRACKER.md §3).
 import { z } from 'zod';
 import { enrolmentStatuses, flowNodeTypes, flowStatuses, flowTemplates, flowTriggerTypes } from '@/contracts/journeys';
+import { db } from '../db';
 import { json } from '../http';
 import { searchContacts } from '../directory';
 import { route } from '../routes/shared';
@@ -105,5 +106,21 @@ export const journeyEndpoints: Entry[] = [
     items: (await searchContacts(query.get('q') ?? '', 20)).map(contact => ({ id: contact.id, name: contact.name, email: contact.email, tags: contact.tags, points: contact.points })),
   }), 'marketer'),
   route('GET', pattern('templates'), async () => ({ items: flowTemplates })),
+  // Fallbacks for the canvas pickers, read from the shared tables (migration 008) when the owning lane's list is unavailable.
+  route('GET', pattern('lookups/designs'), async () => {
+    const result = await db.query<{ id: string; name: string; subject: string; kind: string; status: string; updated_at: Date }>(
+      `SELECT id, name, subject, kind, status, updated_at FROM designs WHERE kind = 'email' AND status <> 'archived' ORDER BY updated_at DESC LIMIT 200`);
+    return { items: result.rows.map(row => ({ id: row.id, name: row.name, subject: row.subject, kind: row.kind, status: row.status, updatedAt: new Date(row.updated_at).toISOString() })) };
+  }, 'marketer'),
+  route('GET', pattern('lookups/pipelines'), async () => {
+    const pipelines = await db.query<{ id: string; name: string; currency: string; is_default: boolean }>('SELECT id, name, currency, is_default FROM pipelines WHERE archived_at IS NULL ORDER BY is_default DESC, position, name');
+    const stages = await db.query<{ id: string; pipeline_id: string; name: string; position: number; probability: number; outcome: string }>('SELECT id, pipeline_id, name, position, probability, outcome FROM pipeline_stages ORDER BY position');
+    return {
+      items: pipelines.rows.map(row => ({
+        id: row.id, name: row.name, currency: row.currency, isDefault: row.is_default,
+        stages: stages.rows.filter(stage => stage.pipeline_id === row.id).map(stage => ({ id: stage.id, name: stage.name, position: stage.position, probability: stage.probability, outcome: stage.outcome })),
+      })),
+    };
+  }, 'marketer'),
   ...campaignEndpoints,
 ];

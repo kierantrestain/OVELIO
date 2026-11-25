@@ -1,0 +1,131 @@
+/* Lane 4 · Campaigns & Automations. Classes are prefixed ov-journeys-. */
+
+.ov-journeys-page { display: grid; gap: 16px; min-width: 0; }
+.ov-journeys-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.ov-journeys-head > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.ov-journeys-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ov-journeys-muted { color: var(--color-text-secondary); font-size: 13px; }
+.ov-journeys-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.ov-journeys-toolbar > * { min-width: 0; }
+.ov-journeys-filter { width: 200px; max-width: 100%; }
+.ov-journeys-filter--wide { width: 280px; }
+
+/* Builder workspace: palette | canvas | settings panel */
+.ov-journeys-workspace {
+  display: grid; grid-template-columns: 208px minmax(0, 1fr) 360px; height: max(560px, calc(100dvh - 250px));
+  border: 1px solid var(--color-border); border-radius: var(--radius-container, 12px); overflow: hidden; background: var(--color-background-surface);
+}
+.ov-journeys-palette { display: grid; align-content: start; gap: 14px; padding: 14px 12px; overflow: auto; border-right: 1px solid var(--color-border); background: var(--color-background-muted); }
+.ov-journeys-palette-group { display: grid; gap: 6px; }
+.ov-journeys-palette-heading { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--color-text-secondary); }
+.ov-journeys-palette-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; font: inherit; font-size: 13px; text-align: left;
+  color: var(--color-text-primary); background: var(--color-background-surface); border: 1px solid var(--color-border);
+  border-radius: var(--radius-element, 8px); cursor: grab;
+}
+.ov-journeys-palette-item:hover, .ov-journeys-palette-item:focus-visible { border-color: var(--color-accent); outline: none; }
+.ov-journeys-palette-item svg { flex-shrink: 0; color: var(--ov-node-accent, var(--color-icon-secondary)); }
+.ov-journeys-canvas { position: relative; min-width: 0; min-height: 0; }
+.ov-journeys-canvas .react-flow { --xy-background-color: var(--color-background-muted); --xy-edge-stroke: var(--color-border-emphasized, #9aa3b2); --xy-edge-stroke-selected: var(--color-accent); --xy-handle-background-color: var(--color-background-surface); --xy-handle-border-color: var(--color-border-emphasized, #9aa3b2); }
+.ov-journeys-canvas .react-flow__edge-textbg { fill: var(--color-background-surface); }
+.ov-journeys-canvas .react-flow__edge-text { font-size: 11px; font-weight: 600; fill: var(--color-text-secondary); }
+.ov-journeys-canvas .react-flow__controls { box-shadow: none; border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; }
+.ov-journeys-canvas .react-flow__minimap { border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; }
+.ov-journeys-canvas-bar { position: absolute; z-index: 5; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; pointer-events: none; }
+.ov-journeys-canvas-bar > * { pointer-events: auto; }
+.ov-journeys-panel { display: grid; align-content: start; gap: 14px; padding: 16px; overflow: auto; border-left: 1px solid var(--color-border); min-width: 0; }
+.ov-journeys-panel-head { display: grid; gap: 2px; }
+
+/* Nodes */
+.ov-journeys-node {
+  --ov-node-accent: var(--color-icon-secondary);
+  box-sizing: border-box; width: 240px; min-height: 86px; display: grid; align-content: start; gap: 3px; padding: 10px 12px 10px 14px;
+  font-size: 13px; color: var(--color-text-primary); background: var(--color-background-surface);
+  border: 1px solid var(--color-border); border-left: 4px solid var(--ov-node-accent); border-radius: 10px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+}
+.ov-journeys-node[data-selected="true"] { box-shadow: 0 0 0 2px var(--color-accent); }
+.ov-journeys-node[data-issue="true"] { border-color: var(--color-border-error, #c0362c); border-left-color: var(--color-border-error, #c0362c); }
+.ov-journeys-node-kind { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--color-text-secondary); }
+.ov-journeys-node-kind svg { color: var(--ov-node-accent); }
+.ov-journeys-node-meta { color: var(--color-text-secondary); font-size: 12px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ov-journeys-node-title { font-weight: 600; }
+.ov-journeys-node-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; font-size: 11px; color: var(--color-text-secondary); }
+.ov-journeys-node-stats [data-tone="failed"] { color: var(--color-text-error, #c0362c); font-weight: 600; }
+.ov-journeys-node-stats [data-tone="waiting"] { color: var(--color-text-info, #1565c0); }
+.ov-journeys-node-issue { font-size: 11px; font-weight: 600; color: var(--color-text-error, #c0362c); }
+.ov-journeys-handle-label { position: absolute; bottom: -20px; transform: translateX(-50%); font-size: 10px; font-weight: 700; letter-spacing: .04em; color: var(--color-text-secondary); background: var(--color-background-surface); padding: 0 4px; border-radius: 4px; pointer-events: none; }
+.ov-journeys-node .react-flow__handle { width: 10px; height: 10px; }
+.ov-journeys-node[data-group="Start"] { --ov-node-accent: #2457d6; background: var(--color-accent-muted); }
+.ov-journeys-node[data-group="Timing & logic"], .ov-journeys-palette-item[data-group="Timing & logic"] { --ov-node-accent: #b26a00; }
+.ov-journeys-node[data-group="Messages"], .ov-journeys-palette-item[data-group="Messages"] { --ov-node-accent: #2457d6; }
+.ov-journeys-node[data-group="Contacts"], .ov-journeys-palette-item[data-group="Contacts"] { --ov-node-accent: #0d9488; }
+.ov-journeys-node[data-group="Sales"], .ov-journeys-palette-item[data-group="Sales"] { --ov-node-accent: #7c3aed; }
+.ov-journeys-node[data-group="Integrations"], .ov-journeys-palette-item[data-group="Integrations"] { --ov-node-accent: #475569; }
+.ov-journeys-node[data-group="End"], .ov-journeys-palette-item[data-group="End"] { --ov-node-accent: #c0362c; }
+
+/* Issues, logs and lists */
+.ov-journeys-issues { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ov-journeys-issue { display: grid; gap: 2px; width: 100%; padding: 8px 10px; text-align: left; font: inherit; font-size: 13px; color: var(--color-text-primary); background: var(--color-background-surface); border: 1px solid var(--color-border); border-left: 3px solid var(--color-border-error, #c0362c); border-radius: 8px; cursor: pointer; }
+.ov-journeys-issue[data-level="warning"] { border-left-color: var(--color-border-warning, #b26a00); }
+.ov-journeys-log { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.ov-journeys-log > li { position: relative; display: grid; gap: 2px; padding: 0 0 14px 22px; }
+.ov-journeys-log > li::before { content: ''; position: absolute; left: 5px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-emphasized, #9aa3b2); }
+.ov-journeys-log > li::after { content: ''; position: absolute; left: 8.5px; top: 16px; bottom: 0; width: 1px; background: var(--color-border); }
+.ov-journeys-log > li:last-child::after { display: none; }
+.ov-journeys-log > li[data-status="ok"]::before { background: var(--color-text-success, #2e7d32); }
+.ov-journeys-log > li[data-status="failed"]::before { background: var(--color-text-error, #c0362c); }
+.ov-journeys-log > li[data-status="waiting"]::before { background: var(--color-text-info, #1565c0); }
+.ov-journeys-log > li[data-status="skipped"]::before { background: var(--color-text-warning, #b26a00); }
+.ov-journeys-log-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; font-weight: 600; font-size: 13px; }
+.ov-journeys-log-detail { font-size: 13px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.ov-journeys-trigger { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-background-surface); }
+.ov-journeys-row-link { font: inherit; font-weight: 600; color: var(--color-text-accent); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.ov-journeys-row-link:hover { text-decoration: underline; }
+.ov-journeys-counts { display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.ov-journeys-counts [data-tone="failed"] { color: var(--color-text-error, #c0362c); font-weight: 600; }
+
+/* Template gallery and static diagrams */
+.ov-journeys-cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.ov-journeys-card { display: grid; grid-template-rows: auto 1fr auto; gap: 12px; height: 100%; padding: 16px; }
+.ov-journeys-diagram { display: block; width: 100%; height: 200px; border-radius: 8px; background: var(--color-background-muted); border: 1px solid var(--color-border); }
+.ov-journeys-diagram rect { fill: var(--color-background-surface); stroke: var(--color-border-emphasized, #9aa3b2); }
+.ov-journeys-diagram path { fill: none; stroke: var(--color-border-emphasized, #9aa3b2); stroke-width: 2; }
+.ov-journeys-diagram text { font-size: 22px; fill: var(--color-text-secondary); font-family: inherit; }
+
+/* Campaign hub */
+.ov-journeys-calendar { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-top: 1px solid var(--color-border); border-left: 1px solid var(--color-border); }
+.ov-journeys-calendar-dow { padding: 6px 8px; font-size: 12px; font-weight: 600; color: var(--color-text-secondary); border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); background: var(--color-background-muted); }
+.ov-journeys-day { min-height: 108px; display: grid; align-content: start; gap: 3px; padding: 6px; border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); min-width: 0; }
+.ov-journeys-day[data-outside="true"] { background: var(--color-background-muted); }
+.ov-journeys-day[data-today="true"] .ov-journeys-day-number { color: var(--color-on-accent); background: var(--color-accent); }
+.ov-journeys-day-number { justify-self: start; min-width: 22px; padding: 1px 6px; border-radius: 999px; font-size: 12px; font-weight: 600; text-align: center; }
+.ov-journeys-chip { display: block; width: 100%; padding: 2px 6px; font: inherit; font-size: 11px; font-weight: 600; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 0; border-radius: 4px; cursor: pointer; color: var(--color-text-primary); background: var(--color-accent-muted); text-decoration: none; }
+.ov-journeys-chip[data-kind="newsletter"] { background: light-dark(#dcfce7, #14532d); }
+.ov-journeys-chip[data-status="planned"] { background: light-dark(#eef2f7, #2a3140); }
+.ov-journeys-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--color-text-secondary); }
+.ov-journeys-legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 3px; vertical-align: -1px; background: var(--color-accent-muted); }
+.ov-journeys-legend span[data-kind="planned"]::before { background: light-dark(#eef2f7, #2a3140); }
+.ov-journeys-legend span[data-kind="newsletter"]::before { background: light-dark(#dcfce7, #14532d); }
+.ov-journeys-asset-group { display: grid; gap: 4px; }
+.ov-journeys-link-url { font-family: var(--font-family-code, ui-monospace, monospace); font-size: 12px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.ov-journeys-timeline { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.ov-journeys-timeline > li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--color-border); font-size: 13px; }
+.ov-journeys-timeline > li:last-child { border-bottom: 0; }
+
+@media (max-width: 1100px) {
+  .ov-journeys-workspace { grid-template-columns: 180px minmax(0, 1fr) 300px; }
+}
+@media (max-width: 860px) {
+  .ov-journeys-workspace { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .ov-journeys-palette { display: flex; gap: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--color-border); padding: 10px; }
+  .ov-journeys-palette-group { display: flex; gap: 6px; }
+  .ov-journeys-palette-heading { display: none; }
+  .ov-journeys-palette-item { width: auto; white-space: nowrap; }
+  .ov-journeys-canvas { height: 58vh; }
+  .ov-journeys-panel { border-left: 0; border-top: 1px solid var(--color-border); }
+  .ov-journeys-filter, .ov-journeys-filter--wide { width: 100%; }
+  .ov-journeys-day { min-height: 64px; padding: 3px; }
+  .ov-journeys-chip { font-size: 10px; padding: 1px 3px; }
+  .ov-journeys-calendar-dow { padding: 4px; font-size: 11px; }
+}
