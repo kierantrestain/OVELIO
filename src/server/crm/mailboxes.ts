@@ -20,6 +20,8 @@ import { logActivity } from '../records';
 import { route } from '../routes/shared';
 import type { Entry } from '../routes/shared';
 import { inboxEndpoints } from './inbox';
+import { inboxResponseReportEndpoints } from './inbox-response-report';
+import { mailboxRoutingEndpoints, routeNewMailboxThread } from './mailbox-routing';
 import { inboxTeamEndpoints } from './mailbox-team';
 import { textToHtml } from './people';
 import { uuid } from './shared';
@@ -465,6 +467,7 @@ export async function ingestMessages(mailboxId: string, mailboxEmail: string, me
         [mailboxId, message.providerId, message.threadId, contact.id, direction, message.subject, snippet, message.from, message.to.join(', '), message.at],
       );
       if (!inserted.rowCount) return 0;
+      if (!outbound) await routeNewMailboxThread(client, mailboxId, message.threadId || message.providerId);
       const activityId = await logActivity({ type: 'email', direction, subject: message.subject, body: snippet,
         occurredAt: message.at, contactId: contact.id, mailboxId }, client);
       await client.query('UPDATE crm_mailbox_messages SET activity_id = $3 WHERE mailbox_id = $1 AND provider_message_id = $2',
@@ -594,5 +597,7 @@ export const mailboxEndpoints: Entry[] = [
     return new Response(null, { status: 204 });
   }, 'marketer'),
   ...inboxEndpoints,
+  ...inboxResponseReportEndpoints,
   ...inboxTeamEndpoints,
+  ...mailboxRoutingEndpoints,
 ];

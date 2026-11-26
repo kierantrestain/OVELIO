@@ -4,6 +4,7 @@
 
 import type { Consent } from './audience';
 import type { DirectoryContact, PlatformEvent } from './platform';
+import type { InboxTeamStatus } from './mailbox-team';
 
 export type StageOutcome = 'open' | 'won' | 'lost';
 export type DealStatus = 'open' | 'won' | 'lost';
@@ -484,7 +485,10 @@ export type InboxThreadMessage = {
   at: string;
 };
 
-export type InboxThreadSummary = InboxThreadMessage & { mailboxId: string; mailboxEmail: string; threadId: string; count: number; unread: boolean };
+export type InboxThreadSummary = InboxThreadMessage & {
+  mailboxId: string; mailboxEmail: string; threadId: string; count: number; unread: boolean;
+  status: InboxTeamStatus; assigneeName: string | null;
+};
 export type InboxThread = {
   mailboxId: string;
   threadId: string;

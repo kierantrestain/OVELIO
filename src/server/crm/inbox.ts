@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { InboxConversation, InboxThread, InboxThreadMessage, InboxThreadSummary } from '@/contracts/crm';
+import { inboxTeamStatuses } from '@/contracts/mailbox-team';
 import { AppError } from '../config';
 import { db } from '../db';
 import { getContacts } from '../directory';
@@ -69,8 +70,16 @@ function toThreadMessage(row: ThreadMessageRow): InboxThreadMessage {
   };
 }
 
-async function listThreads(viewerId: string, query: string, unreadOnly: boolean): Promise<InboxThreadSummary[]> {
-  const { rows } = await db.query<ThreadMessageRow & { mailbox_id: string; mailbox_email: string; thread_key: string; count: string; unread: boolean }>(
+const threadFilter = z.object({
+  status: z.enum(inboxTeamStatuses).nullable(),
+  assignment: z.enum(['mine', 'unassigned']).nullable(),
+});
+
+async function listThreads(viewerId: string, query: string, unreadOnly: boolean, filters: z.infer<typeof threadFilter>): Promise<InboxThreadSummary[]> {
+  const { rows } = await db.query<ThreadMessageRow & {
+    mailbox_id: string; mailbox_email: string; thread_key: string; count: string; unread: boolean;
+    status: InboxThreadSummary['status']; assignee_name: string | null;
+  }>(
     `WITH ranked AS (
        SELECT mm.*, m.email AS mailbox_email, ${threadKey} AS thread_key,
          row_number() OVER (thread ORDER BY mm.occurred_at DESC, mm.provider_message_id DESC) AS n,
@@ -82,11 +91,17 @@ async function listThreads(viewerId: string, query: string, unreadOnly: boolean)
        WHERE ${canReadMailbox('mm.mailbox_id', '$1')}
        WINDOW thread AS (PARTITION BY mm.mailbox_id, ${threadKey})
      )
-     SELECT * FROM ranked WHERE n = 1 AND matches AND (NOT $3 OR unread)
-     ORDER BY occurred_at DESC, mailbox_id, provider_message_id DESC LIMIT 100`, [viewerId, query, unreadOnly]);
+     SELECT r.*, coalesce(t.status, 'open') AS status, assigned.name AS assignee_name
+     FROM ranked r LEFT JOIN crm_mailbox_thread_team t ON t.mailbox_id = r.mailbox_id AND t.thread_key = r.thread_key
+     LEFT JOIN users assigned ON assigned.id = t.assignee_id AND ${canReadMailbox('r.mailbox_id', 'assigned.id')}
+     WHERE n = 1 AND matches AND (NOT $3 OR unread)
+       AND ($4::text IS NULL OR coalesce(t.status, 'open') = $4)
+       AND ($5::text IS NULL OR ($5 = 'mine' AND assigned.id = $1) OR ($5 = 'unassigned' AND assigned.id IS NULL))
+     ORDER BY r.occurred_at DESC, r.mailbox_id, r.provider_message_id DESC LIMIT 100`,
+    [viewerId, query, unreadOnly, filters.status, filters.assignment]);
   return rows.map(row => ({
     ...toThreadMessage(row), mailboxId: row.mailbox_id, mailboxEmail: row.mailbox_email, threadId: row.thread_key, count: Number(row.count),
-    unread: row.unread,
+    unread: row.unread, status: row.status, assigneeName: row.assignee_name,
   }));
 }
 
@@ -153,7 +168,8 @@ const providerItemId = z.string().min(1).max(2048);
 
 export const inboxEndpoints = [
   route('GET', /^sales\/inbox$/, async ({ query, user }) => inbox(user.id, search(query)), 'marketer'),
-  route('GET', /^sales\/inbox\/threads$/, async ({ query, user }) => listThreads(user.id, search(query), query.get('unread') === 'true'), 'marketer'),
+  route('GET', /^sales\/inbox\/threads$/, async ({ query, user }) => listThreads(user.id, search(query), query.get('unread') === 'true',
+    threadFilter.parse({ status: query.get('status'), assignment: query.get('assignment') })), 'marketer'),
   route('GET', /^sales\/inbox\/thread$/, async ({ query, user }) =>
     readThread(user.id, uuid.parse(query.get('mailboxId')), providerThreadId.parse(query.get('threadId'))), 'marketer'),
   route('PATCH', /^sales\/inbox\/thread$/, async ({ query, user, request }) =>

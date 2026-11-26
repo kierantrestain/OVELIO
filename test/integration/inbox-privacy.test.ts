@@ -153,6 +153,10 @@ test('INB-01 mailbox ownership and sharing apply across authenticated console su
     assert.ok(snapshot.unread);
     assert.deepEqual(await member.api.get(thread(mailboxId), 'PATCH', { read: true, through: snapshot.readVersion }), { unread: false });
     assert.equal((await owner.api.get<{ unread: boolean }>(thread(mailboxId))).unread, true, 'read markers are per viewer');
+    await owner.api.get(team, 'PATCH', { assigneeId: member.id, status: 'pending' });
+    const queue = '/sales/inbox/threads' + findPrivate + '&status=pending';
+    assert.equal((await member.api.get<unknown[]>(queue + '&assignment=mine')).length, 1);
+    assert.deepEqual(await outsider.api.get(queue), []);
 
     await admin.get('/settings/team/' + member.id, 'PATCH', { role: 'analyst' });
     assert.equal((await member.api.response('/sales/inbox')).status, 403);
@@ -161,6 +165,7 @@ test('INB-01 mailbox ownership and sharing apply across authenticated console su
 
     await owner.api.get(membersPath, 'PATCH', { userIds: [] });
     await assertContents(member.api, false);
+    assert.equal((await owner.api.get<unknown[]>(queue + '&assignment=unassigned')).length, 1);
     await owner.api.get(membersPath, 'PATCH', { userIds: [member.id] });
   });
 

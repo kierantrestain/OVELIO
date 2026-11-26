@@ -28,6 +28,7 @@ import type {
   PipelineStage, SalesEmailResult, Sequence, SequenceEnrolment, SequenceInput, SequenceStep, TaskType,
 } from '@/contracts/crm';
 import { taskTypeLabels } from '@/contracts/crm';
+import { inboxTeamStatusLabels, inboxTeamStatuses } from '@/contracts/mailbox-team';
 import { mergeTags } from '@/contracts/merge-tags';
 import { api, message, number, saveFile, useAction, useResource } from '../client';
 import { useUser } from '../shell';
@@ -35,6 +36,8 @@ import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHea
 import { ContactPicker, relative, shortDate, dateTime } from './common';
 import type { Member, RecordOption } from './common';
 import { InboxTeamPanel, SavedReplyPicker } from './inbox-team';
+import { MailboxRouting } from './inbox-routing';
+import { InboxResponseReportPanel } from './inbox-response-report';
 
 /* ── Pipelines ────────────────────────────────────────────────────────── */
 
@@ -448,7 +451,7 @@ export function MailboxSettings({ connected, error }: { connected?: string; erro
     {!data ? <Panel><AsyncState loading={overview.loading} error={overview.error} retry={overview.refresh} /></Panel> : <>
       <div className="ov-grid">
         {data.providers.map(provider => <Panel key={provider.provider} title={provider.label}
-          description={provider.provider === 'google' ? 'Google OAuth 2.0 and the Gmail API (send and read).' : 'Microsoft identity platform and Microsoft Graph (Mail.Send, Mail.Read).'}
+          description={provider.provider === 'google' ? 'Google OAuth 2.0 and the Gmail API (send and read).' : 'Microsoft identity platform and Microsoft Graph (Mail.Send, Mail.ReadWrite).'}
           action={<StatusBadge label={provider.configured ? 'Ready to connect' : 'Not configured'} tone={provider.configured ? 'success' : 'warning'} />}>
           {provider.configured ? <Button variant="primary" label={`Connect ${provider.label}`} isLoading={action.busy}
             onClick={() => void action.run(async () => { const { url } = await api<{ url: string }>(`/mailboxes/connect/${provider.provider}`, 'POST'); window.location.assign(url); })} />
@@ -482,6 +485,7 @@ export function MailboxSettings({ connected, error }: { connected?: string; erro
               <div className="ov-actions" role="group" aria-label={`Actions for ${item.email}`}>
                 {canManageAccess ? <>
                   <Button size="sm" label="Manage access" icon={<Users size={14} />} onClick={() => setAccess(item)} />
+                  <MailboxRouting mailboxId={item.id} />
                   <Button size="sm" variant="ghost" label="Sync now" isDisabled={action.busy} onClick={() => void action.run(async () => {
                     const synced = await api<Mailbox>(`/mailboxes/${item.id}/sync`, 'POST');
                     overview.refresh();
@@ -554,7 +558,7 @@ function InboxMessageBody({ mailboxId, messageId }: { mailboxId: string; message
             <Text type="supporting" color="secondary">{number(attachment.size)} bytes</Text>
           </span>
           {attachment.downloadable
-            ? <Button size="sm" variant="ghost" label="Download" aria-label={`Download ${attachment.name}`} icon={<Download size={14} />}
+            ? <Button as="a" size="sm" variant="ghost" label="Download" aria-label={`Download ${attachment.name}`} icon={<Download size={14} />}
                 href={`/api/console/sales/inbox/attachment?${new URLSearchParams({ mailboxId, messageId, attachmentId: attachment.id })}`} />
             : <Text type="supporting" color="secondary">Download unavailable</Text>}
         </li>)}
@@ -597,23 +601,23 @@ function InboxReply({ params, onSent }: { params: string; onSent: () => void }) 
   return <div className="ov-stack-sm ov-crm-inbox-reply">
     <SavedReplyPicker onApply={text => setBody(current => current ? current + '\n\n' + text : text)} />
     <form className="ov-stack-sm" onSubmit={event => {
-    event.preventDefault();
-    if (!reply) return;
-    if (attempt.current?.body !== reply) attempt.current = { body: reply, id: crypto.randomUUID?.() };
-    const requestId = attempt.current.id;
-    void action.run(async () => {
-      const result = await api<SalesEmailResult>(`/sales/inbox/reply?${params}`, 'POST', { body: reply, requestId });
-      attempt.current = null;
-      if (result.status !== 'sent') throw new Error(result.reason || 'The reply could not be sent.');
-      setBody('');
-      onSent();
-    }, 'Reply sent.');
-  }}>
-    <TextArea label="Reply" value={body} onChange={setBody} rows={4} width="100%" isDisabled={action.busy} />
-    <Feedback error={action.error} />
-    <div className="ov-actions ov-actions--end">
-      <Button type="submit" variant="primary" label="Send reply" isDisabled={!reply} isLoading={action.busy} />
-    </div>
+      event.preventDefault();
+      if (!reply) return;
+      if (attempt.current?.body !== reply) attempt.current = { body: reply, id: crypto.randomUUID?.() };
+      const requestId = attempt.current.id;
+      void action.run(async () => {
+        const result = await api<SalesEmailResult>(`/sales/inbox/reply?${params}`, 'POST', { body: reply, requestId });
+        attempt.current = null;
+        if (result.status !== 'sent') throw new Error(result.reason || 'The reply could not be sent.');
+        setBody('');
+        onSent();
+      }, 'Reply sent.');
+    }}>
+      <TextArea label="Reply" value={body} onChange={setBody} rows={4} width="100%" isDisabled={action.busy} />
+      <Feedback error={action.error} />
+      <div className="ov-actions ov-actions--end">
+        <Button type="submit" variant="primary" label="Send reply" isDisabled={!reply} isLoading={action.busy} />
+      </div>
     </form>
   </div>;
 }
@@ -651,15 +655,19 @@ function InboxThreadDrawer({ thread, onClose, onChanged }: { thread: InboxThread
         {messages.map(item => <InboxMessage key={item.id} item={item} mailboxId={thread.mailboxId} threadSubject={subject} />)}
       </ol>
       {snapshot.canReply ? <InboxReply params={params} onSent={() => { detail.refresh(); onChanged(); }} /> : null}
-      <InboxTeamPanel mailboxId={thread.mailboxId} threadId={thread.threadId} />
+      <InboxTeamPanel mailboxId={thread.mailboxId} threadId={thread.threadId} onChanged={onChanged} />
     </>}
   </SlideDrawer>;
 }
 
-function MailboxThreads({ query, unreadOnly, focusFilter }: { query: string; unreadOnly: boolean; focusFilter: () => void }) {
+function MailboxThreads({ query, unreadOnly, status, assignment, focusFilter }: {
+  query: string; unreadOnly: boolean; status: string | null; assignment: string | null; focusFilter: () => void;
+}) {
   const params = new URLSearchParams();
   if (query) params.set('q', query);
   if (unreadOnly) params.set('unread', 'true');
+  if (status) params.set('status', status);
+  if (assignment) params.set('assignment', assignment);
   const threads = useResource<InboxThreadSummary[]>(`/sales/inbox/threads${params.size ? `?${params}` : ''}`);
   const [selected, setSelected] = useState<InboxThreadSummary | null>(null);
   return <>
@@ -674,8 +682,10 @@ function MailboxThreads({ query, unreadOnly, focusFilter }: { query: string; unr
                 <Text weight="semibold">{subject}</Text>
                 <InboxDirection direction={thread.direction} />
                 {thread.unread ? <StatusBadge label="Unread" tone="neutral" /> : null}
+                {thread.status === 'pending' || thread.status === 'resolved'
+                  ? <StatusBadge label={inboxTeamStatusLabels[thread.status]} tone={thread.status === 'resolved' ? 'success' : 'warning'} /> : null}
               </span>
-              <Text type="supporting" color="secondary">{[counterpart, thread.mailboxEmail, thread.count === 1 ? '1 message' : `${thread.count} messages`].filter(Boolean).join(' · ')}</Text>
+              <Text type="supporting" color="secondary">{[counterpart, thread.mailboxEmail, thread.assigneeName, thread.count === 1 ? '1 message' : `${thread.count} messages`].filter(Boolean).join(' · ')}</Text>
               {thread.snippet ? <Text type="supporting" className="ov-crm-inbox-preview">{thread.snippet}</Text> : null}
             </span>
             <div className="ov-actions">
@@ -685,7 +695,7 @@ function MailboxThreads({ query, unreadOnly, focusFilter }: { query: string; unr
           </li>;
         })}
       </ul>
-    ) : query ? <Empty title="No matching conversations" />
+    ) : query || status || assignment ? <Empty title="No matching conversations" />
       : unreadOnly ? <Empty title="No unread conversations" />
       : <Empty title="No mailbox conversations yet" description="Synced email with CRM contacts appears here when you connect a mailbox or a teammate shares one with you." />}
     {selected ? <InboxThreadDrawer thread={selected} onChanged={threads.refresh} onClose={() => {
@@ -700,25 +710,36 @@ export function SalesInbox() {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [assignment, setAssignment] = useState<string | null>(null);
   const unreadFilter = useRef<HTMLInputElement>(null);
   return <div className="ov-stack">
     <PageHeader title="Inbox" description="Review synced mailbox conversations and email activity recorded in CRM."
       actions={<Button label="Mailbox settings" href="/settings/mailboxes" icon={<Inbox size={15} />} />} />
     <Panel>
-      <Toolbar end={<form className="ov-crm-inbox-search" role="search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); }}>
-        <TextInput label="Search email" isLabelHidden type="search" startIcon="search" placeholder="Subject, address or message" width="100%"
+      <Toolbar end={view !== 'response' ? <form className="ov-crm-inbox-search" role="search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); }}>
+        <TextInput label="Search email" isLabelHidden type="search" startIcon="search" placeholder="Subject, address or snippet" width="100%"
           hasClear value={search} onChange={value => { setSearch(value.slice(0, 200)); if (!value) setQuery(''); }} />
         <Button type="submit" label="Search" />
-      </form>}>
+      </form> : undefined}>
         <SegmentedControl label="Inbox view" value={view} onChange={setView}>
           <SegmentedControlItem value="conversations" label="Conversations" />
           <SegmentedControlItem value="activity" label="Contact activity" />
+          <SegmentedControlItem value="response" label="Response times" />
         </SegmentedControl>
         {view === 'conversations' ? <Switch label="Unread only" value={unreadOnly} onChange={setUnreadOnly} ref={unreadFilter} /> : null}
       </Toolbar>
-      {view === 'conversations'
-        ? <MailboxThreads key={`${unreadOnly}:${query}`} query={query} unreadOnly={unreadOnly} focusFilter={() => unreadFilter.current?.focus()} />
-        : <ContactEmailActivity query={query} />}
+      {view === 'conversations' ? <>
+        <div className="ov-form-grid">
+          <Selector label="Status" size="sm" value={status ?? 'any'} onChange={value => setStatus(value === 'any' ? null : value)}
+            options={[{ value: 'any', label: 'Any status' }, ...inboxTeamStatuses.map(value => ({ value, label: inboxTeamStatusLabels[value] }))]} />
+          <Selector label="Assignment" size="sm" value={assignment ?? 'any'} onChange={value => setAssignment(value === 'any' ? null : value)}
+            options={[{ value: 'any', label: 'Anyone' }, { value: 'mine', label: 'Assigned to me' }, { value: 'unassigned', label: 'Unassigned' }]} />
+        </div>
+        <MailboxThreads key={JSON.stringify([unreadOnly, query, status, assignment])} query={query} unreadOnly={unreadOnly}
+          status={status} assignment={assignment} focusFilter={() => unreadFilter.current?.focus()} />
+      </> : view === 'activity' ? <ContactEmailActivity query={query} /> : null}
     </Panel>
+    {view === 'response' ? <InboxResponseReportPanel /> : null}
   </div>;
 }

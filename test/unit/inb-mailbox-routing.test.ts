@@ -17,7 +17,7 @@ async function addUser(name: string, role: User['role'] = 'marketer'): Promise<U
   return user;
 }
 
-test('INB-17 default routing applies once and rechecks mailbox ownership and active membership', async () => {
+test('INB-22 default routing applies once and rechecks mailbox ownership and active membership', async () => {
   const owner = await addUser('routing-owner');
   const member = await addUser('routing-member');
   const admin = await addUser('routing-admin', 'admin');

@@ -13,13 +13,13 @@ import { AsyncState, ConfirmDialog, Feedback, FormActions, Modal, Panel } from '
 
 const savedRepliesPath = '/sales/inbox/saved-replies';
 const statusOptions = inboxTeamStatuses.map(status => ({ value: status, label: inboxTeamStatusLabels[status] }));
-type Location = { mailboxId: string; threadId: string };
+type Location = { mailboxId: string; threadId: string; onChanged: () => void };
 
-export function InboxTeamPanel({ mailboxId, threadId }: Location) {
-  return <TeamPanel key={JSON.stringify([mailboxId, threadId])} mailboxId={mailboxId} threadId={threadId} />;
+export function InboxTeamPanel({ mailboxId, threadId, onChanged }: Location) {
+  return <TeamPanel key={JSON.stringify([mailboxId, threadId])} mailboxId={mailboxId} threadId={threadId} onChanged={onChanged} />;
 }
 
-function TeamPanel({ mailboxId, threadId }: Location) {
+function TeamPanel({ mailboxId, threadId, onChanged }: Location) {
   const query = new URLSearchParams({ mailboxId, threadId }).toString();
   const path = `/sales/inbox/team?${query}`;
   const resource = useResource<InboxTeam>(path);
@@ -29,6 +29,7 @@ function TeamPanel({ mailboxId, threadId }: Location) {
   const update = (input: InboxTeamPatch) => void action.run(async () => {
     await api<InboxTeam>(path, 'PATCH', input);
     resource.refresh();
+    onChanged();
   }, 'Conversation updated.');
 
   return <Panel title="Team inbox">
