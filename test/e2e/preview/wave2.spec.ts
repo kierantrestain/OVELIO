@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import type { CalendarOverview } from '../../../src/contracts/calendar';
 import type { ContactProfile } from '../../../src/contracts/crm';
 import type { FlowDetail, InboundHook } from '../../../src/contracts/journeys';
+import type { PageDesign } from '../../../src/contracts/sites';
 import { anonymous, evidence, expect, horizontalOverflow, isPreviewRun, json, test, unique } from './fixtures';
 
 // Wave two independent acceptance (Intelligence & Quality): the connected revenue journey and outcome-based
@@ -9,6 +10,71 @@ import { anonymous, evidence, expect, horizontalOverflow, isPreviewRun, json, te
 test.skip(!isPreviewRun, 'Preview harness only: npm run build && npm run test:e2e:preview');
 
 type Quote = { id: string; status: string; publicUrl: string | null; totals: { total: number }; invoices: { id: string; kind: string; total: number; status: string }[] };
+
+test('SIT-18 insert and publish a booking button that opens the native scheduler on a phone', async ({ page, browser, baseURL, guard }, testInfo) => {
+  const origin = new URL(baseURL!).origin;
+  const marker = unique();
+  const bookingName = `Page consultation ${marker}`;
+  const bookingSlug = `page-consultation-${marker}`;
+  const landingSlug = `booking-button-${marker}`;
+  const calendar = await json<CalendarOverview>(await page.request.get('/api/console/calendar'));
+  const hostId = calendar.hosts[0].id;
+  await json(await page.request.patch('/api/console/calendar/availability', { headers: { origin }, data: {
+    timeZone: 'Europe/London', windows: [1, 2, 3, 4, 5].map(weekday => ({ weekday, start: '09:00', end: '17:00' })),
+  } }));
+  await json(await page.request.post('/api/console/calendar/types', { headers: { origin }, data: {
+    hostIds: [hostId], name: bookingName, slug: bookingSlug, active: true, bufferMinutes: 0, durationMinutes: 30,
+  } }));
+  const landing = await json<{ id: string }>(await page.request.post('/api/console/sites/pages', { headers: { origin }, data: {
+    name: 'Book a consultation', slug: landingSlug, templateKey: 'blank',
+  } }));
+  const designPath = `/api/console/sites/pages/${landing.id}/design`;
+  const design = await json<PageDesign>(await page.request.get(designPath));
+  await json(await page.request.patch(designPath, { headers: { origin }, data: {
+    version: design.version, document: design.document, css: design.css,
+    html: design.html.replace('Your headline', 'Book a consultation')
+      .replace('Drag sections from the left panel to build your page.', 'Bring your questions to a 30-minute call. We’ll talk through your goals and agree the next step.'),
+  } }));
+
+  const studio = `/studio/page/${landing.id}`;
+  const label = 'Choose a consultation time';
+  await page.goto(studio);
+  const addBooking = page.getByRole('button', { name: 'Add booking button' });
+  await expect(addBooking).toBeEnabled();
+  await addBooking.press('Enter');
+  const select = page.getByRole('combobox', { name: 'Booking type' })
+    .or(page.getByRole('button', { name: /^Booking type(?: Choose a booking type)?$/ }));
+  await select.click();
+  await page.getByRole('option', { name: bookingName }).click();
+  await page.getByLabel('Button text').fill(label);
+  const canvasBooking = page.frameLocator('iframe.gjs-frame').locator('a[data-ovelio-booking]');
+  await expect(canvasBooking).toHaveText(label);
+  await expect(page.getByText('All changes saved')).toBeVisible({ timeout: 20_000 });
+  await evidence(page, testInfo, '/studio/booking-button');
+  await page.reload();
+  await expect(canvasBooking).toHaveText(label);
+  await page.getByRole('button', { name: 'Publish', exact: true }).click();
+  const publish = page.getByRole('dialog', { name: 'Publish and settings' });
+  await publish.getByRole('button', { name: 'Publish now' }).click();
+  await expect(publish.getByText(/Published\. Live at/)).toBeVisible({ timeout: 20_000 });
+  expect(guard.problems()).toEqual([]);
+
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  try {
+    const visitor = await phone.newPage();
+    await visitor.goto(`${origin}/s/${landingSlug}`);
+    const link = visitor.getByRole('link', { name: label });
+    await expect(link).toHaveAttribute('href', `/book/${bookingSlug}`);
+    expect(await horizontalOverflow(visitor)).toEqual([]);
+    await evidence(visitor, testInfo, '/s/booking-button-mobile');
+    await link.click();
+    await expect(visitor).toHaveURL(`${origin}/book/${bookingSlug}`);
+    await expect(visitor.getByRole('heading', { name: bookingName })).toBeVisible();
+    await expect(visitor.getByRole('button', { name: 'Confirm booking' })).toBeVisible();
+  } finally {
+    await phone.close();
+  }
+});
 
 test('IQ-24 public booking on a phone links to CRM and starts an appointment workflow', async ({ page, browser, baseURL }, testInfo) => {
   const origin = new URL(baseURL!).origin;

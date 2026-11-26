@@ -10,6 +10,7 @@ import { getContact, upsertContact } from '../directory';
 import { emitEvent } from '../events';
 import { sendDesign } from '../mailer';
 import { createTask, resolveCampaignId } from '../records';
+import { hydrateBookingLinks } from './booking-links';
 import type { DomainRow, FormRow, PageRow, VariantRow } from './data';
 import { formSettings, getForm, pageUrl, uuidPattern } from './data';
 import { validateAnswers } from './forms';
@@ -89,7 +90,7 @@ export async function servePage(request: Request, slug: string, hostname?: strin
   const html = chosen ? chosen.published_html : page.published_html;
   const css = chosen ? chosen.published_css : page.published_css;
   const funnel = await funnelForPage(page.id, url.searchParams.get('fn'));
-  const forms = await formsByIds(boundFormIds(html));
+  const [forms, withBookings] = await Promise.all([formsByIds(boundFormIds(html)), hydrateBookingLinks(html, Boolean(domain))]);
   let nextUrl: string | null = null;
   if (funnel?.nextPage) {
     const target = pageUrl(funnel.nextPage, funnel.nextPage.domain);
@@ -100,7 +101,7 @@ export async function servePage(request: Request, slug: string, hostname?: strin
   const visitor = cookie(request, 'ov_vid');
   const known = new Map<string, Set<string>>();
   for (const form of forms.values()) known.set(form.id, await knownFields(form, visitor));
-  const body = hydratePage(html, forms, { pageId: page.id, variant, funnelId: funnel?.funnelId ?? null, stepIndex: funnel?.stepIndex ?? null }, nextUrl, known);
+  const body = hydratePage(withBookings, forms, { pageId: page.id, variant, funnelId: funnel?.funnelId ?? null, stepIndex: funnel?.stepIndex ?? null }, nextUrl, known);
   const document = renderDocument({
     title: page.seo_title || page.name, description: page.seo_description, canonicalUrl: canonical, ogImageUrl: page.og_image_url,
     faviconUrl: page.favicon_url, noindex: page.noindex, css, bodyHtml: body,
