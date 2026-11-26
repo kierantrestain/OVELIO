@@ -398,11 +398,15 @@ export type Sequence = {
   status: SequenceStatus;
   steps: SequenceStep[];
   counts: { active: number; completed: number; stopped: number };
+  /** Email steps marked "send window only" wait for these hours and weekdays (0 = Sunday) in the recipient's time zone. */
+  sendWindow: { start: number; end: number; days: number[] };
+  /** Most sequence emails one sender may send per day (UTC); further steps wait for the next day's window. */
+  dailyLimit: number;
   createdAt: string;
   updatedAt: string;
 };
 
-export type SequenceInput = { name: string; description?: string; status?: SequenceStatus; steps: Omit<SequenceStep, 'id' | 'position'>[] };
+export type SequenceInput = { name: string; description?: string; status?: SequenceStatus; steps: Omit<SequenceStep, 'id' | 'position'>[]; sendWindow?: Sequence['sendWindow']; dailyLimit?: number };
 
 export type StepRunStatus = 'sent' | 'blocked' | 'not_sent' | 'failed' | 'task_created' | 'skipped';
 
@@ -422,6 +426,8 @@ export type SequenceEnrolment = {
   stepCount: number;
   nextRunAt: string | null;
   stoppedReason: string;
+  /** Why the next step is waiting, e.g. outside the recipient's send window or the sender's daily limit. */
+  waitReason: string;
   senderName: string;
   enrolledAt: string;
   finishedAt: string | null;

@@ -14,7 +14,10 @@ import { schedulePlatformJob } from '../platform/jobs';
 import { createTask } from '../records';
 import { route } from '../routes/shared';
 import type { Entry } from '../routes/shared';
+import { engineContactCountry } from './engine';
 import { textToHtml } from './people';
+import { describeWindow, nextSendTime, zoneForCountry } from './send-window';
+import type { SendWindow } from './send-window';
 import { uuid } from './shared';
 
 export const SEQUENCE_JOB = 'crm.sequence_step';
@@ -49,6 +52,9 @@ const sequenceInput = z.object({
   description: z.string().trim().max(500).default(''),
   status: z.enum(['active', 'paused', 'archived']).optional(),
   steps: z.array(stepInput).min(1).max(20),
+  sendWindow: z.object({ start: z.number().int().min(0).max(23), end: z.number().int().min(1).max(24), days: z.array(z.number().int().min(0).max(6)).min(1).max(7) })
+    .refine(window => window.end > window.start, 'The send window must end after it starts.').optional(),
+  dailyLimit: z.number().int().min(1).max(2000).optional(),
 });
 
 /** Moves a send into Monday-Friday 09:00-17:00 UTC. */
@@ -68,9 +74,36 @@ export function businessTime(at: Date): Date {
   return next;
 }
 
-export function stepRunAt(step: { delayDays: number; businessHours: boolean }, from = new Date()): Date {
-  const at = new Date(from.getTime() + step.delayDays * 86_400_000);
-  return step.businessHours ? businessTime(at) : at;
+/** When a step becomes due. Send windows are applied when it runs, in the recipient's own time zone. */
+export function stepRunAt(step: { delayDays: number }, from = new Date()): Date {
+  return new Date(from.getTime() + step.delayDays * 86_400_000);
+}
+
+/**
+ * Whether an email step must wait: outside the recipient's send window (for steps marked "send window only"), or the
+ * sender has reached the sequence's daily limit (UTC day). Returns when to try again and why.
+ */
+export async function emailWait(enrolment: { contact_id: string; sender_id: string | null; window_start: number; window_end: number; window_days: number[] | string; daily_limit: number },
+  useWindow: boolean, now = new Date()): Promise<{ at: Date; reason: string } | null> {
+  const window: SendWindow = {
+    start: enrolment.window_start, end: enrolment.window_end,
+    days: (Array.isArray(enrolment.window_days) ? enrolment.window_days : String(enrolment.window_days).replace(/[{}]/g, '').split(',').filter(Boolean)).map(Number),
+  };
+  const zone = zoneForCountry(await engineContactCountry(Number(enrolment.contact_id)).catch(() => ''));
+  if (useWindow) {
+    const next = nextSendTime(now, zone, window);
+    if (next.getTime() > now.getTime() + 60_000) return { at: next, reason: `Waiting for the recipient's send window (${describeWindow(window, zone)}).` };
+  }
+  if (enrolment.sender_id) {
+    const sent = await db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM messages WHERE created_by = $1 AND source LIKE 'sequence:%' AND status <> 'blocked' AND created_at >= date_trunc('day', now())`,
+      [enrolment.sender_id]);
+    if (Number(sent.rows[0].n) >= enrolment.daily_limit) {
+      const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+      return { at: useWindow ? nextSendTime(tomorrow, zone, window) : tomorrow, reason: `The sender reached this sequence's daily limit of ${enrolment.daily_limit} emails; it continues tomorrow.` };
+    }
+  }
+  return null;
 }
 
 type StepRow = { id: string; sequence_id: string; position: number; kind: 'email' | 'task'; delay_days: number; business_hours: boolean; subject: string; body: string; task_title: string; task_type: SequenceStep['taskType'] };
@@ -81,8 +114,9 @@ const toStep = (row: StepRow): SequenceStep => ({
 });
 
 export async function listSequences(ids?: string[]): Promise<Sequence[]> {
-  const rows = await db.query<{ id: string; name: string; description: string; status: Sequence['status']; created_at: Date; updated_at: Date; active: string; completed: string; stopped: string }>(
-    `SELECT s.id, s.name, s.description, s.status, s.created_at, s.updated_at,
+  const rows = await db.query<{ id: string; name: string; description: string; status: Sequence['status']; created_at: Date; updated_at: Date; active: string; completed: string; stopped: string;
+    window_start: number; window_end: number; window_days: number[] | string; daily_limit: number }>(
+    `SELECT s.id, s.name, s.description, s.status, s.created_at, s.updated_at, s.window_start, s.window_end, s.window_days, s.daily_limit,
        count(e.id) FILTER (WHERE e.status = 'active') AS active, count(e.id) FILTER (WHERE e.status = 'completed') AS completed,
        count(e.id) FILTER (WHERE e.status = 'stopped') AS stopped
      FROM crm_sequences s LEFT JOIN crm_sequence_enrolments e ON e.sequence_id = s.id
@@ -93,6 +127,8 @@ export async function listSequences(ids?: string[]): Promise<Sequence[]> {
     id: row.id, name: row.name, description: row.description, status: row.status,
     steps: steps.rows.filter(step => step.sequence_id === row.id).map(toStep),
     counts: { active: Number(row.active), completed: Number(row.completed), stopped: Number(row.stopped) },
+    sendWindow: { start: row.window_start, end: row.window_end, days: (Array.isArray(row.window_days) ? row.window_days : String(row.window_days).replace(/[{}]/g, '').split(',').filter(Boolean)).map(Number) },
+    dailyLimit: row.daily_limit,
     createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
   }));
 }
@@ -110,6 +146,12 @@ export async function saveSequence(input: z.infer<typeof sequenceInput>, actorId
         [id, input.name, input.description, input.status ?? null])
       : await client.query<{ id: string }>('INSERT INTO crm_sequences (name, description, status, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
         [input.name, input.description, input.status ?? 'active', actorId]);
+    if (saved.rows[0] && (input.sendWindow || input.dailyLimit)) {
+      await client.query(
+        `UPDATE crm_sequences SET window_start = coalesce($2, window_start), window_end = coalesce($3, window_end),
+           window_days = coalesce($4::smallint[], window_days), daily_limit = coalesce($5, daily_limit) WHERE id = $1`,
+        [saved.rows[0].id, input.sendWindow?.start ?? null, input.sendWindow?.end ?? null, input.sendWindow?.days ?? null, input.dailyLimit ?? null]);
+    }
     if (!saved.rows[0]) throw new AppError(404, 'That sequence was not found.');
     const sequence = saved.rows[0].id;
     await client.query('DELETE FROM crm_sequence_steps WHERE sequence_id = $1', [sequence]);
@@ -128,7 +170,7 @@ export async function saveSequence(input: z.infer<typeof sequenceInput>, actorId
 
 type EnrolmentRow = {
   id: string; sequence_id: string; sequence_name: string; contact_id: string; contact_name: string; contact_email: string; status: SequenceEnrolment['status'];
-  next_position: number; step_count: string; next_run_at: Date | null; stopped_reason: string; sender_name: string | null; enrolled_at: Date; finished_at: Date | null;
+  next_position: number; step_count: string; next_run_at: Date | null; stopped_reason: string; wait_reason: string; sender_name: string | null; enrolled_at: Date; finished_at: Date | null;
 };
 
 export async function enrolmentsFor(filter: { contactId?: number; sequenceId?: string; id?: string }): Promise<SequenceEnrolment[]> {
@@ -139,7 +181,7 @@ export async function enrolmentsFor(filter: { contactId?: number; sequenceId?: s
   if (filter.id) { values.push(filter.id); where.push(`e.id = $${values.length}`); }
   const rows = await db.query<EnrolmentRow>(
     `SELECT e.id, e.sequence_id, s.name AS sequence_name, e.contact_id, e.contact_name, e.contact_email, e.status, e.next_position,
-       (SELECT count(*) FROM crm_sequence_steps st WHERE st.sequence_id = e.sequence_id) AS step_count, e.next_run_at, e.stopped_reason,
+       (SELECT count(*) FROM crm_sequence_steps st WHERE st.sequence_id = e.sequence_id) AS step_count, e.next_run_at, e.stopped_reason, e.wait_reason,
        u.name AS sender_name, e.enrolled_at, e.finished_at
      FROM crm_sequence_enrolments e JOIN crm_sequences s ON s.id = e.sequence_id LEFT JOIN users u ON u.id = e.sender_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY e.enrolled_at DESC LIMIT 300`, values,
@@ -151,7 +193,7 @@ export async function enrolmentsFor(filter: { contactId?: number; sequenceId?: s
   return rows.rows.map(row => ({
     id: row.id, sequenceId: row.sequence_id, sequenceName: row.sequence_name, contactId: Number(row.contact_id), contactName: row.contact_name,
     contactEmail: row.contact_email, status: row.status, nextPosition: row.next_position, stepCount: Number(row.step_count),
-    nextRunAt: row.next_run_at ? new Date(row.next_run_at).toISOString() : null, stoppedReason: row.stopped_reason, senderName: row.sender_name ?? '',
+    nextRunAt: row.next_run_at ? new Date(row.next_run_at).toISOString() : null, stoppedReason: row.stopped_reason, waitReason: row.wait_reason ?? '', senderName: row.sender_name ?? '',
     enrolledAt: new Date(row.enrolled_at).toISOString(), finishedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
     runs: runs.rows.filter(run => run.enrolment_id === row.id).map(run => ({
       position: run.position, kind: run.kind, status: run.status, reason: run.reason, messageId: run.message_id, taskId: run.task_id,
@@ -205,8 +247,10 @@ export async function stopEnrolment(id: string, reason: string) {
 
 /** Job handler: runs the enrolment's next step, records the result, and queues the step after it. */
 export async function runSequenceStep(data: { enrolmentId: string; position?: number }) {
-  const enrolment = (await db.query<{ id: string; sequence_id: string; contact_id: string; contact_email: string; next_position: number; sender_id: string | null; deal_id: string | null; status: string; seq_status: string }>(
-    `SELECT e.id, e.sequence_id, e.contact_id, e.contact_email, e.next_position, e.sender_id, e.deal_id, e.status, s.status AS seq_status
+  const enrolment = (await db.query<{ id: string; sequence_id: string; contact_id: string; contact_email: string; next_position: number; sender_id: string | null; deal_id: string | null; status: string; seq_status: string;
+    window_start: number; window_end: number; window_days: number[] | string; daily_limit: number }>(
+    `SELECT e.id, e.sequence_id, e.contact_id, e.contact_email, e.next_position, e.sender_id, e.deal_id, e.status, s.status AS seq_status,
+       s.window_start, s.window_end, s.window_days, s.daily_limit
      FROM crm_sequence_enrolments e JOIN crm_sequences s ON s.id = e.sequence_id WHERE e.id = $1`, [data.enrolmentId])).rows[0];
   if (!enrolment || enrolment.status !== 'active') return;
   if (data.position != null && data.position !== enrolment.next_position) return;
@@ -228,6 +272,12 @@ export async function runSequenceStep(data: { enrolmentId: string; position?: nu
     let messageId: string | null = null;
     let taskId: string | null = null;
     if (step.kind === 'email') {
+      const wait = await emailWait(enrolment, step.businessHours);
+      if (wait) {
+        await db.query('UPDATE crm_sequence_enrolments SET next_run_at = $2, wait_reason = $3 WHERE id = $1', [enrolment.id, wait.at.toISOString(), wait.reason]);
+        await scheduleStep(enrolment.id, enrolment.next_position, wait.at);
+        return;
+      }
       const sender = enrolment.sender_id ? (await db.query<{ email: string; name: string }>('SELECT email, name FROM users WHERE id = $1', [enrolment.sender_id])).rows[0] : undefined;
       const result = await sendEmail({
         to: enrolment.contact_email, subject: step.subject, html: textToHtml(step.body), category: 'sales', source: `sequence:${enrolment.sequence_id}`,
@@ -253,7 +303,7 @@ export async function runSequenceStep(data: { enrolmentId: string; position?: nu
     return finish(enrolment.id, 'completed');
   }
   const runAt = stepRunAt(next);
-  await db.query('UPDATE crm_sequence_enrolments SET next_position = next_position + 1, next_run_at = $2 WHERE id = $1', [enrolment.id, runAt.toISOString()]);
+  await db.query(`UPDATE crm_sequence_enrolments SET next_position = next_position + 1, next_run_at = $2, wait_reason = '' WHERE id = $1`, [enrolment.id, runAt.toISOString()]);
   await scheduleStep(enrolment.id, enrolment.next_position + 1, runAt);
 }
 

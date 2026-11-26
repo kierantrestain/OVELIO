@@ -96,6 +96,32 @@ test('CR-04 cards carry next action, last touch and health; a move into a stage 
   await call('PATCH', `sales/stages/${proposal.id}`, { requiredFields: [] });
 });
 
+test('CR-05 sequence steps wait for the recipient’s send window and the sender’s daily limit', async () => {
+  const { nextSendTime, zoneForCountry } = await import('../../src/server/crm/send-window');
+  const { drainPlatformJobs } = await import('../../src/server/platform/jobs');
+  const window = { start: 9, end: 17, days: [1, 2, 3, 4, 5] };
+  assert.equal(zoneForCountry('United States'), 'America/New_York');
+  assert.equal(zoneForCountry('Atlantis', {} as unknown as NodeJS.ProcessEnv), 'UTC');
+  assert.equal(nextSendTime(new Date('2026-11-28T10:00:00Z'), 'Europe/London', window).toISOString(), '2026-11-30T09:00:00.000Z', 'Saturday waits for Monday 09:00');
+  assert.equal(nextSendTime(new Date('2026-11-30T12:00:00Z'), 'America/New_York', window).toISOString(), '2026-11-30T14:00:00.000Z', '07:00 in New York waits for 09:00 local');
+  const inside = new Date('2026-12-01T10:30:00Z');
+  assert.equal(nextSendTime(inside, 'Europe/London', window), inside);
+  const sequence = await call<{ id: string; dailyLimit: number }>('POST', 'sales/sequences', {
+    name: 'CR-05 limited', dailyLimit: 1, sendWindow: { start: 0, end: 24, days: [0, 1, 2, 3, 4, 5, 6] },
+    steps: [{ kind: 'email', delayDays: 0, businessHours: false, subject: 'Hi {{contact.first_name}}', body: 'Hello' }],
+  });
+  assert.equal(sequence.dailyLimit, 1);
+  const [claire] = await searchContacts('claire');
+  const [daniel] = await searchContacts('daniel');
+  await call('POST', `sales/sequences/${sequence.id}/enrol`, { contactIds: [claire.id, daniel.id] });
+  await drainPlatformJobs({ maxJobs: 200 });
+  const enrolments = await call<{ runs: unknown[]; waitReason: string; nextRunAt: string }[]>('GET', `sales/sequences/${sequence.id}/enrolments`);
+  assert.equal(enrolments.filter(item => item.runs.length === 1).length, 1, 'one email goes out today');
+  const waiting = enrolments.find(item => item.runs.length === 0)!;
+  assert.match(waiting.waitReason, /daily limit of 1/);
+  assert.ok(Date.parse(waiting.nextRunAt) > Date.now(), 'the other waits for tomorrow');
+});
+
 test('CR-02 duplicates are detected by email or name and company, and a merge moves every OVELIO record to the survivor', async () => {
   const { upsertContact, getContact } = await import('../../src/server/directory');
   const { listEvents } = await import('../../src/server/events');

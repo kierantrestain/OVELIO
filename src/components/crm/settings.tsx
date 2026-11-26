@@ -256,6 +256,8 @@ function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; o
   const [name, setName] = useState(sequence?.name ?? '');
   const [description, setDescription] = useState(sequence?.description ?? '');
   const [steps, setSteps] = useState<DraftStep[]>(sequence?.steps.map(step => ({ ...step, key: stepKey++ })) ?? [newStep('email', 0)]);
+  const [sendWindow, setSendWindow] = useState(sequence?.sendWindow ?? { start: 9, end: 17, days: [1, 2, 3, 4, 5] });
+  const [dailyLimit, setDailyLimit] = useState(sequence?.dailyLimit ?? 50);
   const update = (key: number, patch: Partial<DraftStep>) => setSteps(current => current.map(step => step.key === key ? { ...step, ...patch } : step));
   const move = (index: number, by: number) => setSteps(current => arrayMove(current, index, index + by));
   return <SlideDrawer title={sequence ? 'Edit sequence' : 'New sequence'} subtitle="Emails send through OVELIO’s mailer with consent checks. A reply, unsubscribe, bounce or won deal stops it." onClose={onClose} width={680}>
@@ -264,12 +266,23 @@ function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; o
       void action.run(async () => {
         const body: SequenceInput = { name: name.trim(), description: description.trim(), steps: steps.map(step => ({
           kind: step.kind, delayDays: step.delayDays, businessHours: step.businessHours, subject: step.subject, body: step.body, taskTitle: step.taskTitle, taskType: step.taskType,
-        })) };
+        })), sendWindow, dailyLimit };
         onSaved(await api<Sequence>(sequence ? `/sales/sequences/${sequence.id}` : '/sales/sequences', sequence ? 'PATCH' : 'POST', body));
       }, 'Sequence saved.');
     }}>
       <TextInput label="Name" isRequired value={name} onChange={setName} placeholder="New lead follow-up" />
       <TextInput label="Description" isOptional value={description} onChange={setDescription} />
+      <div className="ov-crm-step">
+        <Text weight="semibold">Send window and limits</Text>
+        <div className="ov-form-grid">
+          <NumberInput label="Window opens (hour)" min={0} max={23} isIntegerOnly value={sendWindow.start} onChange={value => setSendWindow(current => ({ ...current, start: value ?? 9 }))} />
+          <NumberInput label="Window closes (hour)" min={1} max={24} isIntegerOnly value={sendWindow.end} onChange={value => setSendWindow(current => ({ ...current, end: value ?? 17 }))} />
+          <MultiSelector label="Sending days" value={sendWindow.days.map(String)} onChange={value => setSendWindow(current => ({ ...current, days: value.map(Number).sort() }))}
+            options={['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, index) => ({ value: String(index), label: day }))} />
+          <NumberInput label="Daily emails per sender" min={1} max={2000} isIntegerOnly value={dailyLimit} onChange={value => setDailyLimit(value ?? 50)} />
+        </div>
+        <Text type="supporting" color="secondary">Hours are in each recipient’s local time, from their country (otherwise the workspace zone, OVELIO_TIMEZONE). Email steps marked “send window only” wait for the next window; any email waits for the next day once the sender reaches the limit.</Text>
+      </div>
       {steps.map((step, index) => <div key={step.key} className="ov-crm-step">
         <div className="ov-actions ov-actions--between">
           <Text weight="semibold">Step {index + 1} · {step.kind === 'email' ? 'Email' : 'Task'}</Text>
@@ -281,7 +294,7 @@ function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; o
         </div>
         <div className="ov-form-grid">
           <NumberInput label={index === 0 ? 'Days after enrolment' : 'Days after previous step'} min={0} max={365} isIntegerOnly value={step.delayDays} onChange={value => update(step.key, { delayDays: value ?? 0 })} />
-          <Switch label="Business hours only" description="Mon–Fri, 09:00–17:00 UTC" value={step.businessHours} onChange={value => update(step.key, { businessHours: value })} />
+          <Switch label="Send window only" description="Wait for the recipient’s send window" value={step.businessHours} onChange={value => update(step.key, { businessHours: value })} />
         </div>
         {step.kind === 'email' ? <>
           <TextInput label="Subject" isRequired value={step.subject} onChange={value => update(step.key, { subject: value })} />
@@ -331,6 +344,7 @@ function Enrolments({ sequence, onChanged }: { sequence: Sequence; onChanged: ()
           <Text type="supporting" color="secondary">{item.status === 'active' ? `Step ${Math.min(item.nextPosition + 1, item.stepCount)} of ${item.stepCount}${item.nextRunAt ? ` · next ${dateTime(item.nextRunAt)}` : ''}` : item.stoppedReason || `Completed ${shortDate(item.finishedAt)}`}</Text>
           <span className="ov-actions">{item.runs.map(run => <span key={run.position} title={run.reason}><StatusBadge label={`${run.position + 1}: ${runLabel[run.status]?.[0] ?? run.status}`} tone={runLabel[run.status]?.[1] ?? 'neutral'} /></span>)}</span>
           {item.runs.filter(run => run.reason && run.status !== 'sent').slice(-1).map(run => <Text key={run.position} type="supporting" color="secondary">{run.reason}</Text>)}
+          {item.status === 'active' && item.waitReason ? <Text type="supporting" color="secondary">{item.waitReason}</Text> : null}
         </span>
         {item.status === 'active' ? <Button size="sm" variant="ghost" label="Stop" onClick={() => void action.run(async () => { await api(`/sales/enrolments/${item.id}/stop`, 'POST'); enrolments.refresh(); onChanged(); }, 'Stopped.')} />
           : <StatusBadge label={item.status === 'completed' ? 'Completed' : 'Stopped'} tone={item.status === 'completed' ? 'success' : 'warning'} />}
