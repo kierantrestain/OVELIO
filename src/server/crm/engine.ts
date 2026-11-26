@@ -114,6 +114,13 @@ export async function companyPeople(company: { id: number; name: string }, limit
   return { items: page.items.map(item => toDirectoryContact(item)), total: page.total };
 }
 
+/** The contact's country (for lead routing), or '' when unknown. */
+export async function engineContactCountry(id: number): Promise<string> {
+  if (isDevPreviewMode()) return devPreviewContacts().find(contact => contact.id === id)?.country ?? '';
+  const { mautic } = await import('../mautic');
+  return (await mautic.contact(id)).country ?? '';
+}
+
 /** People counts for several companies; one engine call per company in production, so keep the list short. */
 export async function companyPeopleCounts(companies: { id: number; name: string }[]): Promise<Map<number, number>> {
   const counts = new Map<number, number>();

@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
+import { MultiSelector } from '@astryxdesign/core/MultiSelector';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
@@ -45,6 +46,9 @@ function StageRow({ stage, pipeline, onSaved, onDelete }: { stage: PipelineStage
     <StatusBadge label={stage.outcome === 'won' ? 'Won stage' : stage.outcome === 'lost' ? 'Lost stage' : 'Open'} tone={stage.outcome === 'won' ? 'success' : stage.outcome === 'lost' ? 'error' : 'neutral'} />
     {stage.outcome === 'open' ? <NumberInput label="Rotting after (days)" isLabelHidden placeholder="Rotting days" min={1} max={365} isIntegerOnly value={stage.rottingDays}
       onChange={value => { if (value !== stage.rottingDays) save({ rottingDays: value ?? null }); }} /> : <span />}
+    {stage.outcome !== 'lost' ? <MultiSelector label={`Required to enter ${stage.name}`} isLabelHidden placeholder="Required fields" width={190} value={stage.requiredFields ?? []}
+      options={[{ value: 'amount', label: 'Value' }, { value: 'expected_close_date', label: 'Close date' }, { value: 'contact', label: 'Contact' }, { value: 'company', label: 'Company' }]}
+      onChange={value => save({ requiredFields: value })} /> : <span />}
     <IconButton variant="ghost" label={`Delete ${stage.name}`} icon={<Trash2 size={15} />} onClick={() => onDelete(stage)}
       isDisabled={stage.outcome === 'open' && pipeline.stages.filter(item => item.outcome === 'open').length <= 1} />
     {action.error ? <Text type="supporting" color="secondary">{action.error}</Text> : null}
@@ -117,10 +121,10 @@ export function PipelineSettings() {
       </div>}>
       <PipelineFields key={pipeline.id + pipeline.name + pipeline.currency} pipeline={pipeline} onSaved={saved} />
       <div className="ov-stack-sm">
-        <Text type="supporting" color="secondary">Drag open stages to reorder them. Probability drives the weighted forecast; rotting days flag deals that sit too long in a stage.</Text>
+        <Text type="supporting" color="secondary">Drag open stages to reorder them. Probability drives the weighted forecast; rotting days flag deals that sit too long in a stage; required fields must be filled before a deal can enter the stage.</Text>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={event => void onDragEnd(event)}>
           <SortableContext items={pipeline.stages.filter(stage => stage.outcome === 'open').map(stage => stage.id)} strategy={verticalListSortingStrategy}>
-            {pipeline.stages.map(stage => <StageRow key={stage.id + stage.name + stage.probability + (stage.rottingDays ?? '')} stage={stage} pipeline={pipeline} onSaved={saved}
+            {pipeline.stages.map(stage => <StageRow key={stage.id + stage.name + stage.probability + (stage.rottingDays ?? '') + (stage.requiredFields ?? []).join()} stage={stage} pipeline={pipeline} onSaved={saved}
               onDelete={item => { setRemoving(item); setTarget(null); }} />)}
           </SortableContext>
         </DndContext>
@@ -166,6 +170,81 @@ export function PipelineSettings() {
   </div>;
 }
 
+/* ── Lead routing ─────────────────────────────────────────────────────── */
+
+type Rule = { id: string; name: string; active: boolean; matchField: 'any' | 'country' | 'source' | 'form'; matchValue: string; userIds: string[]; users: { id: string; name: string }[] };
+const matchLabel: Record<Rule['matchField'], string> = { any: 'Every new lead', country: 'Country is', source: 'Source is', form: 'Form is' };
+
+function RuleEditor({ rule, onClose, onSaved }: { rule?: Rule; onClose: () => void; onSaved: () => void }) {
+  const team = useResource<{ id: string; name: string }[]>('/platform/users');
+  const action = useAction();
+  const [name, setName] = useState(rule?.name ?? '');
+  const [field, setField] = useState<Rule['matchField']>(rule?.matchField ?? 'any');
+  const [value, setValue] = useState(rule?.matchValue ?? '');
+  const [users, setUsers] = useState<string[]>(rule?.userIds ?? []);
+  const [active, setActive] = useState(rule?.active ?? true);
+  return <Modal title={rule ? 'Edit routing rule' : 'New routing rule'} onClose={onClose}>
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        await api(rule ? `/crm/routing/${rule.id}` : '/crm/routing', rule ? 'PATCH' : 'POST', { name: name.trim(), matchField: field, matchValue: value.trim(), userIds: users, active });
+        onSaved();
+      }, 'Routing rule saved.');
+    }}>
+      <TextInput label="Rule name" isRequired value={name} onChange={setName} placeholder="UK inbound leads" />
+      <div className="ov-form-grid">
+        <Selector label="Applies to" value={field} onChange={next => setField((next as Rule['matchField']) || 'any')}
+          options={(Object.keys(matchLabel) as Rule['matchField'][]).map(key => ({ value: key, label: matchLabel[key] }))} />
+        {field !== 'any' ? <TextInput label={field === 'country' ? 'Country' : field === 'source' ? 'Source or UTM source' : 'Form id or name'} isRequired value={value} onChange={setValue}
+          placeholder={field === 'country' ? 'United Kingdom' : field === 'source' ? 'linkedin' : 'Demo request'} /> : null}
+      </div>
+      <MultiSelector label="Assign in turn to" value={users} onChange={setUsers} isLoading={team.loading}
+        options={(team.data ?? []).map(member => ({ value: member.id, label: member.name }))} description="Leads rotate through these people in order." />
+      <Switch label="Active" value={active} onChange={setActive} />
+      <Feedback error={action.error} />
+      <FormActions><Button label="Cancel" onClick={onClose} /><Button type="submit" variant="primary" label="Save rule" isLoading={action.busy} isDisabled={!name.trim() || !users.length} /></FormActions>
+    </form>
+  </Modal>;
+}
+
+export function LeadRouting() {
+  const routing = useResource<{ rules: Rule[]; recent: { contactId: number; owner: string; rule: string; at: string }[] }>('/crm/routing');
+  const action = useAction();
+  const [editing, setEditing] = useState<Rule | 'new' | null>(null);
+  const rules = routing.data?.rules ?? [];
+  const move = (index: number, by: number) => void action.run(async () => {
+    await api('/crm/routing/order', 'POST', { ids: arrayMove(rules, index, index + by).map(rule => rule.id) });
+    routing.refresh();
+  });
+  return <Panel title="Lead routing" description="New contacts without an owner (created, or from a form) go to the first matching rule, which assigns people in turn."
+    action={<Button size="sm" label="New rule" icon={<Plus size={14} />} onClick={() => setEditing('new')} />}>
+    <Feedback error={action.error} />
+    {!routing.data ? <AsyncState loading={routing.loading} error={routing.error} retry={routing.refresh} /> : rules.length ? <ul className="ov-rows">
+      {rules.map((rule, index) => <li key={rule.id}>
+        <span>
+          <span className="ov-actions"><Text weight="medium">{index + 1}. {rule.name}</Text>{rule.active ? null : <StatusBadge label="Paused" tone="neutral" />}</span>
+          <Text type="supporting" color="secondary">{matchLabel[rule.matchField]}{rule.matchField !== 'any' ? ` “${rule.matchValue}”` : ''} → {rule.users.map(user => user.name).join(', ') || 'nobody'}</Text>
+        </span>
+        <span className="ov-actions">
+          <IconButton size="sm" variant="ghost" label={`Move ${rule.name} up`} icon={<ArrowUp size={14} />} isDisabled={index === 0} onClick={() => move(index, -1)} />
+          <IconButton size="sm" variant="ghost" label={`Move ${rule.name} down`} icon={<ArrowDown size={14} />} isDisabled={index === rules.length - 1} onClick={() => move(index, 1)} />
+          <Button size="sm" label="Edit" onClick={() => setEditing(rule)} />
+          <IconButton size="sm" variant="ghost" label={`Delete ${rule.name}`} icon={<Trash2 size={14} />}
+            onClick={() => void action.run(async () => { await api(`/crm/routing/${rule.id}`, 'DELETE'); routing.refresh(); }, 'Rule deleted.')} />
+        </span>
+      </li>)}
+    </ul> : <Empty title="No routing rules" description="Without rules, new leads stay unassigned until someone takes them." />}
+    {routing.data?.recent.length ? <div className="ov-stack-sm">
+      <Text type="label" color="secondary">Recent assignments</Text>
+      <ul className="ov-rows">{routing.data.recent.map(item => <li key={`${item.contactId}-${item.at}`}>
+        <span><NextLink href={`/crm/contacts/${item.contactId}`}>Contact {item.contactId}</NextLink><Text type="supporting" color="secondary">{item.owner} · {item.rule}</Text></span>
+        <time className="ov-crm-when" dateTime={item.at}>{relative(item.at)}</time>
+      </li>)}</ul>
+    </div> : null}
+    {editing ? <RuleEditor rule={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); routing.refresh(); }} /> : null}
+  </Panel>;
+}
+
 /* ── Sequences ────────────────────────────────────────────────────────── */
 
 type DraftStep = Omit<SequenceStep, 'id' | 'position'> & { key: number };
@@ -177,6 +256,8 @@ function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; o
   const [name, setName] = useState(sequence?.name ?? '');
   const [description, setDescription] = useState(sequence?.description ?? '');
   const [steps, setSteps] = useState<DraftStep[]>(sequence?.steps.map(step => ({ ...step, key: stepKey++ })) ?? [newStep('email', 0)]);
+  const [sendWindow, setSendWindow] = useState(sequence?.sendWindow ?? { start: 9, end: 17, days: [1, 2, 3, 4, 5] });
+  const [dailyLimit, setDailyLimit] = useState(sequence?.dailyLimit ?? 50);
   const update = (key: number, patch: Partial<DraftStep>) => setSteps(current => current.map(step => step.key === key ? { ...step, ...patch } : step));
   const move = (index: number, by: number) => setSteps(current => arrayMove(current, index, index + by));
   return <SlideDrawer title={sequence ? 'Edit sequence' : 'New sequence'} subtitle="Emails send through OVELIO’s mailer with consent checks. A reply, unsubscribe, bounce or won deal stops it." onClose={onClose} width={680}>
@@ -185,12 +266,23 @@ function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; o
       void action.run(async () => {
         const body: SequenceInput = { name: name.trim(), description: description.trim(), steps: steps.map(step => ({
           kind: step.kind, delayDays: step.delayDays, businessHours: step.businessHours, subject: step.subject, body: step.body, taskTitle: step.taskTitle, taskType: step.taskType,
-        })) };
+        })), sendWindow, dailyLimit };
         onSaved(await api<Sequence>(sequence ? `/sales/sequences/${sequence.id}` : '/sales/sequences', sequence ? 'PATCH' : 'POST', body));
       }, 'Sequence saved.');
     }}>
       <TextInput label="Name" isRequired value={name} onChange={setName} placeholder="New lead follow-up" />
       <TextInput label="Description" isOptional value={description} onChange={setDescription} />
+      <div className="ov-crm-step">
+        <Text weight="semibold">Send window and limits</Text>
+        <div className="ov-form-grid">
+          <NumberInput label="Window opens (hour)" min={0} max={23} isIntegerOnly value={sendWindow.start} onChange={value => setSendWindow(current => ({ ...current, start: value ?? 9 }))} />
+          <NumberInput label="Window closes (hour)" min={1} max={24} isIntegerOnly value={sendWindow.end} onChange={value => setSendWindow(current => ({ ...current, end: value ?? 17 }))} />
+          <MultiSelector label="Sending days" value={sendWindow.days.map(String)} onChange={value => setSendWindow(current => ({ ...current, days: value.map(Number).sort() }))}
+            options={['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, index) => ({ value: String(index), label: day }))} />
+          <NumberInput label="Daily emails per sender" min={1} max={2000} isIntegerOnly value={dailyLimit} onChange={value => setDailyLimit(value ?? 50)} />
+        </div>
+        <Text type="supporting" color="secondary">Hours are in each recipient’s local time, from their country (otherwise the workspace zone, OVELIO_TIMEZONE). Email steps marked “send window only” wait for the next window; any email waits for the next day once the sender reaches the limit.</Text>
+      </div>
       {steps.map((step, index) => <div key={step.key} className="ov-crm-step">
         <div className="ov-actions ov-actions--between">
           <Text weight="semibold">Step {index + 1} · {step.kind === 'email' ? 'Email' : 'Task'}</Text>
@@ -202,7 +294,7 @@ function SequenceEditor({ sequence, onClose, onSaved }: { sequence?: Sequence; o
         </div>
         <div className="ov-form-grid">
           <NumberInput label={index === 0 ? 'Days after enrolment' : 'Days after previous step'} min={0} max={365} isIntegerOnly value={step.delayDays} onChange={value => update(step.key, { delayDays: value ?? 0 })} />
-          <Switch label="Business hours only" description="Mon–Fri, 09:00–17:00 UTC" value={step.businessHours} onChange={value => update(step.key, { businessHours: value })} />
+          <Switch label="Send window only" description="Wait for the recipient’s send window" value={step.businessHours} onChange={value => update(step.key, { businessHours: value })} />
         </div>
         {step.kind === 'email' ? <>
           <TextInput label="Subject" isRequired value={step.subject} onChange={value => update(step.key, { subject: value })} />
@@ -252,6 +344,7 @@ function Enrolments({ sequence, onChanged }: { sequence: Sequence; onChanged: ()
           <Text type="supporting" color="secondary">{item.status === 'active' ? `Step ${Math.min(item.nextPosition + 1, item.stepCount)} of ${item.stepCount}${item.nextRunAt ? ` · next ${dateTime(item.nextRunAt)}` : ''}` : item.stoppedReason || `Completed ${shortDate(item.finishedAt)}`}</Text>
           <span className="ov-actions">{item.runs.map(run => <span key={run.position} title={run.reason}><StatusBadge label={`${run.position + 1}: ${runLabel[run.status]?.[0] ?? run.status}`} tone={runLabel[run.status]?.[1] ?? 'neutral'} /></span>)}</span>
           {item.runs.filter(run => run.reason && run.status !== 'sent').slice(-1).map(run => <Text key={run.position} type="supporting" color="secondary">{run.reason}</Text>)}
+          {item.status === 'active' && item.waitReason ? <Text type="supporting" color="secondary">{item.waitReason}</Text> : null}
         </span>
         {item.status === 'active' ? <Button size="sm" variant="ghost" label="Stop" onClick={() => void action.run(async () => { await api(`/sales/enrolments/${item.id}/stop`, 'POST'); enrolments.refresh(); onChanged(); }, 'Stopped.')} />
           : <StatusBadge label={item.status === 'completed' ? 'Completed' : 'Stopped'} tone={item.status === 'completed' ? 'success' : 'warning'} />}

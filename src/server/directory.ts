@@ -192,3 +192,69 @@ export async function linkContactToCompany(contactId: number, companyId: number)
   const { mautic } = await engines();
   await mautic.addContactToCompany(companyId, contactId);
 }
+
+/** Every contact for duplicate detection: the whole preview directory, or up to `limit` from the engine (newest first). */
+export async function listAllContacts(limit = 2000): Promise<DirectoryContact[]> {
+  if (preview()) return devPreviewContacts().map(toDirectoryContact);
+  const { audience } = await engines();
+  const found: DirectoryContact[] = [];
+  for (let page = 1; found.length < limit; page++) {
+    const batch = await audience.contactDirectory({ page, limit: 200 });
+    found.push(...batch.items.map(toDirectoryContact));
+    if (batch.items.length < 200 || found.length >= batch.total) break;
+  }
+  return found.slice(0, limit);
+}
+
+const mergeKeys = ['firstName', 'lastName', 'company', 'phone', 'position', 'city', 'country', 'website'] as const;
+
+/**
+ * Merges a duplicate's engine record into the survivor without deleting anything: the survivor's empty fields are
+ * filled from the duplicate, tags and company links are combined, and points are added. The stricter consent wins.
+ * Delete the duplicate with deleteContact once OVELIO's own records point at the survivor.
+ */
+export async function mergeContactFields(survivorId: number, duplicateId: number): Promise<DirectoryContact> {
+  if (survivorId === duplicateId) throw new AppError(400, 'Choose two different contacts to merge.');
+  if (preview()) {
+    const all = devPreviewContacts();
+    const survivor = all.find(item => item.id === survivorId);
+    const duplicate = all.find(item => item.id === duplicateId);
+    if (!survivor || !duplicate) throw new AppError(404, 'That contact was not found.');
+    for (const key of mergeKeys) if (!survivor[key] && duplicate[key]) survivor[key] = duplicate[key];
+    survivor.tags = [...new Set([...survivor.tags, ...duplicate.tags])];
+    survivor.points += duplicate.points;
+    for (const link of duplicate.linkedCompanies ?? []) {
+      survivor.linkedCompanies ??= [];
+      if (!survivor.linkedCompanies.some(item => item.id === link.id)) survivor.linkedCompanies.push({ ...link, isPrimary: survivor.linkedCompanies.length === 0 });
+    }
+    if (duplicate.suppressed || duplicate.consent === 'suppressed') {
+      if (duplicate.email === survivor.email) { survivor.suppressed = true; survivor.consent = 'suppressed'; }
+    } else if (survivor.consent === 'unknown' && duplicate.consent === 'opted_in' && duplicate.email === survivor.email) {
+      survivor.consent = 'opted_in';
+      survivor.consentHistory = [...(survivor.consentHistory ?? []), ...(duplicate.consentHistory ?? [])];
+    }
+    survivor.updatedAt = new Date().toISOString();
+    return toDirectoryContact(survivor);
+  }
+  const { mautic } = await engines();
+  const [survivor, duplicate] = await Promise.all([mautic.contact(survivorId), mautic.contact(duplicateId)]);
+  const fields: Record<string, string> = {};
+  for (const key of mergeKeys) if (!survivor[key] && duplicate[key]) fields[key] = duplicate[key] as string;
+  const tags = [...new Set([...survivor.tags, ...duplicate.tags])];
+  const custom = Object.fromEntries(Object.entries(duplicate.customFields ?? {}).filter(([alias, value]) => value && !survivor.customFields?.[alias]));
+  let merged = await mautic.updateContact(survivorId, { email: survivor.email, ...fields, tags, ...(Object.keys(custom).length ? { customFields: custom } : {}) });
+  if (duplicate.points > 0) merged = await mautic.adjustPoints(survivorId, duplicate.points);
+  return toDirectoryContact(merged);
+}
+
+/** Deletes a contact from the engine (used after a merge). Erasure requests go through the audience erasure flow instead. */
+export async function deleteContact(id: number): Promise<void> {
+  if (preview()) {
+    const all = devPreviewContacts();
+    const index = all.findIndex(item => item.id === id);
+    if (index >= 0) all.splice(index, 1);
+    return;
+  }
+  const { mautic } = await engines();
+  await mautic.deleteContact(id);
+}

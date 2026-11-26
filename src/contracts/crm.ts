@@ -16,6 +16,8 @@ export type PipelineStage = {
   probability: number;
   outcome: StageOutcome;
   rottingDays: number | null;
+  /** Fields a deal needs before entering this stage: 'amount', 'expected_close_date', 'contact', 'company'. */
+  requiredFields?: StageRequirement[];
 };
 
 /** Cross-lane contract: GET /api/console/sales/pipelines → { items: Pipeline[] } (TRACKER §3). */
@@ -30,6 +32,11 @@ export type Pipeline = {
 };
 
 export type TeamMember = { id: string; name: string; email: string };
+
+export type StageRequirement = 'amount' | 'expected_close_date' | 'contact' | 'company';
+export const stageRequirementLabels: Record<StageRequirement, string> = {
+  amount: 'a deal value', expected_close_date: 'an expected close date', contact: 'a contact', company: 'a company',
+};
 
 export type Deal = {
   id: string;
@@ -70,6 +77,13 @@ export type Deal = {
   /** Open deal that has sat in its stage longer than the stage's rotting days. */
   rotting: boolean;
   openTasks: number;
+  /** Latest logged activity on the deal or with its primary contact. */
+  lastActivityAt: string | null;
+  /** Earliest open task on the deal. */
+  nextTask: { title: string; dueAt: string | null } | null;
+  /** 'at_risk' when the deal is stalled beyond its stage's rotting days, past its close date, or quiet for 14 days. */
+  health: 'healthy' | 'at_risk' | 'closed';
+  healthReasons: string[];
   custom: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -265,7 +279,10 @@ export type CrmContact = DirectoryContact & {
   lastActivityAt: string | null;
 };
 
-export type CrmContactPage = { items: CrmContact[]; total: number; page: number; limit: number };
+/** `note` explains a filtered list that was computed from a capped scan of the audience engine. */
+export type CrmContactPage = { items: CrmContact[]; total: number; page: number; limit: number; note?: string };
+
+export type CrmContactSort = 'createdAt' | 'updatedAt' | 'lastName' | 'email' | 'points' | 'lastActivity' | 'openDealValue';
 
 export type ContactProfile = {
   contactId: number;
@@ -295,7 +312,10 @@ export type CrmCompany = {
   openValue: number;
   wonRevenue: number;
   currency: string;
+  lastActivityAt?: string | null;
 };
+
+export type CrmCompanyPage = { items: CrmCompany[]; total: number; page: number; limit: number };
 
 export type CompanyProfile = {
   company: CrmCompany;
@@ -378,11 +398,15 @@ export type Sequence = {
   status: SequenceStatus;
   steps: SequenceStep[];
   counts: { active: number; completed: number; stopped: number };
+  /** Email steps marked "send window only" wait for these hours and weekdays (0 = Sunday) in the recipient's time zone. */
+  sendWindow: { start: number; end: number; days: number[] };
+  /** Most sequence emails one sender may send per day (UTC); further steps wait for the next day's window. */
+  dailyLimit: number;
   createdAt: string;
   updatedAt: string;
 };
 
-export type SequenceInput = { name: string; description?: string; status?: SequenceStatus; steps: Omit<SequenceStep, 'id' | 'position'>[] };
+export type SequenceInput = { name: string; description?: string; status?: SequenceStatus; steps: Omit<SequenceStep, 'id' | 'position'>[]; sendWindow?: Sequence['sendWindow']; dailyLimit?: number };
 
 export type StepRunStatus = 'sent' | 'blocked' | 'not_sent' | 'failed' | 'task_created' | 'skipped';
 
@@ -402,6 +426,8 @@ export type SequenceEnrolment = {
   stepCount: number;
   nextRunAt: string | null;
   stoppedReason: string;
+  /** Why the next step is waiting, e.g. outside the recipient's send window or the sender's daily limit. */
+  waitReason: string;
   senderName: string;
   enrolledAt: string;
   finishedAt: string | null;

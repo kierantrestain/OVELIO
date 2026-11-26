@@ -4,10 +4,13 @@ import { db } from '../db';
 import type { LaneModule } from '../platform/types';
 import { dealEndpoints } from './deals';
 import { forecastEndpoints } from './forecast';
+import { duplicateEndpoints } from './duplicates';
 import { importEndpoints } from './imports';
+import { listEndpoints } from './lists';
 import { MAILBOX_SYNC_JOB, mailboxEndpoints, runMailboxSync } from './mailboxes';
 import { peopleEndpoints } from './people';
 import { pipelineEndpoints } from './pipelines';
+import { routeLead, routingEndpoints } from './routing';
 import { seedCrmPreview } from './seed';
 import { SEQUENCE_JOB, runSequenceStep, sequenceEndpoints, stopOnEvent } from './sequences';
 import { REMINDER_JOB, runTaskReminder, taskEndpoints } from './tasks';
@@ -39,7 +42,7 @@ export async function searchSales(query: string): Promise<SearchResult[]> {
 
 export const crmModule: LaneModule = {
   name: 'crm',
-  endpoints: [...pipelineEndpoints, ...dealEndpoints, ...taskEndpoints, ...peopleEndpoints, ...forecastEndpoints, ...sequenceEndpoints, ...mailboxEndpoints, ...importEndpoints],
+  endpoints: [...pipelineEndpoints, ...dealEndpoints, ...taskEndpoints, ...peopleEndpoints, ...forecastEndpoints, ...sequenceEndpoints, ...mailboxEndpoints, ...importEndpoints, ...listEndpoints, ...duplicateEndpoints, ...routingEndpoints],
   jobHandlers: {
     [REMINDER_JOB]: runTaskReminder,
     [SEQUENCE_JOB]: runSequenceStep,
@@ -47,6 +50,7 @@ export const crmModule: LaneModule = {
   },
   async onPlatformEvent(event) {
     await stopOnEvent(event);
+    await routeLead(event);
   },
   async search(query) {
     return searchSales(query);

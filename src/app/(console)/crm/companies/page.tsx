@@ -1,7 +1,7 @@
-import { AudienceSection } from '@/components/section';
+import { CrmCompaniesList } from '@/components/crm/lists';
 
 export const metadata = { title: 'Companies' };
 
-export default function Page() {
-  return <AudienceSection tab="Companies" title="Companies" description="Accounts and the people who work there." />;
+export default async function Page({ searchParams }: { searchParams: Promise<{ create?: string }> }) {
+  return <CrmCompaniesList initialCreate={(await searchParams).create === 'company'} />;
 }

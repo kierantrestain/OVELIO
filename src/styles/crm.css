@@ -35,6 +35,16 @@
 .ov-crm-dropzone--over { background: currentColor; }
 .ov-crm-dropzone--over > span { color: #fff; }
 
+.ov-crm-health { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #1d7a45; flex: none; }
+.ov-crm-health--at_risk { background: #c27803; box-shadow: 0 0 0 3px rgb(194 120 3 / 18%); }
+.ov-crm-next { font-size: var(--font-size-xs); color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-crm-next--none { color: var(--color-text-warning, #a35c00); }
+
+/* Date filters keep their calendar width; on phones each takes a full row instead of overflowing. */
+.ov-crm-date-filter { display: flex; flex: 0 1 200px; min-width: 180px; }
+.ov-crm-date-filter > * { width: 100%; }
+@media (max-width: 640px) { .ov-crm-date-filter { flex: 1 1 100%; } }
+
 /* Detail pages */
 .ov-crm-detail { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
 .ov-crm-side { display: grid; gap: 20px; }
@@ -80,7 +90,7 @@
 .ov-crm-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 
 /* Pipelines and sequences */
-.ov-crm-stage-row { display: grid; grid-template-columns: 28px minmax(140px, 1fr) 110px 120px 110px auto; gap: 10px; align-items: end; padding: 10px 0; border-bottom: 1px solid var(--color-border); background: var(--color-background-surface); }
+.ov-crm-stage-row { display: grid; grid-template-columns: 28px minmax(140px, 1fr) 110px 110px 110px 190px auto; gap: 10px; align-items: end; padding: 10px 0; border-bottom: 1px solid var(--color-border); background: var(--color-background-surface); }
 .ov-crm-handle { cursor: grab; border: 0; background: none; color: var(--color-text-secondary); padding: 6px 0; align-self: center; }
 .ov-crm-step { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--color-border); border-radius: var(--radius-container); }
 .ov-crm-hint { font-size: var(--font-size-xs); color: var(--color-text-secondary); }

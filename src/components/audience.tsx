@@ -241,7 +241,7 @@ function showCustomValue(item: CustomField, value: string | undefined) {
   return value;
 }
 
-function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: (contact: Contact) => void; onClose: () => void }) {
+export function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: (contact: Contact) => void; onClose: () => void }) {
   const [optedIn, setOptedIn] = useState(false);
   const action = useAction();
   const { values, field } = useFields({
@@ -315,7 +315,7 @@ function ContactForm({ contact, onDone, onClose }: { contact?: Contact; onDone: 
 type ImportDraft = { run: ImportRun; preview: ImportPreview };
 
 // Upload, map columns, optionally dry-run, then follow the background job's progress.
-function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
+export function ImportForm({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
   const action = useAction();
   const [file, setFile] = useState<File>();
   const [evidence, setEvidence] = useState('');
@@ -803,7 +803,7 @@ const companyIndustries = [
   'Transportation', 'Utilities', 'Other',
 ].map(value => ({ value, label: value }));
 
-function CompanyForm({ company, onClose, onDone }: { company?: Company; onClose: () => void; onDone: () => void }) {
+export function CompanyForm({ company, onClose, onDone }: { company?: Company; onClose: () => void; onDone: () => void }) {
   const action = useAction();
   const [industry, setIndustry] = useState<string | null>(company?.industry || null);
   const { values, field } = useFields({
@@ -2229,7 +2229,7 @@ export function Audience({ initialTab }: { initialTab?: string }) {
       />
     ) : null}
 
-    {contactModal ? <ContactForm onClose={() => setContactModal(false)} onDone={contact => router.push(`/audience/${contact.id}`)} /> : null}
+    {contactModal ? <ContactForm onClose={() => setContactModal(false)} onDone={contact => router.push(`/crm/contacts/${contact.id}`)} /> : null}
     {importModal ? <ImportForm onClose={() => setImportModal(false)} onImported={() => { contacts.refresh(); setNotice('Import processed.'); }} /> : null}
     {previewSegment ? <SegmentPreview segment={previewSegment} onClose={() => setPreviewSegment(undefined)} /> : null}
     {segmentModal ? <SegmentForm segment={segmentModal === 'new' ? undefined : segmentModal} onClose={() => setSegmentModal(undefined)} onDone={() => {
