@@ -187,3 +187,45 @@ test('CAL-08 live provider availability protects listing, reservation and resche
   const connection = await consoleEndpoint<CalendarConnection[]>(owner, 'GET', connectionPath);
   assert.equal(connection.find(item => item.provider === 'google')?.status, 'unavailable');
 });
+
+test('CAL-09 write consent requires a separate OAuth grant and stops independently of availability', async t => {
+  const cookie = await session(teammate);
+  let grantWrite = false;
+  t.mock.method(globalThis, 'fetch', async (url: string) => {
+    if (url === 'https://oauth2.googleapis.com/token') {
+      return Response.json({ access_token: 'write-fixture-access', refresh_token: 'write-fixture-refresh', expires_in: 3600,
+        scope: 'https://www.googleapis.com/auth/calendar.freebusy' + (grantWrite ? ' https://www.googleapis.com/auth/calendar.events.owned openid' : '') });
+    }
+    if (url === 'https://openidconnect.googleapis.com/v1/userinfo') return Response.json({ sub: 'synthetic-provider-owner-id' });
+    assert.equal(url, 'https://www.googleapis.com/calendar/v3/freeBusy');
+    return Response.json({ calendars: { primary: { busy: [] } } });
+  });
+  delete process.env.OVELIO_DEV_PREVIEW;
+  try {
+    const microsoft = new URL((await consoleEndpoint<{ url: string }>(teammate, 'POST', connectionPath + '/microsoft/mirror', { cookie })).url);
+    assert.equal(microsoft.searchParams.get('scope'), 'offline_access https://graph.microsoft.com/Calendars.ReadWrite');
+    const startGoogle = async (mirror: boolean) => {
+      const path = connectionPath + '/google' + (mirror ? '/mirror' : '');
+      const authorize = new URL((await consoleEndpoint<{ url: string }>(teammate, 'POST', path, { cookie })).url);
+      assert.equal(authorize.searchParams.get('scope')?.includes('calendar.events.owned'), mirror);
+      const response = await consoleEndpoint<Response>(teammate, 'GET', connectionPath + '/google/callback', {
+        cookie, search: '?code=fixture&state=' + authorize.searchParams.get('state'),
+      });
+      return new URL(response.headers.get('location')!).searchParams.get('calendarConnection');
+    };
+    const google = async () => (await consoleEndpoint<CalendarConnection[]>(teammate, 'GET', connectionPath)).find(item => item.provider === 'google')!;
+    assert.equal(await startGoogle(false), 'connected');
+    assert.equal((await google()).mirrorEnabled, false);
+    assert.equal(await startGoogle(true), 'failed');
+    assert.equal((await google()).mirrorEnabled, false);
+    grantWrite = true;
+    assert.equal(await startGoogle(true), 'connected');
+    assert.equal((await google()).mirrorEnabled, true);
+    const response = await consoleEndpoint<Response>(teammate, 'DELETE', connectionPath + '/google/mirror', { cookie });
+    assert.equal(response.status, 204);
+    assert.equal((await google()).mirrorEnabled, false);
+    assert.equal((await google()).status, 'connected');
+  } finally {
+    process.env.OVELIO_DEV_PREVIEW = 'true';
+  }
+});

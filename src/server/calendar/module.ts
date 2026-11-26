@@ -9,6 +9,7 @@ import { route } from '../routes/shared';
 import type { LaneModule } from '../platform/types';
 import { availabilityInput } from './availability';
 import { calendarConnectionEndpoints } from './connections';
+import { APPOINTMENT_MIRROR, runAppointmentMirror } from './mirror';
 import { APPOINTMENT_MAIL, bookingSlug, runAppointmentMail, setStatus, toAppointment } from './booking';
 import type { AppointmentRow, BookingRow } from './booking';
 
@@ -168,7 +169,7 @@ export const calendarModule: LaneModule = {
       return new Response(null, { status: 204 });
     }, 'marketer'),
   ],
-  jobHandlers: { [APPOINTMENT_MAIL]: runAppointmentMail },
+  jobHandlers: { [APPOINTMENT_MAIL]: runAppointmentMail, [APPOINTMENT_MIRROR]: runAppointmentMirror },
   async onPlatformEvent() {},
   async search(query, user) {
     if (user.role === 'analyst') return [];

@@ -57,4 +57,5 @@ export type CalendarConnection = {
   label: string;
   configured: boolean;
   status: 'disconnected' | 'connected' | 'unavailable';
+  mirrorEnabled: boolean;
 };
