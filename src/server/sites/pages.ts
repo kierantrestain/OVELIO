@@ -9,6 +9,7 @@ import { audit } from '../events';
 import type { DomainRow, FormRow, PageRow, VariantRow } from './data';
 import { domainsById, iso, pageUrl, requirePage, slugify, uniqueSlug, uuidPattern } from './data';
 import { createForm } from './forms';
+import { assertBookingLinksLive, hydrateBookingLinks } from './booking-links';
 import { catalogTemplate } from './templates';
 import { hydratePage, renderDocument } from './render';
 import { boundFormIds, sanitizePageCss, sanitizePageHtml, unboundFormBlocks } from './sanitize';
@@ -268,6 +269,7 @@ async function publishableSnapshot(designId: string, client: Sql) {
   if (!html.replace(/<[^>]+>/g, '').trim() && !/<(img|svg|iframe)/.test(html)) throw new AppError(409, 'Add some content to the page before publishing it.');
   if (unboundFormBlocks(design.source || design.html)) throw new AppError(409, 'A form block is not linked to a form. Select it in the builder and choose a form, then publish again.');
   await assertFormsLive(html, client);
+  await assertBookingLinksLive(html, client);
   return { html, css: sanitizePageCss(design.css), version: design.version };
 }
 
@@ -312,6 +314,7 @@ export async function restorePublication(pageId: string, publicationId: string, 
       : undefined;
     if (!row) throw new AppError(404, 'That published version was not found.');
     await assertFormsLive(row.html, client);
+    await assertBookingLinksLive(row.html, client);
     if (row.variant_key === 'a') {
       await client.query(
         `UPDATE landing_pages SET status = 'published', published_html = $2, published_css = $3, published_version = $4, published_at = now(), updated_by = $5, updated_at = now() WHERE id = $1`,
@@ -433,7 +436,7 @@ export async function draftPreview(pageId: string, variantKey?: string | null) {
   const forms = await formsByIds(boundFormIds(html));
   return renderDocument({
     title: page.seo_title || page.name, description: page.seo_description, canonicalUrl: '', ogImageUrl: page.og_image_url, faviconUrl: page.favicon_url,
-    noindex: true, css: sanitizePageCss(design.css), bodyHtml: hydratePage(html, forms, { pageId: null }, '#'),
+    noindex: true, css: sanitizePageCss(design.css), bodyHtml: hydratePage(await hydrateBookingLinks(html), forms, { pageId: null }, '#'),
     config: { pageId: null, variant: null, funnelId: null, stepIndex: null, utm: {}, track: false },
     banner: `Draft preview of “${page.name}”${variantKey && variantKey !== 'a' ? ` · variant ${variantKey.toUpperCase()}` : ''} · visible only to signed-in team members · form submissions here are real`,
   });

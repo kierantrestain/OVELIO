@@ -5,7 +5,7 @@
 // with an optimistic version, version history, preview and a publish drawer with SEO, tracking and A/B settings.
 import 'grapesjs/dist/css/grapes.min.css';
 import '@/styles/sites.css';
-import { ArrowLeft, Eye, History, Monitor, Redo2, Rocket, Settings2, Smartphone, Tablet, Undo2 } from 'lucide-react';
+import { ArrowLeft, CalendarDays, Eye, History, Monitor, Redo2, Rocket, Settings2, Smartphone, Tablet, Undo2 } from 'lucide-react';
 import NextLink from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,15 +17,16 @@ import { Selector } from '@astryxdesign/core/Selector';
 import { Spinner } from '@astryxdesign/core/Spinner';
 import { Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
+import type { CalendarOverview } from '@/contracts/calendar';
 import type { FormSummary, LandingPageDetail, PageDesign, SavedSection } from '@/contracts/sites';
-import { api, message } from '../client';
+import { api, message, useResource } from '../client';
 import { Empty, Modal } from '../ui';
 import { blockDefinitions } from './blocks';
 import { MediaPicker, PublishDrawer, VersionsDrawer } from './builder-panels';
 import { formCss as formPreviewCss } from '@/templates/pages/form-css';
 
 type SaveState = { kind: 'saved' | 'saving' | 'dirty' | 'error' | 'conflict'; message?: string; at?: string };
-type Selected = { type: string; tagName: string; formId: string; href: string; videoUrl: string } | null;
+type Selected = { type: string; tagName: string; formId: string; bookingId: string; bookingLabel: string } | null;
 type AssetRequest = { select: (asset: string, complete: boolean) => void; close: () => void };
 
 const devices = [
@@ -43,6 +44,8 @@ const fontOptions = [
 ];
 
 const escapeAttr = (value: string) => value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+const defaultBookingLabel = 'Book an appointment';
+const bookingLabel = (value: unknown) => String(value ?? '').trim().slice(0, 100) || defaultBookingLabel;
 
 export function videoEmbedUrl(url: string): string | null {
   const youtube = /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,20})/.exec(url);
@@ -87,6 +90,34 @@ function registerTypes(editor: Editor) {
         }
         el.innerHTML = '<div class="ov-sites-slot">Loading form…</div>';
         void formPreview(formId).then(html => { el.innerHTML = `<div style="pointer-events:none">${html}</div>`; });
+      },
+    },
+  });
+
+  editor.Components.addType('ovelio-booking', {
+    isComponent: el => el.tagName === 'A' && (el as HTMLElement).hasAttribute('data-ovelio-booking')
+      ? { type: 'ovelio-booking', components: [], attributes: { 'data-ovelio-booking-label': el.textContent ?? '' } }
+      : undefined,
+    model: {
+      defaults: {
+        name: 'Booking button', tagName: 'a', droppable: false, editable: false, traits: [],
+        attributes: { class: 'ovp-btn', 'data-ovelio-booking': '', 'data-ovelio-booking-label': defaultBookingLabel },
+      },
+      toHTML(this: Component) {
+        const attrs = this.getAttrToHTML();
+        const label = bookingLabel(attrs['data-ovelio-booking-label']);
+        delete attrs['data-ovelio-booking-label'];
+        delete attrs.href;
+        return `<a${attrsToHtml(attrs)}>${escapeAttr(label)}</a>`;
+      },
+    },
+    view: {
+      init(this: { listenTo: (model: unknown, event: string, handler: () => void) => void; model: Component; render: () => void }) {
+        this.listenTo(this.model, 'change:attributes', this.render);
+      },
+      onRender(this: { el: HTMLElement; model: Component }) {
+        this.el.removeAttribute('href');
+        this.el.textContent = bookingLabel(this.model.getAttributes()['data-ovelio-booking-label']);
       },
     },
   });
@@ -249,7 +280,10 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
           const component = created.getSelected();
           if (!component) { setSelected(null); return; }
           const attrs = component.getAttributes();
-          setSelected({ type: String(component.get('type') ?? ''), tagName: String(component.get('tagName') ?? ''), formId: String(attrs['data-ovelio-form'] ?? ''), href: String(attrs.href ?? ''), videoUrl: String(attrs['data-video-url'] ?? '') });
+          setSelected({
+            type: String(component.get('type') ?? ''), tagName: String(component.get('tagName') ?? ''), formId: String(attrs['data-ovelio-form'] ?? ''),
+            bookingId: String(attrs['data-ovelio-booking'] ?? ''), bookingLabel: String(attrs['data-ovelio-booking-label'] ?? ''),
+          });
         };
         created.on('component:toggled', refreshSelection);
         created.on('component:update:attributes', refreshSelection);
@@ -299,6 +333,17 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
     const component = editorRef.current?.getSelected();
     if (!component) return;
     component.addAttributes(attrs);
+  };
+
+  const addBookingButton = () => {
+    const current = editorRef.current;
+    const wrapper = current?.getWrapper();
+    if (!current || !wrapper) return;
+    const content = current.getSelected()?.closest('.ovp-wrap') ?? wrapper.find('section .ovp-wrap')[0] ?? wrapper;
+    const [button] = content.append({ type: 'ovelio-booking' });
+    if (!button) return;
+    current.select(button);
+    setRightTab('settings');
   };
 
   if (loadError) {
@@ -358,6 +403,7 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
         </div>
         <div className="ov-sites-panel" hidden={leftTab !== 'blocks'}>
           <Text type="supporting" color="secondary">Drag a block onto the page.</Text>
+          <Button size="sm" variant="secondary" label="Add booking button" icon={<CalendarDays size={16} />} isDisabled={!ready} onClick={addBookingButton} />
           <div ref={blocksRef} />
         </div>
         <div className="ov-sites-panel" hidden={leftTab !== 'layers'}><div ref={layersRef} /></div>
@@ -385,7 +431,10 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
             updateSelectedAttrs({ 'data-ovelio-form': formId });
             previewCache.delete(formId);
           }} /> : null}
-          {selected?.tagName === 'a' ? <div className="ov-sites-hint">
+          {selected?.type === 'ovelio-booking' ? <BookingBlockPanel id={selected.bookingId} label={selected.bookingLabel}
+            onType={id => updateSelectedAttrs({ 'data-ovelio-booking': id })}
+            onLabel={label => updateSelectedAttrs({ 'data-ovelio-booking-label': label })} /> : null}
+          {selected?.tagName === 'a' && selected.type !== 'ovelio-booking' ? <div className="ov-sites-hint">
             <Button size="sm" variant="secondary" label="Link to the next funnel step" onClick={() => updateSelectedAttrs({ href: '#ovelio-next-step' })} />
             <Text type="supporting" color="secondary">When this page is a funnel step, the link opens the next step.</Text>
           </div> : null}
@@ -397,6 +446,22 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
     {assetRequest ? <MediaPicker onClose={() => { assetRequest.close(); setAssetRequest(null); }} onPick={url => { assetRequest.select(url, true); setAssetRequest(null); }} /> : null}
     {drawer === 'versions' ? <VersionsDrawer pageId={pageId} query={query} onClose={() => setDrawer(null)} beforeSave={save} onRestored={design => { reloadDesign(design); setDrawer(null); }} /> : null}
     {drawer === 'publish' && page ? <PublishDrawer page={page} onClose={() => setDrawer(null)} onChange={next => { setPage(next); setName(next.name); }} beforePublish={save} /> : null}
+  </div>;
+}
+
+function BookingBlockPanel({ id, label, onType, onLabel }: { id: string; label: string; onType: (id: string) => void; onLabel: (label: string) => void }) {
+  const calendar = useResource<Pick<CalendarOverview, 'types'>>('/calendar');
+  const types = calendar.data?.types.filter(type => type.active) ?? [];
+  const current = types.find(type => type.id === id);
+  return <div className="ov-sites-hint">
+    <Selector label="Booking type" placeholder={id && !current ? 'Linked booking type' : 'Choose a booking type'}
+      value={current?.id ?? ''} isLoading={calendar.loading} isDisabled={!types.length}
+      options={types.map(type => ({ value: type.id, label: type.name, description: `${type.durationMinutes} min` }))}
+      onChange={value => { if (value) onType(value); }} />
+    {calendar.error ? <Banner status="error" title={calendar.error}
+      endContent={<Button size="sm" label="Retry" onClick={calendar.refresh} />} /> : null}
+    {calendar.data && !types.length ? <Button size="sm" variant="ghost" label="Open Sales Calendar" href="/sales/calendar" target="_blank" /> : null}
+    <TextInput label="Button text" value={label} placeholder={defaultBookingLabel} onChange={value => onLabel(value.slice(0, 100))} />
   </div>;
 }
 

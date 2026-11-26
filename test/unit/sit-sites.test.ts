@@ -221,3 +221,47 @@ test('SIT-10 the preview seed has published pages, forms with submissions, a thr
   const csv = await forms.submissionsCsv(sampleForms[0].id);
   assert.match(csv.split('\r\n')[0], /^Submitted at,Status,/);
 });
+
+test('SIT-17 published booking buttons resolve the active type on workspace and custom domains', async t => {
+  const previousOrigin = process.env.APP_ORIGIN;
+  process.env.APP_ORIGIN = 'https://workspace.example.test';
+  t.after(() => {
+    if (previousOrigin === undefined) delete process.env.APP_ORIGIN;
+    else process.env.APP_ORIGIN = previousOrigin;
+  });
+
+  const { rows: [type] } = await db.query<{ id: string }>(
+    "INSERT INTO calendar_booking_types (owner_id, slug, name, duration_minutes) VALUES ($1, 'sites-demo', 'Sites demo', 30) RETURNING id", [user.id],
+  );
+  const { id } = await pages.createPage({ name: 'SIT booking button', templateKey: 'blank', slug: 'sit-booking-button' }, user);
+  const { designId } = await pages.getPage(id);
+  const save = async (bookingId: string) => {
+    const design = await pages.loadDesign(designId);
+    return pages.saveDesign(designId, { version: design.version, document: {}, css: design.css,
+      html: `<h1>Schedule a demo</h1><a class="ovp-btn" data-ovelio-booking="${bookingId}" href="https://unrelated.example.test" target="_blank">Book a demo &amp; Q&amp;A</a>`,
+    }, user);
+  };
+
+  await save('unconfigured');
+  await assert.rejects(pages.publishPage(id, user), /Choose a booking type/);
+  await save('712cc650-b8c8-4cb7-a73a-b3bf41225486');
+  await assert.rejects(pages.publishPage(id, user), /inactive or removed booking type/);
+  await save(type.id);
+  assert.match(await pages.draftPreview(id), /href="\/book\/sites-demo"/);
+  await pages.publishPage(id, user);
+  const workspace = await (await pub.servePage(new Request('https://workspace.example.test/s/sit-booking-button'), 'sit-booking-button')).text();
+  assert.match(workspace, /<a href="\/book\/sites-demo" class="ovp-btn">Book a demo &amp; Q&amp;A<\/a>/);
+  assert.doesNotMatch(workspace, /unrelated\.example\.test|data-ovelio-booking/);
+
+  const domain = await addDomain({ hostname: 'sites-demo.example.test' }, user);
+  await db.query("UPDATE site_domains SET status = 'verified' WHERE id = $1", [domain.id]);
+  await pages.updatePageSettings(id, { domainId: domain.id }, user);
+  await db.query("UPDATE calendar_booking_types SET slug = 'new-sites-demo' WHERE id = $1", [type.id]);
+  const liveDomain = () => pub.servePage(new Request('https://sites-demo.example.test/sit-booking-button'), 'sit-booking-button', domain.hostname);
+  const custom = await (await liveDomain()).text();
+  assert.match(custom, /href="https:\/\/workspace\.example\.test\/book\/new-sites-demo"/);
+  await db.query('UPDATE calendar_booking_types SET active = false WHERE id = $1', [type.id]);
+  const hidden = await (await liveDomain()).text();
+  assert.doesNotMatch(hidden, /Book a demo|\/book\/new-sites-demo/);
+  await assert.rejects(pages.publishPage(id, user), /inactive or removed booking type/);
+});

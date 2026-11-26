@@ -2,6 +2,7 @@
 // snapshot: no <script>, no on* handlers, no javascript: URLs, iframes only from YouTube and Vimeo. Form blocks keep
 // their data-ovelio-form binding; OVELIO's own tracker is added after sanitising, at render time.
 import sanitizeHtml from 'sanitize-html';
+import { uuidPattern } from './data';
 
 const htmlTags = [
   'a', 'abbr', 'address', 'article', 'aside', 'b', 'blockquote', 'br', 'button', 'caption', 'cite', 'code', 'col', 'colgroup',
@@ -44,9 +45,20 @@ const options: sanitizeHtml.IOptions = {
   parser: { lowerCaseAttributeNames: false },
   // Links that open a new tab must not hand the opener to the destination.
   transformTags: {
-    a: (tagName, attribs) => attribs.target === '_blank'
-      ? { tagName, attribs: { ...attribs, rel: 'noopener noreferrer' } }
-      : { tagName, attribs },
+    a: (tagName, attribs) => {
+      if ('data-ovelio-booking' in attribs) {
+        // The public renderer resolves the booking type. Never publish a URL from this block's input.
+        const id = attribs['data-ovelio-booking'];
+        delete attribs.href;
+        delete attribs.target;
+        delete attribs.rel;
+        delete attribs['data-ovelio-booking-label'];
+        attribs['data-ovelio-booking'] = uuidPattern.test(id) ? id.toLowerCase() : 'unbound';
+      } else if (attribs.target === '_blank') {
+        attribs.rel = 'noopener noreferrer';
+      }
+      return { tagName, attribs };
+    },
   },
   exclusiveFilter: frame => frame.tag === 'img' && /^data:/i.test(frame.attribs.src ?? '') && !/^data:image\/(png|jpe?g|gif|webp);/i.test(frame.attribs.src ?? ''),
 };
