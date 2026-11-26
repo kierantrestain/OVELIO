@@ -6,7 +6,7 @@ import { db, transaction } from '../db';
 import type { Sql } from '../db';
 import { isDevPreviewMode, requestOrigin } from '../dev-preview';
 import { route } from '../routes/shared';
-import { calendarProvider, calendarProviderConfig, calendarToken, primaryCalendar, providerBusy, providerNeedsRefresh } from './providers';
+import { calendarProvider, calendarProviderConfig, calendarProviderRequest, calendarToken, hasCalendarWriteScope, primaryCalendar, providerBusy, providerNeedsRefresh } from './providers';
 import type { BusyInterval } from './providers';
 
 type Connection = {
@@ -18,6 +18,7 @@ type Connection = {
   refresh_token_enc: string;
   access_expires_at: Date;
   health: 'connected' | 'unavailable';
+  mirror_target: string | null;
 };
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -32,19 +33,20 @@ function canConnect(provider: CalendarProvider) {
 }
 
 export async function calendarConnections(userId: string): Promise<CalendarConnection[]> {
-  const { rows } = await db.query<Pick<Connection, 'provider' | 'health'>>(
-    'SELECT provider, health FROM calendar_connections WHERE user_id = $1', [userId]);
+  const { rows } = await db.query<Pick<Connection, 'provider' | 'health' | 'mirror_target'>>(
+    'SELECT provider, health, mirror_target FROM calendar_connections WHERE user_id = $1', [userId]);
   return calendarProvider.options.map(provider => {
     const configured = canConnect(provider);
     const existing = rows.find(row => row.provider === provider);
     return {
       provider, label: calendarProviderConfig(provider).label, configured,
       status: existing ? configured ? existing.health : 'unavailable' : 'disconnected',
+      mirrorEnabled: Boolean(existing?.mirror_target),
     };
   });
 }
 
-async function beginConnection(request: Request, userId: string, provider: CalendarProvider) {
+async function beginConnection(request: Request, userId: string, provider: CalendarProvider, mirror = false) {
   if (!canConnect(provider)) throw new AppError(503, 'Calendar connection is unavailable. Ask your administrator to configure calendar OAuth.');
   const session = sessionHash(request);
   if (!session) throw new AppError(403, 'Sign in again before connecting a calendar.');
@@ -52,15 +54,16 @@ async function beginConnection(request: Request, userId: string, provider: Calen
   const pkce = pkcePair();
   const redirect = `${appOrigin()}/api/console/calendar/connections/${provider}/callback`;
   const { rowCount } = await db.query(
-    `INSERT INTO calendar_oauth_requests (user_id, provider, state_hash, session_hash, code_verifier, redirect_uri, expires_at)
-     SELECT user_id, $2, $3, token_hash, $5, $6, now() + interval '10 minutes' FROM sessions
+    `INSERT INTO calendar_oauth_requests (user_id, provider, state_hash, session_hash, code_verifier, redirect_uri, expires_at, mirror_requested)
+     SELECT user_id, $2, $3, token_hash, $5, $6, now() + interval '10 minutes', $7 FROM sessions
      WHERE user_id = $1 AND token_hash = $4 AND expires_at > now()
      ON CONFLICT (user_id, provider) DO UPDATE SET state_hash = EXCLUDED.state_hash, session_hash = EXCLUDED.session_hash,
-       code_verifier = EXCLUDED.code_verifier, redirect_uri = EXCLUDED.redirect_uri, expires_at = EXCLUDED.expires_at, claimed = false`,
-    [userId, provider, hash(state), session, pkce.verifier, redirect],
+       code_verifier = EXCLUDED.code_verifier, redirect_uri = EXCLUDED.redirect_uri, expires_at = EXCLUDED.expires_at,
+       mirror_requested = EXCLUDED.mirror_requested, claimed = false`,
+    [userId, provider, hash(state), session, pkce.verifier, redirect, mirror],
   );
   if (!rowCount) throw new AppError(403, 'Sign in again before connecting a calendar.');
-  const config = calendarProviderConfig(provider);
+  const config = calendarProviderConfig(provider, mirror);
   const authorize = new URL(config.authorize);
   const params = {
     client_id: config.clientId, response_type: 'code', scope: config.scopes, redirect_uri: redirect,
@@ -82,21 +85,22 @@ async function completeConnection(request: Request, query: URLSearchParams, user
   const code = query.get('code');
   if (!canConnect(provider) || !session || !state || !/^[\w-]{43}$/.test(state) || !code || code.length > 8192) return false;
   const key = hash(state);
-  const { rows: [claimed] } = await db.query<{ code_verifier: string; redirect_uri: string }>(
+  const { rows: [claimed] } = await db.query<{ code_verifier: string; redirect_uri: string; mirror_requested: boolean }>(
     `UPDATE calendar_oauth_requests q SET claimed = true FROM sessions s
      WHERE q.user_id = $1 AND q.provider = $2 AND q.state_hash = $3 AND q.session_hash = $4
        AND q.expires_at > now() AND NOT q.claimed
        AND s.token_hash = q.session_hash AND s.user_id = q.user_id AND s.expires_at > now()
-     RETURNING q.code_verifier, q.redirect_uri`, [userId, provider, key, session]);
+     RETURNING q.code_verifier, q.redirect_uri, q.mirror_requested`, [userId, provider, key, session]);
   if (!claimed) return false;
   try {
     const token = await calendarToken(provider, {
       grant_type: 'authorization_code', code, redirect_uri: claimed.redirect_uri, code_verifier: claimed.code_verifier,
-    });
-    if (!token.refresh_token) return false;
-    const calendar = await primaryCalendar(provider, token.access_token);
+    }, claimed.mirror_requested);
+    if (!token.refresh_token || (claimed.mirror_requested && !hasCalendarWriteScope(provider, token.scope))) return false;
+    const calendar = await primaryCalendar(provider, token.access_token, claimed.mirror_requested);
+    const target = claimed.mirror_requested && calendar.identity ? hash(provider + ':' + calendar.identity) : null;
     const checkedAt = Date.now();
-    await providerBusy(provider, calendar, token.access_token, checkedAt, checkedAt + 3600_000);
+    await providerBusy(provider, calendar.ref, token.access_token, checkedAt, checkedAt + 3600_000);
     const accessToken = encryptToken(token.access_token);
     const refreshToken = encryptToken(token.refresh_token);
     return await transaction(async client => {
@@ -108,11 +112,12 @@ async function completeConnection(request: Request, query: URLSearchParams, user
            AND u.id = q.user_id AND u.disabled_at IS NULL AND u.role IN ('marketer', 'admin')`, [userId, provider, key]);
       if (!rowCount) return false;
       await client.query(
-        `INSERT INTO calendar_connections (user_id, provider, calendar_ref, access_token_enc, refresh_token_enc, access_expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id, provider) DO UPDATE SET
+        `INSERT INTO calendar_connections (user_id, provider, calendar_ref, access_token_enc, refresh_token_enc, access_expires_at, mirror_target)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (user_id, provider) DO UPDATE SET
            revision = gen_random_uuid(), calendar_ref = EXCLUDED.calendar_ref, access_token_enc = EXCLUDED.access_token_enc,
-           refresh_token_enc = EXCLUDED.refresh_token_enc, access_expires_at = EXCLUDED.access_expires_at, health = 'connected'`,
-        [userId, provider, calendar, accessToken, refreshToken, new Date(checkedAt + token.expires_in * 1000)],
+           refresh_token_enc = EXCLUDED.refresh_token_enc, access_expires_at = EXCLUDED.access_expires_at, health = 'connected',
+           mirror_target = EXCLUDED.mirror_target`,
+        [userId, provider, calendar.ref, accessToken, refreshToken, new Date(checkedAt + token.expires_in * 1000), target],
       );
       return true;
     });
@@ -125,6 +130,18 @@ export const calendarConnectionEndpoints = [
   route('GET', /^calendar\/connections$/, async ({ user }) => calendarConnections(user.id), 'marketer'),
   route('POST', /^calendar\/connections\/(google|microsoft)$/, async ({ request, user, params }) =>
     beginConnection(request, user.id, calendarProvider.parse(params[0])), 'marketer'),
+  route('POST', /^calendar\/connections\/(google|microsoft)\/mirror$/, async ({ request, user, params }) =>
+    beginConnection(request, user.id, calendarProvider.parse(params[0]), true), 'marketer'),
+  route('DELETE', /^calendar\/connections\/(google|microsoft)\/mirror$/, async ({ user, params }) => {
+    const provider = calendarProvider.parse(params[0]);
+    await transaction(async client => {
+      await client.query('SELECT user_id FROM calendar_hosts WHERE user_id = $1 FOR UPDATE', [user.id]);
+      await client.query('DELETE FROM calendar_oauth_requests WHERE user_id = $1 AND provider = $2 AND mirror_requested', [user.id, provider]);
+      await client.query(`UPDATE calendar_connections SET mirror_target = NULL, revision = gen_random_uuid()
+        WHERE user_id = $1 AND provider = $2 AND mirror_target IS NOT NULL`, [user.id, provider]);
+    });
+    return new Response(null, { status: 204 });
+  }, 'marketer'),
   route('GET', /^calendar\/connections\/(google|microsoft)\/callback$/, async ({ request, query, user, params }) => {
     const provider = calendarProvider.parse(params[0]);
     const connected = await completeConnection(request, query, user.id, provider);
@@ -144,7 +161,8 @@ export const calendarConnectionEndpoints = [
 ];
 
 async function refreshAccess(row: Connection) {
-  const token = await calendarToken(row.provider, { grant_type: 'refresh_token', refresh_token: decryptToken(row.refresh_token_enc) });
+  const token = await calendarToken(row.provider,
+    { grant_type: 'refresh_token', refresh_token: decryptToken(row.refresh_token_enc) }, Boolean(row.mirror_target));
   const { rowCount } = await db.query(
     `UPDATE calendar_connections SET access_token_enc = $2, access_expires_at = $3, refresh_token_enc = coalesce($4, refresh_token_enc)
      WHERE revision = $1 AND access_token_enc = $5`,
@@ -161,22 +179,46 @@ async function refreshAccess(row: Connection) {
 async function checkConnection(row: Connection, from: number, until: number) {
   let busy: BusyInterval[] | null = null;
   try {
-    const config = calendarProviderConfig(row.provider);
-    if (!config.clientId || !config.clientSecret) throw new Error('Calendar OAuth is not configured.');
-    const expired = row.access_expires_at.getTime() < Date.now() + 60_000;
-    const access = expired ? await refreshAccess(row) : decryptToken(row.access_token_enc);
-    try {
-      busy = await providerBusy(row.provider, row.calendar_ref, access, from, until);
-    } catch (error) {
-      if (expired || !providerNeedsRefresh(error)) throw error;
-      busy = await providerBusy(row.provider, row.calendar_ref, await refreshAccess(row), from, until);
-    }
+    busy = await withCalendarAccess(row, access => providerBusy(row.provider, row.calendar_ref, access, from, until));
   } catch {
     // The host stays unavailable. Provider responses and appointment details are never retained.
   }
   const health = busy === null ? 'unavailable' : 'connected';
   if (health !== row.health) await db.query('UPDATE calendar_connections SET health = $2 WHERE revision = $1', [row.revision, health]);
   return busy;
+}
+
+async function withCalendarAccess<T>(row: Connection, action: (access: string) => Promise<T>) {
+  const config = calendarProviderConfig(row.provider);
+  if (!config.clientId || !config.clientSecret) throw new Error('Calendar OAuth is not configured.');
+  const expired = row.access_expires_at.getTime() < Date.now() + 60_000;
+  const access = expired ? await refreshAccess(row) : decryptToken(row.access_token_enc);
+  try {
+    return await action(access);
+  } catch (error) {
+    if (expired || !providerNeedsRefresh(error)) throw error;
+    return await action(await refreshAccess(row));
+  }
+}
+
+export type MirrorDestination = { hostId: string; provider: CalendarProvider; target: string };
+export class CalendarMirrorRevoked extends Error {}
+
+/** Check locally enabled write access immediately before each provider request. */
+export async function calendarMirrorRequest(destination: MirrorDestination, url: string, init: RequestInit) {
+  const permitted = `FROM calendar_connections c JOIN users u ON u.id = c.user_id
+    WHERE c.user_id = $1 AND c.provider = $2 AND c.mirror_target = $3
+      AND u.disabled_at IS NULL AND u.role IN ('marketer', 'admin')`;
+  const values = [destination.hostId, destination.provider, destination.target];
+  const { rows: [row] } = await db.query<Connection>(`SELECT c.* ${permitted}`, values);
+  if (!row) throw new CalendarMirrorRevoked();
+  return withCalendarAccess(row, async access => {
+    const { rowCount } = await db.query(`SELECT 1 ${permitted} AND c.revision = $4`, [...values, row.revision]);
+    if (!rowCount) throw new CalendarMirrorRevoked();
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', 'Bearer ' + access);
+    return calendarProviderRequest(url, { ...init, headers });
+  });
 }
 
 type Revisions = Map<string, string[]>;

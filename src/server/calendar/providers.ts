@@ -2,20 +2,22 @@ import { z } from 'zod';
 import type { CalendarProvider } from '@/contracts/calendar';
 
 const googleScope = 'https://www.googleapis.com/auth/calendar.freebusy';
+const googleWriteScope = 'https://www.googleapis.com/auth/calendar.events.owned';
 const graphBase = 'https://graph.microsoft.com/v1.0/me/calendar';
 const graphScope = 'https://graph.microsoft.com/Calendars.ReadBasic';
+const graphWriteScope = 'https://graph.microsoft.com/Calendars.ReadWrite';
 const googleFreeBusy = 'https://www.googleapis.com/calendar/v3/freeBusy';
 
 export const calendarProvider = z.enum(['google', 'microsoft']);
 
-export function calendarProviderConfig(provider: CalendarProvider) {
+export function calendarProviderConfig(provider: CalendarProvider, mirror = false) {
   if (provider === 'google') return {
     label: 'Google Calendar',
     clientId: process.env.GOOGLE_CLIENT_ID?.trim() ?? '',
     clientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() ?? '',
     authorize: 'https://accounts.google.com/o/oauth2/v2/auth',
     token: 'https://oauth2.googleapis.com/token',
-    scopes: googleScope,
+    scopes: mirror ? `openid ${googleScope} ${googleWriteScope}` : googleScope,
     extra: { access_type: 'offline', prompt: 'consent select_account' },
   };
   const configured = process.env.MICROSOFT_TENANT_ID?.trim();
@@ -29,12 +31,12 @@ export function calendarProviderConfig(provider: CalendarProvider) {
     clientSecret: process.env.MICROSOFT_CLIENT_SECRET?.trim() ?? '',
     authorize: microsoft + '/authorize',
     token: microsoft + '/token',
-    scopes: `offline_access ${graphScope}`,
+    scopes: `offline_access ${mirror ? graphWriteScope : graphScope}`,
     extra: { prompt: 'select_account', response_mode: 'query' },
   };
 }
 
-class ProviderResponseError extends Error {
+export class ProviderResponseError extends Error {
   constructor(readonly status: number) { super('The calendar provider declined the request.'); }
 }
 
@@ -42,14 +44,18 @@ export function providerNeedsRefresh(error: unknown) {
   return error instanceof ProviderResponseError && error.status === 401;
 }
 
-async function providerJson(url: string, init: RequestInit) {
+export async function calendarProviderRequest(url: string, init: RequestInit) {
   const response = await fetch(url, { ...init, cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(4500) });
   if (!response.ok) throw new ProviderResponseError(response.status);
-  return await response.json() as unknown;
+  return response;
 }
 
-export async function calendarToken(provider: CalendarProvider, params: Record<string, string>) {
-  const config = calendarProviderConfig(provider);
+async function providerJson(url: string, init: RequestInit) {
+  return await (await calendarProviderRequest(url, init)).json() as unknown;
+}
+
+export async function calendarToken(provider: CalendarProvider, params: Record<string, string>, mirror = false) {
+  const config = calendarProviderConfig(provider, mirror);
   if (!config.clientId || !config.clientSecret) throw new Error('Calendar OAuth is not configured.');
   const response = await providerJson(config.token, {
     method: 'POST',
@@ -63,13 +69,27 @@ export async function calendarToken(provider: CalendarProvider, params: Record<s
     access_token: z.string().min(1),
     refresh_token: z.string().min(1).optional(),
     expires_in: z.coerce.number().int().positive().max(86_400),
+    scope: z.string().optional(),
   }).parse(response);
 }
 
-export async function primaryCalendar(provider: CalendarProvider, accessToken: string) {
-  if (provider === 'google') return 'primary';
-  const data = await providerJson(graphBase + '?$select=owner', { headers: { Authorization: 'Bearer ' + accessToken } });
-  return z.object({ owner: z.object({ address: z.email() }) }).parse(data).owner.address.toLowerCase();
+export async function primaryCalendar(provider: CalendarProvider, accessToken: string, mirror = false) {
+  const headers = { Authorization: 'Bearer ' + accessToken };
+  if (provider === 'google') {
+    const identity = mirror ? z.object({ sub: z.string().min(1) }).parse(
+      await providerJson('https://openidconnect.googleapis.com/v1/userinfo', { headers })).sub : null;
+    return { ref: 'primary', identity };
+  }
+  const data = z.object({ id: z.string().min(1).optional(), owner: z.object({ address: z.email() }) }).parse(
+    await providerJson(graphBase + (mirror ? '?$select=id,owner' : '?$select=owner'), { headers }));
+  if (mirror && !data.id) throw new Error('The primary calendar could not be identified.');
+  return { ref: data.owner.address.toLowerCase(), identity: data.id ?? null };
+}
+
+export function hasCalendarWriteScope(provider: CalendarProvider, scope = '') {
+  const scopes = scope.toLowerCase().split(/\s+/);
+  return provider === 'google' ? scopes.includes(googleWriteScope)
+    : scopes.includes('calendars.readwrite') || scopes.includes(graphWriteScope.toLowerCase());
 }
 
 export type BusyInterval = { startsAt: number; blockedUntil: number };

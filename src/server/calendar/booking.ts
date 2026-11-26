@@ -9,6 +9,7 @@ import { schedulePlatformJob } from '../platform/jobs';
 import { hostSchedule, minute, slotInterval, slotRange, timeZone } from './availability';
 import { checkCalendars, currentCalendarRevisions } from './connections';
 import type { CalendarAvailabilityCheck } from './connections';
+import { queueAppointmentMirror } from './mirror';
 import type { Availability } from '@/contracts/calendar';
 
 export const bookingSlug = z.string().min(3).max(80).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Use lowercase words separated by hyphens.');
@@ -163,7 +164,10 @@ export async function appointmentEvent(client: Sql, row: AppointmentRow, type: '
     properties: { title: row.title, startsAt: row.starts_at.toISOString(), startsAtLabel: startLabel(row), timeZone: row.time_zone, hostId: row.host_id },
     idempotencyKey: `appointment.${type}:${row.id}:${row.revision}`,
   }, client);
-  if (type === 'booked' || type === 'rescheduled' || type === 'cancelled') await notify(client, row, type === 'booked' ? 'confirmed' : type);
+  if (type === 'booked' || type === 'rescheduled' || type === 'cancelled') {
+    await notify(client, row, type === 'booked' ? 'confirmed' : type);
+    await queueAppointmentMirror(client, row.id, row.host_id);
+  }
 }
 
 async function alreadyBooked(client: Sql, typeId: string, input: z.infer<typeof bookingInput>) {
