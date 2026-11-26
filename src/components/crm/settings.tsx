@@ -6,14 +6,16 @@ import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, us
 import type { DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { ArrowDown, ArrowUp, GripVertical, Inbox, Plus, Trash2, Users } from 'lucide-react';
+import { ArrowDown, ArrowUp, Download, GripVertical, Inbox, Plus, Trash2, Users } from 'lucide-react';
 import NextLink from 'next/link';
 import { useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
+import { Heading } from '@astryxdesign/core/Heading';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { MultiSelector } from '@astryxdesign/core/MultiSelector';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
+import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
 import { Table } from '@astryxdesign/core/Table';
@@ -22,13 +24,14 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { useToast } from '@astryxdesign/core/Toast';
 import type {
-  InboxConversation, Mailbox, MailboxOverview, Pipeline, PipelineStage, Sequence, SequenceEnrolment, SequenceInput, SequenceStep, TaskType,
+  InboxConversation, InboxThread, InboxThreadSummary, Mailbox, MailboxOverview, Pipeline, PipelineStage, Sequence, SequenceEnrolment,
+  SequenceInput, SequenceStep, TaskType,
 } from '@/contracts/crm';
 import { taskTypeLabels } from '@/contracts/crm';
 import { mergeTags } from '@/contracts/merge-tags';
-import { api, message, useAction, useResource } from '../client';
+import { api, message, saveFile, useAction, useResource } from '../client';
 import { useUser } from '../shell';
-import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, SlideDrawer, StatusBadge } from '../ui';
+import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, SlideDrawer, StatusBadge, Toolbar } from '../ui';
 import { ContactPicker, relative, shortDate, dateTime } from './common';
 import type { Member, RecordOption } from './common';
 
@@ -498,26 +501,123 @@ export function MailboxSettings({ connected, error }: { connected?: string; erro
 
 const sourceLabel: Record<InboxConversation['source'], string> = { mailbox: 'Synced', logged: 'Logged', sent: 'Sent from OVELIO' };
 
-export function SalesInbox() {
-  const inbox = useResource<InboxConversation[]>('/sales/inbox');
-  return <div className="ov-stack">
-    <PageHeader title="Inbox" description="Latest email conversation with each contact: synced from connected mailboxes, logged by hand or sent from OVELIO."
-      actions={<Button label="Mailbox settings" href="/settings/mailboxes" icon={<Inbox size={15} />} />} />
-    <Panel>
-      {!inbox.data ? <AsyncState loading={inbox.loading} error={inbox.error} retry={inbox.refresh} /> : inbox.data.length ? <ul className="ov-rows">
-        {inbox.data.map((item, index) => <li key={`${item.contactId}-${index}`}>
+function InboxDirection({ direction }: { direction: InboxConversation['direction'] }) {
+  if (!direction) return null;
+  return <StatusBadge label={direction === 'inbound' ? 'Received' : 'Sent'} tone={direction === 'inbound' ? 'info' : 'neutral'} />;
+}
+
+function ContactEmailActivity({ query }: { query: string }) {
+  const search = query ? `?q=${encodeURIComponent(query)}` : '';
+  const inbox = useResource<InboxConversation[]>(`/sales/inbox${search}`);
+  const action = useAction();
+  if (!inbox.data) return <AsyncState loading={inbox.loading} error={inbox.error} retry={inbox.refresh} />;
+  if (!inbox.data.length) return query ? <Empty title="No matching contact activity" />
+    : <Empty title="No email activity yet" description="Email sent or logged from a CRM contact appears here." />;
+  return <>
+    <div className="ov-actions ov-actions--end">
+      <Button size="sm" label="Export activity CSV" icon={<Download size={15} />} isLoading={action.busy}
+        onClick={() => void action.run(async () => saveFile(await api<string>(`/sales/inbox/export${search}`), 'ovelio-inbox.csv', 'text/csv'))} />
+    </div>
+    <Feedback error={action.error} />
+    <ul className="ov-rows" aria-label="Contact email activity">
+      {inbox.data.map((item, index) => <li key={`${item.contactId}-${index}`}>
+        <span>
+          <span className="ov-actions">
+            {item.contactId ? <NextLink href={`/crm/contacts/${item.contactId}`}><Text weight="semibold">{item.contactName}</Text></NextLink> : <Text weight="semibold">{item.contactName}</Text>}
+            <InboxDirection direction={item.direction} />
+            <Text type="supporting" color="secondary">{sourceLabel[item.source]}{item.count > 1 ? ` · ${item.count} emails` : ''}</Text>
+          </span>
+          <Text weight="medium">{item.subject || '(no subject)'}</Text>
+          {item.snippet ? <Text type="supporting" color="secondary">{item.snippet}</Text> : null}
+        </span>
+        <time className="ov-crm-when" dateTime={item.at}>{relative(item.at)}</time>
+      </li>)}
+    </ul>
+  </>;
+}
+
+function InboxThreadDrawer({ thread, onClose }: { thread: InboxThreadSummary; onClose: () => void }) {
+  const params = new URLSearchParams({ mailboxId: thread.mailboxId, threadId: thread.threadId });
+  const detail = useResource<InboxThread>(`/sales/inbox/thread?${params}`);
+  const messages = detail.data?.messages;
+  const subject = messages?.at(-1)?.subject;
+  const contactId = messages?.findLast(item => item.contactId != null)?.contactId;
+  return <SlideDrawer title="Conversation" onClose={onClose}>
+    {!messages ? <AsyncState loading={detail.loading} error={detail.error} retry={detail.refresh} /> : <>
+      <div className="ov-stack-sm ov-crm-inbox-copy">
+        <Heading level={2}>{subject || '(no subject)'}</Heading>
+        <Text type="supporting" color="secondary">Mailbox · {thread.mailboxEmail}</Text>
+        {contactId ? <div className="ov-actions"><Button size="sm" label="View CRM contact" href={`/crm/contacts/${contactId}`} /></div> : null}
+      </div>
+      {messages.length < thread.count ? <Text type="supporting" color="secondary">Showing the most recent {messages.length} messages.</Text> : null}
+      <ol className="ov-rows" aria-label="Conversation messages, oldest first">
+        {messages.map(item => <li key={item.id}>
           <span>
             <span className="ov-actions">
-              {item.contactId ? <NextLink href={`/crm/contacts/${item.contactId}`}><Text weight="semibold">{item.contactName}</Text></NextLink> : <Text weight="semibold">{item.contactName}</Text>}
-              <StatusBadge label={item.direction === 'inbound' ? 'Received' : 'Sent'} tone={item.direction === 'inbound' ? 'info' : 'neutral'} />
-              <Text type="supporting" color="secondary">{sourceLabel[item.source]}{item.count > 1 ? ` · ${item.count} emails` : ''}</Text>
+              <Text weight="semibold">{item.fromEmail || 'Sender unavailable'}</Text>
+              <InboxDirection direction={item.direction} />
             </span>
-            <Text weight="medium">{item.subject || '(no subject)'}</Text>
-            {item.snippet ? <Text type="supporting" color="secondary">{item.snippet}</Text> : null}
+            {item.toEmails ? <Text type="supporting" color="secondary">To {item.toEmails}</Text> : null}
+            {item.subject && item.subject !== subject ? <Text weight="medium">{item.subject}</Text> : null}
+            {item.snippet ? <Text className="ov-crm-inbox-snippet">{item.snippet}</Text> : null}
           </span>
-          <time className="ov-crm-when" dateTime={item.at}>{relative(item.at)}</time>
+          <time className="ov-crm-when" dateTime={item.at}>{dateTime(item.at)}</time>
         </li>)}
-      </ul> : <Empty title="No email conversations yet" description="Send an email from a contact, log one, or connect a mailbox in Settings › Mailboxes." />}
+      </ol>
+    </>}
+  </SlideDrawer>;
+}
+
+function MailboxThreads({ query }: { query: string }) {
+  const threads = useResource<InboxThreadSummary[]>(`/sales/inbox/threads${query ? `?q=${encodeURIComponent(query)}` : ''}`);
+  const [selected, setSelected] = useState<InboxThreadSummary | null>(null);
+  if (!threads.data) return <AsyncState loading={threads.loading} error={threads.error} retry={threads.refresh} />;
+  if (!threads.data.length) return query ? <Empty title="No matching conversations" />
+    : <Empty title="No mailbox conversations yet" description="Synced email with CRM contacts appears here when you connect a mailbox or a teammate shares one with you." />;
+  return <>
+    <ul className="ov-rows" aria-label="Mailbox conversations">
+      {threads.data.map(thread => {
+        const subject = thread.subject || '(no subject)';
+        const counterpart = thread.direction === 'inbound' ? thread.fromEmail : thread.toEmails;
+        return <li key={`${thread.mailboxId}:${thread.threadId}`}>
+          <span>
+            <span className="ov-actions">
+              <Text weight="semibold">{subject}</Text>
+              <InboxDirection direction={thread.direction} />
+            </span>
+            <Text type="supporting" color="secondary">{[counterpart, thread.mailboxEmail, thread.count === 1 ? '1 message' : `${thread.count} messages`].filter(Boolean).join(' · ')}</Text>
+            {thread.snippet ? <Text type="supporting" className="ov-crm-inbox-preview">{thread.snippet}</Text> : null}
+          </span>
+          <div className="ov-actions">
+            <time className="ov-crm-when" dateTime={thread.at}>{relative(thread.at)}</time>
+            <Button size="sm" label="Open" aria-label={`Open conversation ${subject} in ${thread.mailboxEmail}`} onClick={() => setSelected(thread)} />
+          </div>
+        </li>;
+      })}
+    </ul>
+    {selected ? <InboxThreadDrawer thread={selected} onClose={() => setSelected(null)} /> : null}
+  </>;
+}
+
+export function SalesInbox() {
+  const [view, setView] = useState('conversations');
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  return <div className="ov-stack">
+    <PageHeader title="Inbox" description="Review synced mailbox conversations and email activity recorded in CRM."
+      actions={<Button label="Mailbox settings" href="/settings/mailboxes" icon={<Inbox size={15} />} />} />
+    <Panel>
+      <Toolbar end={<form className="ov-crm-inbox-search" role="search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); }}>
+        <TextInput label="Search email" isLabelHidden type="search" startIcon="search" placeholder="Subject, address or message" width="100%"
+          hasClear value={search} onChange={value => { setSearch(value.slice(0, 200)); if (!value) setQuery(''); }} />
+        <Button type="submit" label="Search" />
+      </form>}>
+        <SegmentedControl label="Inbox view" value={view} onChange={setView}>
+          <SegmentedControlItem value="conversations" label="Conversations" />
+          <SegmentedControlItem value="activity" label="Contact activity" />
+        </SegmentedControl>
+      </Toolbar>
+      {view === 'conversations' ? <MailboxThreads key={query} query={query} /> : <ContactEmailActivity query={query} />}
     </Panel>
   </div>;
 }
