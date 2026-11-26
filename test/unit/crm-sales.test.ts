@@ -194,10 +194,11 @@ test('CRM-10 mailbox tokens are encrypted, OAuth URLs carry state and PKCE, and 
   assert.equal(mailboxes.parseGraphMessage({ id: 'o1', conversationId: 'c', from: { emailAddress: { address: 'A@B.example' } } }).from, 'a@b.example');
   const [claire] = await searchContacts('claire');
   const mailbox = (await db.query<{ id: string }>(`INSERT INTO crm_mailboxes (user_id, provider, email, refresh_token_enc) VALUES ($1, 'google', 'rep@ovelio.test', 'x') RETURNING id`, [user.id])).rows[0].id;
-  await db.query(`INSERT INTO crm_mailbox_messages (mailbox_id, provider_message_id, thread_id, contact_id, direction) VALUES ($1, 'sent1', 'th1', $2, 'outbound')`, [mailbox, claire.id]);
+  await db.query(`INSERT INTO crm_mailbox_messages (mailbox_id, provider_message_id, thread_id, contact_id, direction, occurred_at)
+    VALUES ($1, 'sent1', 'th1', $2, 'outbound', $3)`, [mailbox, claire.id, new Date(Date.parse(parsed.at) - 60_000).toISOString()]);
   assert.equal(await mailboxes.ingestMessages(mailbox, 'rep@ovelio.test', [parsed]), 1);
   assert.equal(await mailboxes.ingestMessages(mailbox, 'rep@ovelio.test', [parsed]), 0, 'sync is idempotent');
-  const replies = await listEvents({ contactId: claire.id, types: ['email.replied'] });
+  const replies = await listEvents({ contactId: claire.id, types: ['email.replied'] }, user.id);
   assert.ok(replies.some(event => event.properties.messageId === 'g1'));
 });
 

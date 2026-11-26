@@ -8,6 +8,7 @@ import { createCompany, getContact, linkContactToCompany, searchCompanies, searc
 import { audit, emitEvent, listEvents } from '../events';
 import { json, readBody } from '../http';
 import { sendEmail } from '../mailer';
+import { mailboxRecordVisible } from '../mailbox-access';
 import { logActivity } from '../records';
 import { route } from '../routes/shared';
 import type { Entry } from '../routes/shared';
@@ -62,7 +63,7 @@ export async function ownersFor(object: 'contact' | 'company', ids: number[]): P
   return new Map(rows.rows.map(row => [Number(row.record_id), { id: row.id, name: row.name, email: row.email }]));
 }
 
-export async function contactProfile(id: number): Promise<ContactProfile> {
+export async function contactProfile(id: number, viewerId: string): Promise<ContactProfile> {
   const contact = await getContact(id);
   if (!contact) throw new AppError(404, 'That contact was not found.');
   const [owner, deals, tasks, activities, messages, events, members] = await Promise.all([
@@ -70,9 +71,10 @@ export async function contactProfile(id: number): Promise<ContactProfile> {
     listDeals({ contactId: id, status: 'all' }, { limit: 100, sort: 'updatedAt' }),
     db.query<TaskQueryRow>(`${taskSelect} WHERE t.contact_id = $1 OR t.deal_id IN (SELECT id FROM deals WHERE contact_id = $1)
       ORDER BY t.status = 'open' DESC, t.due_at NULLS LAST LIMIT 200`, [id]),
-    db.query<ActivityQueryRow>(`${activitySelect} WHERE a.contact_id = $1 ORDER BY a.occurred_at DESC LIMIT 200`, [id]),
-    loadMessages({ contactIds: [id], limit: 50 }),
-    listEvents({ contactId: id, limit: 200 }),
+    db.query<ActivityQueryRow>(`${activitySelect} WHERE a.contact_id = $1 AND ${mailboxRecordVisible('a.mailbox_id', '$2')}
+      ORDER BY a.occurred_at DESC LIMIT 200`, [id, viewerId]),
+    loadMessages({ contactIds: [id], limit: 50 }, viewerId),
+    listEvents({ contactId: id, limit: 200 }, viewerId),
     team(),
   ]);
   const mapped = activities.rows.map(toActivity);
@@ -102,16 +104,17 @@ async function crmCompany(id: number): Promise<CrmCompany> {
   };
 }
 
-export async function companyProfile(id: number): Promise<CompanyProfile> {
+export async function companyProfile(id: number, viewerId: string): Promise<CompanyProfile> {
   const company = await crmCompany(id);
   const people = await companyPeople(company, 100);
   const [deals, tasks, activities, events, members] = await Promise.all([
     listDeals({ companyId: id, status: 'all' }, { limit: 100, sort: 'updatedAt' }),
     db.query<TaskQueryRow>(`${taskSelect} WHERE t.company_id = $1 OR t.deal_id IN (SELECT id FROM deals WHERE company_id = $1)
       ORDER BY t.status = 'open' DESC, t.due_at NULLS LAST LIMIT 200`, [id]),
-    db.query<ActivityQueryRow>(`${activitySelect} WHERE a.company_id = $1 OR a.deal_id IN (SELECT id FROM deals WHERE company_id = $1)
-      OR a.contact_id = ANY($2::bigint[]) ORDER BY a.occurred_at DESC LIMIT 200`, [id, people.items.map(person => person.id)]),
-    listEvents({ companyId: id, limit: 200 }),
+    db.query<ActivityQueryRow>(`${activitySelect} WHERE (a.company_id = $1 OR a.deal_id IN (SELECT id FROM deals WHERE company_id = $1)
+      OR a.contact_id = ANY($2::bigint[])) AND ${mailboxRecordVisible('a.mailbox_id', '$3')}
+      ORDER BY a.occurred_at DESC LIMIT 200`, [id, people.items.map(person => person.id), viewerId]),
+    listEvents({ companyId: id, limit: 200 }, viewerId),
     team(),
   ]);
   const mapped = activities.rows.map(toActivity);
@@ -167,12 +170,12 @@ export const peopleEndpoints: Entry[] = [
     const ids = (query.get('ids') ?? '').split(',').map(Number).filter(id => Number.isInteger(id) && id > 0).slice(0, 500);
     return Object.fromEntries(await ownersFor(object, ids));
   }, 'marketer'),
-  route('GET', /^crm\/contacts\/(\d+)\/profile$/, async ({ params }) => contactProfile(Number(params[0])), 'marketer'),
+  route('GET', /^crm\/contacts\/(\d+)\/profile$/, async ({ params, user }) => contactProfile(Number(params[0]), user.id), 'marketer'),
   route('POST', /^crm\/contacts\/(\d+)\/email$/, async ({ request, params, user }) => {
     const input = await readBody(request, z.object({
       subject: z.string().trim().min(1).max(200), body: z.string().trim().min(1).max(50_000), dealId: uuid.nullable().optional(), via: z.string().max(40).optional(),
     }));
     return sendSalesEmail(Number(params[0]), input, user);
   }, 'marketer'),
-  route('GET', /^crm\/companies\/(\d+)\/profile$/, async ({ params }) => companyProfile(Number(params[0])), 'marketer'),
+  route('GET', /^crm\/companies\/(\d+)\/profile$/, async ({ params, user }) => companyProfile(Number(params[0]), user.id), 'marketer'),
 ];

@@ -10,6 +10,7 @@ import { db, transaction } from '../db';
 import { getCompanies, getContact } from '../directory';
 import { audit, emitEvent, listEvents } from '../events';
 import { json, readBody } from '../http';
+import { mailboxRecordVisible } from '../mailbox-access';
 import { createDeal, defaultPipelineId, moveDeal } from '../records';
 import { route } from '../routes/shared';
 import type { Entry } from '../routes/shared';
@@ -267,15 +268,16 @@ async function people(deal: Deal): Promise<DealPerson[]> {
   return list;
 }
 
-export async function dealDetail(id: string): Promise<DealDetail> {
+export async function dealDetail(id: string, viewerId: string): Promise<DealDetail> {
   const deal = await loadDeal(id);
   const [pipeline, persons, activities, tasks, history, events, members] = await Promise.all([
     loadPipeline(deal.pipelineId), people(deal),
-    db.query<ActivityQueryRow>(`${activitySelect} WHERE a.deal_id = $1 ORDER BY a.occurred_at DESC LIMIT 200`, [id]),
+    db.query<ActivityQueryRow>(`${activitySelect} WHERE a.deal_id = $1 AND ${mailboxRecordVisible('a.mailbox_id', '$2')}
+      ORDER BY a.occurred_at DESC LIMIT 200`, [id, viewerId]),
     db.query<TaskQueryRow>(`${taskSelect} WHERE t.deal_id = $1 ORDER BY t.status = 'open' DESC, t.due_at NULLS LAST, t.created_at DESC`, [id]),
-    loadHistory(id), listEvents({ dealId: id, limit: 200 }), team(),
+    loadHistory(id), listEvents({ dealId: id, limit: 200 }, viewerId), team(),
   ]);
-  const messages = await loadMessages({ contactIds: persons.map(person => person.contactId), limit: 30 });
+  const messages = await loadMessages({ contactIds: persons.map(person => person.contactId), limit: 30 }, viewerId);
   const mappedActivities = activities.rows.map(toActivity);
   const names = { contacts: new Map(persons.map(person => [person.contactId, person.name])), companies: deal.companyId ? new Map([[deal.companyId, deal.companyName]]) : undefined };
   return {
@@ -315,7 +317,7 @@ export const dealEndpoints: Entry[] = [
     const created = await createDeal({ ...input, ownerId: input.ownerId === undefined ? user.id : input.ownerId, source: 'manual', actorId: user.id });
     return json(await loadDeal(created.id), 201);
   }, 'marketer'),
-  route('GET', /^sales\/deals\/([0-9a-f-]{36})$/, async ({ params }) => dealDetail(uuid.parse(params[0])), 'marketer'),
+  route('GET', /^sales\/deals\/([0-9a-f-]{36})$/, async ({ params, user }) => dealDetail(uuid.parse(params[0]), user.id), 'marketer'),
   route('PATCH', /^sales\/deals\/([0-9a-f-]{36})$/, async ({ request, params, user }) => updateDeal(uuid.parse(params[0]), await readBody(request, dealPatch), user.id), 'marketer'),
   route('POST', /^sales\/deals\/([0-9a-f-]{36})\/move$/, async ({ request, params, user }) => {
     const input = await readBody(request, z.object({ stageId: uuid, previousId: uuid.nullable().optional(), nextId: uuid.nullable().optional(), lostReason: z.string().trim().max(300).optional() }));

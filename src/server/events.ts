@@ -3,6 +3,7 @@ import type { EventInput, PlatformEvent, PlatformEventType } from '@/contracts/p
 import { platformEventTypes } from '@/contracts/platform';
 import { db } from './db';
 import type { Sql } from './db';
+import { mailboxRecordVisible } from './mailbox-access';
 import { schedulePlatformJob } from './platform/jobs';
 
 type EventRow = {
@@ -43,15 +44,15 @@ export async function emitEvent(input: EventInput, client: Sql = db): Promise<Pl
   if (!platformEventTypes.includes(input.type)) throw new Error(`Unknown platform event type: ${input.type}`);
   const result = await client.query<EventRow>(
     `INSERT INTO events (type, occurred_at, contact_id, company_id, deal_id, campaign_id, entity_type, entity_id, source,
-       visitor_id, amount, currency, utm, properties, actor_id, idempotency_key)
-     VALUES ($1, coalesce($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       visitor_id, amount, currency, utm, properties, actor_id, idempotency_key, mailbox_id)
+     VALUES ($1, coalesce($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      ON CONFLICT (idempotency_key) DO NOTHING
      RETURNING ${eventColumns}`,
     [
       input.type, input.occurredAt ? new Date(input.occurredAt).toISOString() : null, input.contactId ?? null, input.companyId ?? null,
       input.dealId ?? null, input.campaignId ?? null, input.entityType ?? null, input.entityId ?? null, input.source ?? 'ovelio',
       input.visitorId ?? null, input.amount ?? null, input.currency ?? null, JSON.stringify(input.utm ?? {}),
-      JSON.stringify(input.properties ?? {}), input.actorId ?? null, input.idempotencyKey ?? null,
+      JSON.stringify(input.properties ?? {}), input.actorId ?? null, input.idempotencyKey ?? null, input.mailboxId ?? null,
     ],
   );
   const row = result.rows[0];
@@ -64,10 +65,12 @@ export async function emitEvent(input: EventInput, client: Sql = db): Promise<Pl
 export async function listEvents(filter: {
   contactId?: number; companyId?: number; dealId?: string; campaignId?: string; entityType?: string; entityId?: string;
   types?: PlatformEventType[]; since?: Date; until?: Date; limit?: number;
-}): Promise<PlatformEvent[]> {
+}, viewerId?: string): Promise<PlatformEvent[]> {
   const where: string[] = [];
   const values: unknown[] = [];
   const add = (sql: string, value: unknown) => { values.push(value); where.push(sql.replace('?', '$' + values.length)); };
+  if (viewerId) add(mailboxRecordVisible('events.mailbox_id', '?'), viewerId);
+  else where.push('events.mailbox_id IS NULL');
   if (filter.contactId) add('contact_id = ?', filter.contactId);
   if (filter.companyId) add('company_id = ?', filter.companyId);
   if (filter.dealId) add('deal_id = ?', filter.dealId);
@@ -79,7 +82,7 @@ export async function listEvents(filter: {
   if (filter.until) add('occurred_at < ?', filter.until.toISOString());
   values.push(Math.min(Math.max(filter.limit ?? 100, 1), 1000));
   const result = await db.query<EventRow>(
-    `SELECT ${eventColumns} FROM events ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    `SELECT ${eventColumns} FROM events WHERE ${where.join(' AND ')}
      ORDER BY occurred_at DESC, id DESC LIMIT $${values.length}`,
     values,
   );

@@ -111,6 +111,8 @@ export type EventInput = {
   utm?: Utm;
   properties?: Record<string, unknown>;
   actorId?: string | null;
+  /** Restricts console visibility to this mailbox's active owner and explicit members. */
+  mailboxId?: string | null;
   /** Retrying with the same key never records the event twice. */
   idempotencyKey?: string;
 };

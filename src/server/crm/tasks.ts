@@ -9,6 +9,7 @@ import type { Sql } from '../db';
 import { getCompanies, getContacts } from '../directory';
 import { audit } from '../events';
 import { json, readBody } from '../http';
+import { canReadMailbox, mailboxRecordVisible } from '../mailbox-access';
 import { cancelPlatformJob, schedulePlatformJob } from '../platform/jobs';
 import { completeTask, createTask, logActivity } from '../records';
 import { route } from '../routes/shared';
@@ -195,9 +196,9 @@ export const taskEndpoints: Entry[] = [
     return new Response(null, { status: 204 });
   }, 'marketer'),
 
-  route('GET', /^crm\/activities$/, async ({ query }) => {
-    const values: unknown[] = [];
-    const where: string[] = [];
+  route('GET', /^crm\/activities$/, async ({ query, user }) => {
+    const values: unknown[] = [user.id];
+    const where = [mailboxRecordVisible('a.mailbox_id', '$1')];
     for (const [param, column] of [['contactId', 'a.contact_id'], ['companyId', 'a.company_id'], ['dealId', 'a.deal_id']] as const) {
       const value = query.get(param);
       if (!value) continue;
@@ -208,7 +209,7 @@ export const taskEndpoints: Entry[] = [
       values.push(query.get('type'));
       where.push(`a.type = $${values.length}`);
     }
-    const rows = await db.query<ActivityQueryRow>(`${activitySelect} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.occurred_at DESC LIMIT 200`, values);
+    const rows = await db.query<ActivityQueryRow>(`${activitySelect} WHERE ${where.join(' AND ')} ORDER BY a.occurred_at DESC LIMIT 200`, values);
     return rows.rows.map(toActivity);
   }, 'marketer'),
   route('POST', /^crm\/activities$/, async ({ request, user }) => {
@@ -219,11 +220,13 @@ export const taskEndpoints: Entry[] = [
   }, 'marketer'),
   route('DELETE', /^crm\/activities\/([0-9a-f-]{36})$/, async ({ params, user }) => {
     const id = uuid.parse(params[0]);
-    const row = (await db.query<{ author_id: string | null }>('SELECT author_id FROM activities WHERE id = $1', [id])).rows[0];
+    const access = `(a.mailbox_id IS NULL OR ${canReadMailbox('a.mailbox_id', '$2', true)})`;
+    const row = (await db.query<{ author_id: string | null }>(
+      `SELECT a.author_id FROM activities a WHERE a.id = $1 AND ${access}`, [id, user.id])).rows[0];
     if (!row) return new Response(null, { status: 204 });
     if (row.author_id && row.author_id !== user.id && user.role !== 'admin') throw new AppError(403, 'Only the author or an admin can delete this entry.');
-    await db.query('DELETE FROM activities WHERE id = $1', [id]);
-    await audit(user.id, 'delete', 'activity', id);
+    const deleted = await db.query(`DELETE FROM activities a WHERE a.id = $1 AND ${access}`, [id, user.id]);
+    if (deleted.rowCount) await audit(user.id, 'delete', 'activity', id);
     return new Response(null, { status: 204 });
   }, 'marketer'),
 ];

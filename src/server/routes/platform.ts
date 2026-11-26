@@ -63,7 +63,7 @@ export const platformEndpoints: Entry[] = [
     );
     return result.rows;
   }),
-  route('GET', /^platform\/events$/, async ({ query }) => {
+  route('GET', /^platform\/events$/, async ({ query, user }) => {
     const types = (query.get('types') ?? '').split(',').filter(type => (platformEventTypes as readonly string[]).includes(type));
     return listEvents({
       contactId: query.get('contactId') ? Number(query.get('contactId')) : undefined,
@@ -74,7 +74,7 @@ export const platformEndpoints: Entry[] = [
       entityId: query.get('entityId') ?? undefined,
       types: types as never,
       limit: Number(query.get('limit') ?? 100),
-    });
+    }, user.id);
   }),
   route('GET', /^platform\/views$/, async ({ query, user }) => {
     const object = z.string().min(1).max(40).parse(query.get('object'));

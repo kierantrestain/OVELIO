@@ -137,7 +137,8 @@ async function leads(q: InsightsQuery, drill: DrillParams, page: number): Promis
 async function messages(q: InsightsQuery, drill: DrillParams, page: number): Promise<DrillResult> {
   const { filters } = narrowed(q.filters, drill);
   const p = new Params();
-  const where = [`m.status = 'sent'`, `m.category <> 'test'`, `m.sent_at >= ${p.add(iso(q.range.startAt))}`, `m.sent_at < ${p.add(iso(q.range.endAt))}`];
+  const where = [`m.status = 'sent'`, `m.category <> 'test'`, 'm.mailbox_id IS NULL',
+    `m.sent_at >= ${p.add(iso(q.range.startAt))}`, `m.sent_at < ${p.add(iso(q.range.endAt))}`];
   if (filters.campaignId) where.push(`m.campaign_id = ${p.add(filters.campaignId)}`);
   if (filters.ownerId) where.push(`m.created_by = ${p.add(filters.ownerId)}`);
   const result = await db.query<{ id: string; subject: string; to_email: string; contact_id: string | null; category: string; sent_at: Date; total: string }>(

@@ -6,6 +6,7 @@ import { effectiveProbability, sourceLabel } from '@/contracts/crm';
 import { AppError } from '../config';
 import { db } from '../db';
 import type { Sql } from '../db';
+import { mailboxRecordVisible } from '../mailbox-access';
 
 export const uuid = z.uuid();
 export const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a YYYY-MM-DD date.');
@@ -87,7 +88,8 @@ export const dealSelect = `SELECT d.id, d.pipeline_id, p.name AS pipeline_name, 
   d.expected_close_date, d.closed_at, d.lost_reason, d.board_position, d.custom, d.created_at, d.updated_at, d.archived_at,
   coalesce((SELECT max(h.changed_at) FROM deal_stage_history h WHERE h.deal_id = d.id AND h.to_stage_id = d.stage_id), d.created_at) AS stage_entered_at,
   (SELECT count(*) FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open') AS open_tasks,
-  (SELECT max(a.occurred_at) FROM activities a WHERE a.deal_id = d.id OR (d.contact_id IS NOT NULL AND a.contact_id = d.contact_id)) AS last_activity_at,
+  (SELECT max(a.occurred_at) FROM activities a
+   WHERE a.mailbox_id IS NULL AND (a.deal_id = d.id OR a.contact_id = d.contact_id)) AS last_activity_at,
   (SELECT t.title FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open' ORDER BY t.due_at NULLS LAST, t.created_at LIMIT 1) AS next_task_title,
   (SELECT t.due_at FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open' ORDER BY t.due_at NULLS LAST, t.created_at LIMIT 1) AS next_task_due
   FROM deals d
@@ -188,12 +190,13 @@ export const toActivity = (row: ActivityQueryRow): Activity => ({
 
 type MessageRow = { id: string; subject: string; to_email: string; from_email: string; status: MessageSummary['status']; status_reason: string; category: string; source: string; created_at: Date };
 
-export async function loadMessages(filter: { contactIds: number[]; limit?: number }): Promise<MessageSummary[]> {
+export async function loadMessages(filter: { contactIds: number[]; limit?: number }, viewerId: string): Promise<MessageSummary[]> {
   if (!filter.contactIds.length) return [];
   const result = await db.query<MessageRow>(
     `SELECT id, subject, to_email, from_email, status, status_reason, category, source, created_at FROM messages
-     WHERE contact_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2`,
-    [filter.contactIds, filter.limit ?? 50],
+     WHERE contact_id = ANY($1::bigint[]) AND ${mailboxRecordVisible('messages.mailbox_id', '$3')}
+     ORDER BY created_at DESC LIMIT $2`,
+    [filter.contactIds, filter.limit ?? 50, viewerId],
   );
   return result.rows.map(row => ({
     id: row.id, subject: row.subject, toEmail: row.to_email, fromEmail: row.from_email, status: row.status, statusReason: row.status_reason,

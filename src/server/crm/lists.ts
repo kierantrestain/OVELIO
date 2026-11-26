@@ -46,7 +46,7 @@ async function candidateIds(filters: ContactListFilters): Promise<number[] | nul
       UNION SELECT dc.contact_id FROM deal_contacts dc JOIN deals d ON d.id = dc.deal_id WHERE d.status = 'open' AND d.archived_at IS NULL`, []));
   }
   if (filters.activityAfter || filters.activityBefore) {
-    sets.push(await ids(`SELECT contact_id AS id FROM activities WHERE contact_id IS NOT NULL GROUP BY contact_id
+    sets.push(await ids(`SELECT contact_id AS id FROM activities WHERE contact_id IS NOT NULL AND mailbox_id IS NULL GROUP BY contact_id
       HAVING ($1::date IS NULL OR max(occurred_at) >= $1::date) AND ($2::date IS NULL OR max(occurred_at) < $2::date)`,
     [filters.activityAfter ?? null, filters.activityBefore ?? null]));
   }
@@ -67,8 +67,8 @@ export async function enrichContacts(contacts: EngineContact[]): Promise<CrmCont
        ) x JOIN deals d ON d.id = x.deal_id WHERE d.status = 'open' AND d.archived_at IS NULL GROUP BY x.contact_id`, [ids]),
     db.query<{ contact_id: string; at: Date }>(
       `SELECT contact_id, max(at) AS at FROM (
-         SELECT contact_id, occurred_at AS at FROM activities WHERE contact_id = ANY($1::bigint[])
-         UNION ALL SELECT contact_id, created_at FROM messages WHERE contact_id = ANY($1::bigint[])
+         SELECT contact_id, occurred_at AS at FROM activities WHERE contact_id = ANY($1::bigint[]) AND mailbox_id IS NULL
+         UNION ALL SELECT contact_id, created_at FROM messages WHERE contact_id = ANY($1::bigint[]) AND mailbox_id IS NULL
        ) x GROUP BY contact_id`, [ids]),
   ]);
   const dealMap = new Map(deals.rows.map(row => [Number(row.contact_id), row]));
@@ -156,7 +156,7 @@ export async function listCrmCompanies(query: URLSearchParams, user: User): Prom
        FROM deals WHERE company_id = ANY($1::bigint[]) AND archived_at IS NULL GROUP BY company_id`, [ids]),
     db.query<{ company_id: string; at: Date }>(
       `SELECT coalesce(a.company_id, d.company_id) AS company_id, max(a.occurred_at) AS at FROM activities a LEFT JOIN deals d ON d.id = a.deal_id
-       WHERE a.company_id = ANY($1::bigint[]) OR d.company_id = ANY($1::bigint[]) GROUP BY 1`, [ids]),
+       WHERE a.mailbox_id IS NULL AND (a.company_id = ANY($1::bigint[]) OR d.company_id = ANY($1::bigint[])) GROUP BY 1`, [ids]),
   ]);
   const sumMap = new Map(sums.rows.map(row => [Number(row.company_id), row]));
   const activityMap = new Map(activity.rows.map(row => [Number(row.company_id), new Date(row.at).toISOString()]));

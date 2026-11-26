@@ -118,7 +118,8 @@ export async function reputationChecks(): Promise<DeliverabilityCheck[]> {
     .map(([reason, count]) => `${count} ${reason}`).join(', ');
   checks.push({ id: 'suppressions', group: 'Reputation', label: 'Suppression growth (28 days)', status: recent.length > Math.max(10, before.length * 2) ? 'warn' : 'pass',
     value: `+${recent.length}`, detail: `${byReason || 'No new suppressions'}; ${before.length} in the 28 days before.` });
-  const native = await db.query<{ status: string; count: string }>(`SELECT status, count(*) AS count FROM messages WHERE created_at > now() - interval '30 days' AND category <> 'test' GROUP BY status`);
+  const native = await db.query<{ status: string; count: string }>(`SELECT status, count(*) AS count FROM messages
+    WHERE created_at > now() - interval '30 days' AND category <> 'test' AND mailbox_id IS NULL GROUP BY status`);
   const counts = Object.fromEntries(native.rows.map(row => [row.status, Number(row.count)]));
   checks.push({ id: 'native', group: 'Reputation', label: 'OVELIO sends (30 days)', status: 'info',
     value: `${counts.sent ?? 0} accepted`, detail: `${counts.blocked ?? 0} blocked by consent or suppression, ${counts.failed ?? 0} failed, ${counts.not_sent ?? 0} not sent. "Accepted" means the relay took the message; it does not show inbox placement.` });

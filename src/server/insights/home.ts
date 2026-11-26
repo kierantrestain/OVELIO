@@ -83,7 +83,7 @@ export async function home(user: User): Promise<HomeData> {
       `SELECT count(*) FILTER (WHERE status = 'sent' AND sent_at >= $1) AS sent,
               count(*) FILTER (WHERE status = 'sent' AND sent_at >= $2 AND sent_at < $1) AS previous,
               count(*) FILTER (WHERE status IN ('not_sent', 'blocked', 'failed') AND created_at >= $1) AS not_sent
-       FROM messages WHERE category <> 'test' AND created_at >= $2`,
+       FROM messages WHERE category <> 'test' AND mailbox_id IS NULL AND created_at >= $2`,
       [iso(now - 7 * DAY), iso(now - 14 * DAY)],
     ),
     onboarding(user),

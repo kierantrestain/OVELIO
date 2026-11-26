@@ -473,6 +473,20 @@ export type InboxConversation = {
   source: 'mailbox' | 'logged' | 'sent';
 };
 
+export type InboxThreadMessage = {
+  id: string;
+  contactId: number | null;
+  subject: string;
+  snippet: string;
+  fromEmail: string;
+  toEmails: string;
+  direction: 'inbound' | 'outbound';
+  at: string;
+};
+
+export type InboxThreadSummary = InboxThreadMessage & { mailboxId: string; mailboxEmail: string; threadId: string; count: number };
+export type InboxThread = { mailboxId: string; threadId: string; messages: InboxThreadMessage[] };
+
 /* ── Filters and helpers ──────────────────────────────────────────────── */
 
 export type SalesFilterOptions = { campaigns: { id: string; name: string }[]; lostReasons: string[]; currencies: string[] };

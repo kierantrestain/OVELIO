@@ -68,7 +68,7 @@ async function period(range: DateRange, filters: InsightsFilters, currency: stri
   const created = new Params();
   const createdCur = created.add(currency);
   const messages = new Params();
-  const messageWhere = [`m.status = 'sent'`, `m.category <> 'test'`,
+  const messageWhere = [`m.status = 'sent'`, `m.category <> 'test'`, 'm.mailbox_id IS NULL',
     `m.sent_at >= ${messages.add(iso(range.startAt))}`, `m.sent_at < ${messages.add(iso(range.endAt))}`];
   if (filters.campaignId) messageWhere.push(`m.campaign_id = ${messages.add(filters.campaignId)}`);
   if (filters.ownerId) messageWhere.push(`m.created_by = ${messages.add(filters.ownerId)}`);

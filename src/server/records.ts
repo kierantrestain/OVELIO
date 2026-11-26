@@ -207,21 +207,22 @@ export async function completeTask(taskId: string, actorId: string | null, clien
 export type ActivityInput = {
   type: 'note' | 'call' | 'meeting' | 'email' | 'other'; subject?: string; body?: string; direction?: 'inbound' | 'outbound' | null;
   outcome?: string; durationMinutes?: number | null; occurredAt?: Date | string; contactId?: number | null; companyId?: number | null;
-  dealId?: string | null; messageId?: string | null; authorId?: string | null;
+  dealId?: string | null; messageId?: string | null; authorId?: string | null; mailboxId?: string | null;
 };
 
 export async function logActivity(input: ActivityInput, client: Sql = db) {
   if (!input.contactId && !input.companyId && !input.dealId) throw new AppError(400, 'Link the activity to a contact, company or deal.');
   const result = await client.query<{ id: string }>(
-    `INSERT INTO activities (type, subject, body, direction, outcome, duration_minutes, occurred_at, contact_id, company_id, deal_id, message_id, author_id)
-     VALUES ($1, $2, $3, $4, $5, $6, coalesce($7::timestamptz, now()), $8, $9, $10, $11, $12) RETURNING id`,
+    `INSERT INTO activities (type, subject, body, direction, outcome, duration_minutes, occurred_at, contact_id, company_id, deal_id, message_id, author_id, mailbox_id)
+     VALUES ($1, $2, $3, $4, $5, $6, coalesce($7::timestamptz, now()), $8, $9, $10, $11, $12, $13) RETURNING id`,
     [input.type, input.subject ?? '', input.body ?? '', input.direction ?? null, input.outcome ?? '', input.durationMinutes ?? null,
       input.occurredAt ? new Date(input.occurredAt).toISOString() : null, input.contactId ?? null, input.companyId ?? null,
-      input.dealId ?? null, input.messageId ?? null, input.authorId ?? null],
+      input.dealId ?? null, input.messageId ?? null, input.authorId ?? null, input.mailboxId ?? null],
   );
   await emitEvent({
     type: 'activity.logged', contactId: input.contactId ?? null, companyId: input.companyId ?? null, dealId: input.dealId ?? null,
-    entityType: 'activity', entityId: result.rows[0].id, actorId: input.authorId ?? null, properties: { type: input.type, subject: input.subject ?? '' },
+    entityType: 'activity', entityId: result.rows[0].id, actorId: input.authorId ?? null, mailboxId: input.mailboxId,
+    properties: { type: input.type, subject: input.subject ?? '' },
   }, client);
   return result.rows[0].id;
 }
