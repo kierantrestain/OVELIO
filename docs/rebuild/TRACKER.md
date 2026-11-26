@@ -157,7 +157,7 @@ Rollback points: `fccb9d0` main before 2.0; `a29fb83` first CI-verified 2.0 buil
 
 ### Wave two: complete the customer lifecycle (status: in progress)
 
-Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resumed at `b361bee` after [CI 45847631358](https://github.com/kierantrestain/OVELIO/actions/runs/45847631358) passed. Migration ranges in use: 014 revenue, 015 inbox, 042–043 webhooks, 071 calendar. Assignment and release rules live in [AGENTS.md](../../AGENTS.md).
+Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resumed at `b361bee` after [CI 45847631358](https://github.com/kierantrestain/OVELIO/actions/runs/45847631358) passed. Current migration ownership covers 014 revenue, 015–019 inbox, 042–043 webhooks, 071–072 and 074 calendar, and 073 inbox routing. Assignment and release rules live in [AGENTS.md](../../AGENTS.md).
 
 #### Priority zero: recovery and mailbox privacy
 
@@ -166,6 +166,8 @@ Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resume
 - The authenticated INB-01–04 suite passed on PostgreSQL 18 with a synthetic directory. INB-05 checks session-bound OAuth state and preserves mailbox ownership on reconnect using synthetic provider responses. [CI 45866331774](https://github.com/kierantrestain/OVELIO/actions/runs/45866331774) passed for `b7707df`, including the Compose integration, persistence, isolation and backup restore steps. The local browser gate reported 159 passes and one existing skip.
 - The [protected developer preview](https://ovelio-p3nj15enf-kierantrestain-9646s-projects.vercel.app) returned HTTP 200 and `a503d64cc3080e6fb00eaf1830669ba17dc3e4b3` from `/api/health`. The earlier or inherited PostgreSQL configuration returned 503 in the new preview. Vercel has no connected Git repository, so the lead deployed the exact SHA manually and scoped the embedded override to Preview. The public alias resolved to `fccb9d0` at recovery.
 - The [Wave Two preview at b8ab880](https://ovelio-4ws4kn2zo-kierantrestain-9646s-projects.vercel.app) passed deployed health and login smoke checks. Local lint, type checking, production build, 364 unit tests and 163 browser tests passed, with one existing browser skip. The full Compose gate includes the new calendar contention and inbound webhook gateway cases.
+- The recovery checkpoint `ae08081` passed full Compose CI, including restart, independent client isolation, backup and restore. Vercel reported the same SHA at the protected preview health endpoint. [CI 45872996055](https://github.com/kierantrestain/OVELIO/actions/runs/45872996055), [protected preview](https://ovelio-5fq2om1fq-kierantrestain-9646s-projects.vercel.app)
+- The first communications and calendar checkpoint `1695fef` passed lint, type checking, 379 unit tests, the production audit at the high threshold, production build, 163 preview browser tests with one existing skip, 10 Compose integrations, three Compose browser tests, restart, backup, restore and client isolation. [CI 45880963478](https://github.com/kierantrestain/OVELIO/actions/runs/45880963478)
 
 | Slice | Status | Evidence |
 |---|---|---|
@@ -173,19 +175,28 @@ Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resume
 | Revenue: catalogue, price lists, tax, deal line items, proposals, e-signature, deposits, invoices, Stripe Checkout + webhook, refunds, subscriptions and renewals, onboarding tasks, revenue states, accounting CSV | done | REV-01..REV-09 unit; IQ-20, IQ-21 browser (signing on a 390 px phone) |
 | Workflow triggers: proposal viewed/accepted/declined, payment received/failed, subscription cancelled, meetings | done | REV-09 (accepted proposal enrols the signer) |
 | Calendar: personal and team booking types, time zones, round-robin, public booking and management, reminders, ICS feed | implemented on native SQL and jobs | CAL-01–06, IQ-24. A PostgreSQL 18 contention check granted exactly one of two overlapping public slots for the same host. |
-| Calendar: external busy time and Google/Microsoft synchronisation | pending | needs OAuth and calendar provider fixtures |
+| Calendar: owner-bound Google/Microsoft availability connections | implemented with provider fixtures | CAL-07–08 cover OAuth and revocation, busy-time buffers, connection errors and concurrent connection changes. Checks cover the primary calendar and Microsoft work/school accounts. |
+| Calendar: native landing-page booking buttons | implemented | SIT-17 verifies booking references and canonical URLs. SIT-18 exercises keyboard insertion, publish and signed-out navigation at 390 px. |
+| Calendar: opt-in provider-side appointment copies | implemented with provider fixtures | CAL-09–10 cover idempotent Google and Microsoft creation, reschedule, cancellation and write-grant revocation. Copies are private, busy and omit guest details. |
+| Calendar: incremental changes from external calendars | pending | The provider is checked on demand for busy intervals. OVELIO remains the source for edits to native appointments. |
 | Inbox: mailbox privacy, explicit sharing, threaded reads, search, scoped CSV | implemented | INB-01–05 synthetic-provider / real PostgreSQL checks |
-| Inbox: full bodies, attachments, unread, assignment, notes, saved replies, response times, incremental provider sync | pending | |
+| Inbox: bodies, attachments, read markers and replies | implemented with provider fixtures | INB-06–09, INB-17–18. Downloads and reads recheck current membership, and owner replies use the verified thread and consent. Attachments up to 10 MiB can be downloaded. |
+| Inbox: provider sync, team handling, routing and first-response report | implemented with provider fixtures | INB-10–16, INB-19–22, IQ-26. Gmail History and Outlook folder delta checkpoints follow a bounded 30-day backfill. Team queue and response report enforce current mailbox ACL. |
+| Inbox: WhatsApp Business, SMS and website live chat | pending | Evaluate service reuse and exact commercial terms before adding a separately scoped channel adapter. |
 | Inbound webhooks: exact-byte HMAC, Bearer auth, mappings, retries, diagnostics, hook-specific workflow trigger | implemented | JRN-11 unit, IQ-23 browser, JRN-12 Compose gateway coverage |
-| Provider connectors, sub-workflows, schedules, replay and other advanced automation | pending | |
+| Workflow version rollback | implemented | JRN-13–14 verify atomic activation of an immutable snapshot, draft preservation, stale-request rejection and enrolment version pinning. |
+| Provider connectors, sub-workflows, schedules, replay and other advanced automation | pending | Reuse signed gateways and native event routing. Finish event waits, goals, nested conditions, scheduled enrolment, quotas and replay before the Wave Two gate. |
+| Campaign execution | pending | Add campaign calendars, actual expenditure, approvals and reusable kits. |
+| Connected customer lifecycle | implemented acceptance coverage | IQ-25 drives an authenticated capture, qualification, appointment, deal, proposal signing, deposit, onboarding and renewal on PostgreSQL with worker jobs. Run the synthetic signed Stripe delivery and manual invoice paths. |
 
 Defects found and fixed in wave two: deal line editor overflowing its column (browser), Save draft disabled after typing a
 number (IQ-20), proposal links colliding with Umami's `/q/` route in production (Caddy review), CR-03 relying on a fixed
 job budget.
 
-Pending external verification: Stripe test keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`), Google/Microsoft OAuth
-clients. `/api/health` reports `commit` on deployments built after the Wave Two health change.
+Pending external verification includes live Stripe Checkout, refunds and reconciliation in a test account, and live Google/Microsoft OAuth connections. IQ-25 uses a synthetic signing secret scoped to Compose CI. It exercises duplicate delivery, payment-intent and renewal idempotency. `/api/health` reports the commit, runtime mode and storage.
+
+The response-time report took 8.2 ms for one warmed local PostgreSQL 18 handler call with 60,000 synthetic messages across 300 threads. The query plan stopped the inbound index scan at 5,001 rows. Full-volume application and competitive workflow benchmarks remain open.
 
 Native calendar uses the existing directory, event and jobs contracts. Reservations lock host rows across booking types. This keeps scheduling on OVELIO's existing PostgreSQL runtime. [Easy!Appointments requirements](https://github.com/alextselegidis/easyappointments#-installation-production)
 
-**Continuation point** — Complete mailbox bodies, attachments and unread state with the existing ACL, then incremental provider sync, team ownership and notes. Add external calendar busy time and Google/Microsoft synchronisation, finish the connector and advanced automation work, then verify the Wave Two lifecycle (lead → CRM → appointment → proposal → contract → payment → onboarding → renewal). Release Waves Three and Four after that gate.
+**Continuation point** — Add incremental inbound calendar reconciliation and official WhatsApp/SMS/live chat adapters. Extend connectors and workflow execution, then complete campaign operations and accounting reconciliation. Use IQ-25 and the existing calendar/inbox browser and server suites as the integration baseline. Open Wave Three after the Wave Two gate, then validate enterprise isolation, install/restore and market benchmarks for Wave Four.

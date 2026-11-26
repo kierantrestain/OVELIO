@@ -24,6 +24,10 @@ The [upstream license texts](deploy/licenses) accompany this repository. [Packag
 | StyleX runtime (`@stylexjs/stylex`) | 0.19.2 | [MIT, © Meta Platforms, Inc. and affiliates](https://github.com/facebook/stylex) |
 | Figtree typeface (bundled by the Astryx neutral theme) | — | SIL Open Font License 1.1, text in `node_modules/@astryxdesign/theme-neutral/fonts/figtree.LICENSE.txt` |
 | Lucide icons (`lucide-react`) | 1.77.0 | [ISC](https://github.com/lucide-icons/lucide) |
+| GrapesJS and `grapesjs-mjml` | 0.23.9 and 1.0.8 | BSD-3-Clause in the pinned package metadata |
+| MJML | 5.4.1 | MIT in the pinned package metadata |
+| React Flow (`@xyflow/react`) | 12.12.1 | MIT in the pinned package metadata |
+| dnd-kit (`core`, `sortable`, `utilities`) | 6.3.1, 10.0.0, 3.2.2 | MIT in the pinned package metadata |
 
 OVELIO uses Astryx's components and neutral theme with its own colour tokens and brand mark. It does not reproduce Astryx, Meta, Umami or other upstream branding.
 
