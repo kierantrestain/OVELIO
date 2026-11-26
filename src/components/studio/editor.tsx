@@ -136,7 +136,12 @@ export function EmailStudio({ id }: { id: string }) {
   function updateMeta(key: 'name' | 'subject' | 'preheader', value: string) {
     metaRef.current = { ...metaRef.current, [key]: value };
     setMeta(metaRef.current);
-    markDirty();
+    if (readyRef.current) markDirty();
+    else {
+      // Typed while the canvas settles after loading: keep it and save as soon as the editor is ready.
+      dirtyRef.current = true;
+      setSaveState('dirty');
+    }
   }
 
   function load(next: Design) {
@@ -149,7 +154,10 @@ export function EmailStudio({ id }: { id: string }) {
     versionRef.current = next.version;
     metaRef.current = { name: next.name, subject: next.subject, preheader: next.preheader };
     setMeta(metaRef.current);
-    window.setTimeout(() => { readyRef.current = true; }, 300);
+    window.setTimeout(() => {
+      readyRef.current = true;
+      if (dirtyRef.current) markDirty();
+    }, 300);
   }
 
   useEffect(() => {
