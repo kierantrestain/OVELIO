@@ -17,6 +17,7 @@ import { db } from './db';
 import { devPreviewCompany, isDevPreviewMode } from './dev-preview';
 import { canEmail, findContactByEmail } from './directory';
 import { emitEvent } from './events';
+import { resolveConditionalBlocks } from './studio/conditions';
 
 export type MessageCategory = 'marketing' | 'sales' | 'transactional' | 'test';
 export type MessageStatus = 'sent' | 'failed' | 'blocked' | 'not_sent';
@@ -177,7 +178,8 @@ export async function sendEmail(input: SendInput): Promise<SendResult> {
   const [company, contact, permission] = await Promise.all([workspace(), findContactByEmail(to), canEmail(to)]);
   const values = mergeValues(contact, to, company);
   const subject = renderMergeTags(input.subject, values, { html: false });
-  let html = renderMergeTags(input.html, values);
+  // Conditional blocks from the email studio are kept or dropped for this recipient before merge tags are filled.
+  let html = renderMergeTags(resolveConditionalBlocks(input.html, contact), values);
   if (input.category === 'marketing' || input.category === 'sales') html = withComplianceFooter(html, company, values.unsubscribe_url);
   const rendered = { subject, html, text: input.text ? renderMergeTags(input.text, values, { html: false }) : htmlToText(html) };
   const from = { email: (process.env.SMTP_FROM_EMAIL || 'hello@ovelio.test').toLowerCase(), name: input.fromName || process.env.MAIL_FROM_NAME || company.name || 'OVELIO' };

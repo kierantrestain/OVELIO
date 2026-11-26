@@ -56,6 +56,7 @@ export const workspaces: Workspace[] = [
       { label: 'Templates', href: '/marketing/templates', aliases: ['gallery', 'designs', 'layouts'] },
       { label: 'Transactional', href: '/marketing/transactional', aliases: ['receipts', 'system email'] },
       { label: 'Brand kit', href: '/marketing/brand', aliases: ['logo', 'colours', 'fonts', 'blocks'] },
+      { label: 'Deliverability', href: '/marketing/deliverability', aliases: ['spf', 'dkim', 'dmarc', 'bounces', 'complaints', 'broken links', 'inbox'] },
       { label: 'Media', href: '/marketing/media', aliases: ['images', 'uploads', 'files'] },
       { label: 'Mailing lists', href: '/marketing/lists', aliases: ['subscribers', 'lists'] },
     ],

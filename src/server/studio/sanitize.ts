@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto';
 import sanitize from 'sanitize-html';
 import { mergeTagPattern } from '@/contracts/merge-tags';
+import { markerComment } from './conditions';
 
 const emailTags = [
   'html', 'head', 'body', 'title', 'meta', 'style', 'center', 'font', 'div', 'span', 'p', 'br', 'hr', 'a', 'img',
@@ -38,6 +39,8 @@ function protect(html: string) {
     if (/-->|--!>/.test(inner)) return '';
     return token(whole);
   });
+  // Conditional-content markers (src/server/studio/conditions.ts) are resolved per contact at send time.
+  source = source.replace(markerComment, whole => token(whole));
   // Merge tags keep their exact spelling (quotes in a fallback would otherwise be entity-encoded inside attributes).
   source = source.replace(mergeTagPattern, whole => token(whole));
   const restore = (output: string) => output.replace(new RegExp(`${nonce}x(\\d+)x`, 'g'), (_all, index: string) => kept[Number(index)] ?? '');
@@ -92,6 +95,12 @@ export function sanitizeEmailHtml(html: string): string {
 
 // Listmonk 6.2.0 tags the studio may emit (src/server/studio/convert.ts). Everything else in {{ }} is escaped so a
 // newsletter body can never call other Go template functions.
+const listmonkCondition = new RegExp([
+  String.raw`\{\{ if (?:not \()?and \.Subscriber\.Attribs\.tags \(has "[^"{}<>\\]{1,80}" \.Subscriber\.Attribs\.tags\)\)? \}\}`,
+  String.raw`\{\{ if (?:eq|ne) \(lower \(print \.Subscriber\.(?:FirstName|LastName|Email|Attribs\.(?:company|position|stage))\)\) "[^"{}<>\\]{0,80}" \}\}`,
+  String.raw`\{\{ end \}\}`,
+].join('|'), 'g');
+
 const listmonkTag = /\{\{\s*(?:\.Subscriber\.(?:FirstName|LastName|Name|Email|UUID)|\.Subscriber\.Attribs\.[A-Za-z0-9_]+|\.Campaign\.(?:Name|Subject)|UnsubscribeURL|OptinURL|MessageURL|ManageURL|TrackView)(?:\s*\|\s*default\s+"[^"{}<>\\]{0,80}")?\s*\}\}/g;
 
 /** The marker the studio puts in every newsletter body it exports, so the delivery path can recognise it. */
@@ -104,10 +113,11 @@ export const studioMarker = '<!-- ovelio-studio -->';
 export function studioNewsletterBody(html: string): string {
   const nonce = 'ovlm' + randomBytes(8).toString('hex');
   const tags: string[] = [];
-  const tokenised = html.replace(listmonkTag, whole => {
+  const keep = (whole: string) => {
     tags.push(whole);
     return `${nonce}x${tags.length - 1}x`;
-  });
+  };
+  const tokenised = html.replace(listmonkCondition, keep).replace(listmonkTag, keep);
   const clean = sanitizeEmailHtml(tokenised).replaceAll('{{', '&#123;&#123;');
   const restored = clean.replace(new RegExp(`${nonce}x(\\d+)x`, 'g'), (_all, index: string) => tags[Number(index)] ?? '');
   return restored.includes(studioMarker) ? restored : restored.replace(/<body([^>]*)>/i, `<body$1>${studioMarker}`);

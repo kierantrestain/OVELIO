@@ -19,19 +19,26 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import type { Campaign } from '@/contracts';
 import { mergeTags } from '@/contracts/merge-tags';
-import type { BrandKit, CompileIssue, Design, DesignSaveResult, DesignVersion, EngineExport } from '@/contracts/studio';
+import type { BrandKit, BrandSummary, CompileIssue, Design, DesignSaveResult, DesignVersion, EngineExport, RuleField, VisibilityRule } from '@/contracts/studio';
+import { describeRule, ruleClassPrefix, ruleFieldLabels, ruleFields, ruleFromClass, ruleToClass } from '@/contracts/studio';
 import { api, date, message, useAction, useResource } from '../client';
 import { usePreview } from '../shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, SlideDrawer } from '../ui';
+import { Selector } from '@astryxdesign/core/Selector';
 import { studioBlocks } from './blocks';
 import { EmailFrame, MediaPicker, PreviewDialog, SentTestsDrawer, TestSendDialog } from './common';
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
-type Selected = { type: string; name: string } | null;
+type Selected = { type: string; name: string; rule: VisibilityRule | null } | null;
 type Panel = 'versions' | 'preview' | 'test' | 'sent' | 'advanced' | 'media' | 'block' | null;
 type AssetRequest = { select: (asset: unknown, complete?: boolean) => void; close: () => void } | null;
 
 const sectionTypes = ['mj-section', 'mj-wrapper', 'mj-hero', 'mj-group'];
+const ruleTypes = [...sectionTypes, 'mj-text', 'mj-image', 'mj-button', 'mj-divider', 'mj-spacer', 'mj-social', 'mj-raw'];
+
+function classTokens(component: { getAttributes: () => Record<string, unknown> }) {
+  return String(component.getAttributes()['css-class'] ?? '').split(/\s+/).filter(Boolean);
+}
 
 function hasPages(document: Record<string, unknown>) {
   return Array.isArray(document.pages) && document.pages.length > 0;
@@ -79,6 +86,9 @@ export function EmailStudio({ id }: { id: string }) {
   const [panel, setPanel] = useState<Panel>(null);
   const [assetRequest, setAssetRequest] = useState<AssetRequest>(null);
   const pushAction = useAction();
+  const brandAction = useAction();
+  const brands = useResource<{ items: BrandSummary[] }>('/studio/brands');
+  const [rebranding, setRebranding] = useState<BrandSummary>();
 
   async function persist() {
     const editor = editorRef.current;
@@ -165,6 +175,7 @@ export function EmailStudio({ id }: { id: string }) {
         width: 'auto',
         storageManager: false,
         cssIcons: '',
+        canvasCss: `[class*="${ruleClassPrefix}"] { outline: 2px dashed #f59e0b; outline-offset: -2px; }`,
         fromElement: false,
         panels: { defaults: [] },
         showDevices: false,
@@ -210,7 +221,7 @@ export function EmailStudio({ id }: { id: string }) {
       editor.on('undo redo', syncHistory);
       editor.on('component:toggled', () => {
         const component = editor.getSelected();
-        setSelected(component ? { type: String(component.get('type') ?? ''), name: component.getName() } : null);
+        setSelected(component ? { type: String(component.get('type') ?? ''), name: component.getName(), rule: classTokens(component).map(ruleFromClass).find(Boolean) ?? null } : null);
       });
 
       setDesign(loaded);
@@ -312,6 +323,10 @@ export function EmailStudio({ id }: { id: string }) {
       <div className="ov-studio-meta">
         <label><span>Subject</span><input value={meta.subject} onChange={event => updateMeta('subject', event.target.value)} maxLength={200} placeholder="What the inbox shows first" /></label>
         <label><span>Preview text</span><input value={meta.preheader} onChange={event => updateMeta('preheader', event.target.value)} maxLength={200} placeholder="The line after the subject in most inboxes" /></label>
+        {brands.data?.items.length ? <Selector label="Brand kit" isLabelHidden width={230} size="sm"
+          value={design?.brandId ?? brands.data.items.find(item => item.isDefault)?.id ?? ''}
+          options={brands.data.items.map(item => ({ value: item.id, label: `Brand: ${item.name}` }))}
+          onChange={value => { const next = brands.data?.items.find(item => item.id === value); if (next) setRebranding(next); }} /> : null}
         {newsletter ? <span className="ov-studio-link">
           <Text type="supporting" color="secondary">Feeds newsletter “{newsletter.label || newsletter.engineId}”</Text>
           <Button size="sm" icon={<Send size={14} />} label="Update newsletter" isLoading={pushAction.busy}
@@ -356,6 +371,15 @@ export function EmailStudio({ id }: { id: string }) {
             }} />
             {isSection ? <Button size="sm" variant="ghost" icon={<Bookmark size={14} />} label="Save as block" onClick={() => setPanel('block')} /> : null}
           </div>
+          {ruleTypes.includes(selected.type) ? <VisibilityControl key={selected.name + (selected.rule ? describeRule(selected.rule) : '')} rule={selected.rule} onChange={rule => {
+            const component = editorRef.current?.getSelected();
+            if (!component) return;
+            const tokens = classTokens(component).filter(token => !token.startsWith(ruleClassPrefix));
+            if (rule) tokens.push(ruleToClass(rule));
+            if (tokens.length) component.addAttributes({ 'css-class': tokens.join(' ') });
+            else component.removeAttributes('css-class');
+            setSelected({ ...selected, rule });
+          }} /> : null}
         </div> : <div className="ov-studio-selected"><Text color="secondary">Select anything in the email to style it. Double-click text to edit; use Personalise in the text toolbar to add merge tags.</Text></div>}
         <div className="ov-studio-tabs" role="tablist">
           <button type="button" role="tab" aria-selected={rightTab === 'style'} onClick={() => setRightTab('style')}>Style</button>
@@ -366,6 +390,19 @@ export function EmailStudio({ id }: { id: string }) {
       </aside>
     </div>
 
+    {rebranding ? <ConfirmDialog title={`Switch to ${rebranding.name}?`} destructive={false} busy={brandAction.busy}
+      description="The email's colours, fonts and buttons change to this brand kit. The current design is kept as a version, so you can restore it."
+      actionLabel="Re-theme email" onClose={() => setRebranding(undefined)}
+      onConfirm={() => void brandAction.run(async () => {
+        await flush();
+        const themed = await api<Design>(`/studio/designs/${id}/brand`, 'POST', { brandId: rebranding.id, version: versionRef.current });
+        setRebranding(undefined);
+        setDesign(themed);
+        load(themed);
+        setSaveState('saved');
+        setSavedAt(Date.now());
+      }, `Re-themed with ${rebranding.name}.`)} /> : null}
+    {brandAction.error ? <div className="ov-studio-banner"><Feedback error={brandAction.error} /></div> : null}
     {panel === 'media' ? <MediaPicker onPick={pickImage} onClose={() => { assetRequest?.close(); setAssetRequest(null); setPanel(null); }} /> : null}
     {panel === 'preview' ? <PreviewDialog designId={id} onClose={() => setPanel(null)} /> : null}
     {panel === 'test' ? <TestSendDialog designId={id} prepare={flush} onClose={() => setPanel(null)} /> : null}
@@ -381,6 +418,37 @@ export function EmailStudio({ id }: { id: string }) {
       editor.BlockManager.add('saved-' + created.id, { label: created.name, category: 'Saved blocks', media: '<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h12v18l-6-4-6 4z"/></svg>', content: created.source });
       setPanel(null);
     }} /> : null}
+  </div>;
+}
+
+type RuleChoice = 'everyone' | 'tag' | 'not-tag' | 'field' | 'not-field' | 'consent';
+
+/** Who sees the selected block: everyone, or contacts matching a tag, field or consent rule. */
+function VisibilityControl({ rule, onChange }: { rule: VisibilityRule | null; onChange: (rule: VisibilityRule | null) => void }) {
+  const initial: RuleChoice = !rule ? 'everyone' : rule.kind === 'consent' ? 'consent' : `${rule.negate ? 'not-' : ''}${rule.kind}` as RuleChoice;
+  const [choice, setChoice] = useState<RuleChoice>(initial);
+  const [value, setValue] = useState(rule && rule.kind !== 'consent' ? rule.value : '');
+  const [field, setField] = useState<RuleField>(rule?.kind === 'field' ? rule.field : 'company');
+  const build = (): VisibilityRule | null => {
+    if (choice === 'everyone') return null;
+    if (choice === 'consent') return { kind: 'consent', negate: false, value: 'opted_in' };
+    if (choice === 'tag' || choice === 'not-tag') return { kind: 'tag', negate: choice === 'not-tag', value: value.trim() };
+    return { kind: 'field', negate: choice === 'not-field', field, value: value.trim() };
+  };
+  const needsValue = choice !== 'everyone' && choice !== 'consent';
+  return <div className="ov-studio-visibility">
+    <Text type="label">Show this block to</Text>
+    <Selector label="Show this block to" isLabelHidden size="sm" value={choice} onChange={next => setChoice((next ?? 'everyone') as RuleChoice)} options={[
+      { value: 'everyone', label: 'Everyone' }, { value: 'tag', label: 'Contacts with a tag' }, { value: 'not-tag', label: 'Contacts without a tag' },
+      { value: 'field', label: 'When a field equals' }, { value: 'not-field', label: 'When a field does not equal' }, { value: 'consent', label: 'Contacts with email consent' },
+    ]} />
+    {choice === 'field' || choice === 'not-field' ? <Selector label="Field" isLabelHidden size="sm" value={field} onChange={next => setField((next ?? 'company') as RuleField)}
+      options={ruleFields.map(item => ({ value: item, label: ruleFieldLabels[item] }))} /> : null}
+    {needsValue ? <TextInput label={choice.endsWith('tag') ? 'Tag' : 'Value'} isLabelHidden size="sm" placeholder={choice.endsWith('tag') ? 'Tag, e.g. vip' : 'Value'} value={value} onChange={setValue} /> : null}
+    <div className="ov-actions">
+      <Button size="sm" label="Apply" isDisabled={needsValue && !value.trim()} onClick={() => onChange(build())} />
+      {rule ? <Text type="supporting" color="secondary">Now: {describeRule(rule)}. Check it with Preview as a contact.</Text> : null}
+    </div>
   </div>;
 }
 

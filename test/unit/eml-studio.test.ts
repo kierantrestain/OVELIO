@@ -172,3 +172,136 @@ test('EML-08 imported HTML keeps its body and styles, and exports convert tags f
   assert.match(exported.data.html, /Hello \{\{ \.Subscriber\.FirstName \}\}/);
   assert.match(exported.data.html, /\{\{ UnsubscribeURL \}\}/);
 });
+
+test('EML-09 the template factory: every industry × use case compiles with zero errors, passes the sanitiser and is byte-identical across runs', async () => {
+  const { factoryTemplates, generateTemplate, factoryIndustries, factoryUseCases } = await import('../../src/templates/email/factory');
+  assert.equal(factoryTemplates.length, factoryIndustries.length * factoryUseCases.length);
+  assert.ok(factoryIndustries.length >= 5);
+  const brand = await defaultBrand();
+  for (const template of factoryTemplates) {
+    const again = generateTemplate(template.industry!, template.useCase!);
+    assert.equal(again.mjml, template.mjml, `${template.key} MJML is deterministic`);
+    const source = applyBrand(template.mjml, brand);
+    assert.doesNotMatch(source, /\[\[brand\./, `${template.key} fills every brand token`);
+    const first = await compileMjml(source, { preheader: template.preheader });
+    const second = await compileMjml(source, { preheader: template.preheader });
+    assert.deepEqual(first.errors, [], template.key);
+    assert.equal(first.html, second.html, `${template.key} HTML is byte-identical`);
+    assert.equal(sanitizeEmailHtml(first.html), first.html, `${template.key} passes the sanitiser unchanged`);
+  }
+  assert.throws(() => generateTemplate('saas', 'nope'), /No factory template/);
+  const list = await call<{ items: { key: string; source: string; industry?: string }[]; industries: unknown[] }>('GET', 'studio/templates');
+  assert.ok(list.data.items.some(item => item.source === 'factory' && item.industry === 'ecommerce'));
+  assert.equal(list.data.items.filter(item => item.source === 'curated').length, 24);
+});
+
+test('EML-10 several brand kits, one default; switching a design re-themes colours, fonts and buttons', async () => {
+  const created = await call<{ id: string; isDefault: boolean; kit: Record<string, unknown> }>('POST', 'studio/brands', { name: 'EML-10 brand' });
+  assert.equal(created.status, 201);
+  const kit = { ...created.data.kit, name: 'EML-10 brand', primary: '#aa1100', accent: '#00aa11', headingFont: "Georgia, 'Times New Roman', serif", buttonStyle: 'outline', buttonRadius: 20 };
+  delete (kit as { updatedAt?: unknown }).updatedAt;
+  assert.equal((await call('PUT', `studio/brands/${created.data.id}`, kit)).status, 200);
+  const design = await call<{ id: string; version: number; source: string; brandId: string | null }>('POST', 'studio/designs', { templateKey: 'f-saas-launch' });
+  const before = (await call<{ primary: string }>('GET', 'studio/brand')).data;
+  assert.match(design.data.source, new RegExp(before.primary, 'i'));
+  const themed = await call<{ source: string; brandId: string; html: string }>('POST', `studio/designs/${design.data.id}/brand`, { brandId: created.data.id, version: design.data.version });
+  assert.equal(themed.status, 200);
+  assert.equal(themed.data.brandId, created.data.id);
+  assert.doesNotMatch(themed.data.source, new RegExp(before.primary, 'i'), 'old primary colour is gone');
+  assert.match(themed.data.source, /#aa1100/);
+  assert.match(themed.data.source, /%23aa1100/, 'illustrations re-coloured too');
+  const buttons = [...themed.data.source.matchAll(/<mj-button[^>]*>/g)].map(match => match[0]);
+  assert.ok(buttons.length > 0);
+  assert.ok(buttons.every(tag => tag.includes('border-radius="20px"')), 'every button takes the new radius');
+  assert.ok(buttons.some(tag => tag.includes('border="2px solid #aa1100"')), 'brand buttons become outline buttons');
+  const versions = await call<{ items: { label: string }[] }>('GET', `studio/designs/${design.data.id}/versions`);
+  assert.ok(versions.data.items.some(item => item.label === 'Before brand change'));
+  const brands = await call<{ items: { id: string; isDefault: boolean }[] }>('GET', 'studio/brands');
+  const original = brands.data.items.find(item => item.isDefault)!;
+  assert.equal((await call('DELETE', `studio/brands/${original.id}`)).status, 409, 'the default kit cannot be deleted');
+  await call('POST', `studio/brands/${created.data.id}/default`);
+  assert.equal((await call<{ primary: string }>('GET', 'studio/brand')).data.primary, '#aa1100');
+  await call('POST', `studio/brands/${original.id}/default`);
+});
+
+test('EML-11 conditional content resolves per contact in native sends and the preview, and converts to Listmonk conditionals', async () => {
+  const { ruleToClass } = await import('../../src/contracts/studio');
+  const { searchContacts } = await import('../../src/server/directory');
+  const vip = ruleToClass({ kind: 'tag', negate: false, value: 'vip' });
+  const notVip = ruleToClass({ kind: 'tag', negate: true, value: 'vip' });
+  const retail = ruleToClass({ kind: 'field', negate: false, field: 'company', value: 'Harbourline Retail' });
+  const section = (cls: string, label: string) => `<mj-section css-class="keep-me ${cls}"><mj-column><mj-text>${label}</mj-text></mj-column></mj-section>`;
+  const source = `<mjml><mj-body>${section(vip, 'VIP-ONLY')}${section(notVip, 'EVERYONE-ELSE')}<mj-section><mj-column><mj-text css-class="${retail}">RETAIL-ONLY</mj-text><mj-text>SHARED</mj-text></mj-column></mj-section></mj-body></mjml>`;
+  const design = await call<{ id: string; html: string }>('POST', 'studio/designs', { name: 'EML-11 conditional', subject: 'Conditional', source });
+  assert.equal(design.status, 201);
+  assert.match(design.data.html, /<!--ov-if:1:[A-Za-z0-9_-]+-->/, 'markers survive compile and the sanitiser');
+  assert.match(design.data.html, /class="keep-me"/, 'other classes are kept');
+  assert.doesNotMatch(design.data.html, /ov-if--/);
+
+  const [claire] = await searchContacts('claire');
+  const [daniel] = await searchContacts('daniel');
+  assert.ok(claire.tags.includes('vip') && !daniel.tags.includes('vip'));
+  await upsertContact({ email: daniel.email, consent: 'opted_in', evidence: 'Unit test', source: 'test' });
+  setMailTransport(undefined);
+  const sent = await call<{ results: { to: string; messageId: string; status: string }[] }>('POST', `studio/designs/${design.data.id}/test`, { to: [claire.email, daniel.email] });
+  const stored = async (index: number) => (await call<{ html: string }>('GET', `studio/messages/${sent.data.results[index].messageId}`)).data.html;
+  const forClaire = await stored(0);
+  const forDaniel = await stored(1);
+  assert.match(forClaire, /VIP-ONLY/);
+  assert.doesNotMatch(forClaire, /EVERYONE-ELSE|RETAIL-ONLY/);
+  assert.match(forDaniel, /EVERYONE-ELSE/);
+  assert.match(forDaniel, /RETAIL-ONLY/, 'field rules compare case-insensitively');
+  assert.doesNotMatch(forDaniel, /VIP-ONLY/);
+  assert.ok(forClaire.includes('SHARED') && forDaniel.includes('SHARED'));
+  assert.doesNotMatch(forClaire + forDaniel, /<!--\/?ov-if/, 'markers never reach the inbox');
+
+  const preview = await call<{ html: string }>('GET', `studio/designs/${design.data.id}/render?contactId=${claire.id}`);
+  assert.match(preview.data.html, /VIP-ONLY/);
+  assert.doesNotMatch(preview.data.html, /EVERYONE-ELSE/);
+  const anonymous = await call<{ html: string }>('GET', `studio/designs/${design.data.id}/render`);
+  assert.match(anonymous.data.html, /EVERYONE-ELSE/);
+  assert.doesNotMatch(anonymous.data.html, /VIP-ONLY/);
+
+  const exported = await call<{ html: string; notes: string[] }>('GET', `studio/designs/${design.data.id}/export?engine=listmonk`);
+  assert.match(exported.data.html, /\{\{ if and \.Subscriber\.Attribs\.tags \(has "vip" \.Subscriber\.Attribs\.tags\) \}\}/);
+  assert.match(exported.data.html, /\{\{ if not \(and \.Subscriber\.Attribs\.tags \(has "vip" \.Subscriber\.Attribs\.tags\)\) \}\}/);
+  assert.match(exported.data.html, /\{\{ if eq \(lower \(print \.Subscriber\.Attribs\.company\)\) "harbourline retail" \}\}/);
+  assert.ok(exported.data.notes.length >= 1);
+  const body = studioNewsletterBody(exported.data.html);
+  assert.equal((body.match(/\{\{ end \}\}/g) ?? []).length, 3, 'conditionals survive the newsletter sanitiser');
+  assert.doesNotMatch(body, /&#123;&#123; (if|end)/);
+  const mautic = await call<{ html: string; notes: string[] }>('GET', `studio/designs/${design.data.id}/export?engine=mautic`);
+  assert.doesNotMatch(mautic.data.html, /VIP-ONLY|EVERYONE-ELSE|RETAIL-ONLY/);
+  assert.match(mautic.data.notes[0], /3 conditional blocks were left out/);
+});
+
+test('EML-12 deliverability: every check is measured or unavailable with a reason, and link checks never reach private addresses', async () => {
+  const { isPublicAddress, checkLink, designLinks } = await import('../../src/server/studio/deliverability');
+  for (const address of ['10.0.0.1', '127.0.0.1', '169.254.169.254', '192.168.1.10', '100.64.0.1', '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1']) {
+    assert.equal(isPublicAddress(address), false, address);
+  }
+  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(isPublicAddress(address), true, address);
+  assert.equal((await checkLink('http://127.0.0.1/admin')).status, 'skipped');
+  assert.equal((await checkLink('http://[::1]/')).status, 'skipped');
+  assert.equal((await checkLink('http://example.com:8080/')).status, 'skipped');
+  assert.equal((await checkLink('ftp://example.com/file')).status, 'skipped');
+  const local = await checkLink('http://localhost/');
+  assert.equal(local.status, 'unreachable');
+  assert.match(local.detail, /private or reserved/, 'a name that resolves to a private address is refused at connect time');
+  assert.deepEqual(designLinks('<a href="https://a.example/x?y=1&amp;z=2">a</a><a href="{{unsubscribe_url}}">u</a><img src="https://a.example/i.png"><a href="mailto:x@y.z">m</a>'),
+    ['https://a.example/x?y=1&z=2', 'https://a.example/i.png']);
+
+  const report = await call<{ checks: { id: string; group: string; status: string; value: string; detail: string }[] }>('GET', 'studio/deliverability');
+  assert.equal(report.status, 200);
+  const ids = report.data.checks.map(check => check.id);
+  for (const id of ['spf', 'dkim', 'dmarc', 'bounce', 'complaint', 'suppressions', 'native', 'consent', 'unengaged']) assert.ok(ids.includes(id), id);
+  for (const check of report.data.checks) {
+    assert.ok(['pass', 'warn', 'fail', 'info', 'unavailable'].includes(check.status), check.id);
+    assert.ok(check.detail.length > 10, `${check.id} explains itself`);
+    if (check.status === 'unavailable') assert.equal(check.value, 'Unavailable');
+  }
+  const bounce = report.data.checks.find(check => check.id === 'bounce')!;
+  assert.equal(bounce.value, '1%', 'sample data: 12 bounces from 1,240 sent');
+  assert.equal(report.data.checks.find(check => check.id === 'unengaged')!.status, 'unavailable');
+  assert.match(report.data.checks.find(check => check.id === 'native')!.detail, /does not show inbox placement/);
+});

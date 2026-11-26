@@ -15,6 +15,8 @@ export type DesignSummary = {
   preheader: string;
   category: string;
   templateKey: string | null;
+  /** The brand kit the design uses; null means the workspace default. */
+  brandId: string | null;
   version: number;
   createdAt: string;
   updatedBy: string | null;
@@ -65,8 +67,13 @@ export type BrandKit = {
   website: string;
   footerText: string;
   social: BrandSocial[];
+  /** Global button style: corner radius in px, and filled (brand colour) or outline. */
+  buttonRadius: number;
+  buttonStyle: 'filled' | 'outline';
   updatedAt: string | null;
 };
+
+export type BrandSummary = { id: string; name: string; isDefault: boolean; kit: BrandKit; updatedAt: string };
 
 /** Email-safe font stacks offered by the brand kit (no web font downloads, so nothing is hotlinked). */
 export const emailFonts: { value: string; label: string }[] = [
@@ -93,6 +100,10 @@ export type EmailTemplateSummary = {
   preheader: string;
   /** Marketing templates carry an unsubscribe link and the postal address. */
   marketing: boolean;
+  /** Factory output (src/templates/email/factory) is generated per industry and use case; the rest are hand-built. */
+  source?: 'curated' | 'factory';
+  industry?: string;
+  useCase?: string;
 };
 
 export type SampleContact = { id: number; name: string; email: string; consent: string; suppressed: boolean };
@@ -144,3 +155,79 @@ export type AudienceEstimate = {
   sampled: boolean;
   note: string;
 };
+
+/**
+ * Conditional content: a visibility rule on a section or content block. Stored on the MJML element as a class token
+ * (`css-class="ov-if--<base64url rule>"`), compiled into marker comments, resolved per contact by the mailer,
+ * converted to Go-template conditionals for Listmonk, and resolved in the contact preview.
+ */
+export const ruleFields = ['company', 'position', 'stage', 'first_name', 'last_name', 'email'] as const;
+export type RuleField = (typeof ruleFields)[number];
+export type VisibilityRule =
+  | { kind: 'tag'; negate: boolean; value: string }
+  | { kind: 'field'; negate: boolean; field: RuleField; value: string }
+  | { kind: 'consent'; negate: boolean; value: 'opted_in' };
+
+const ruleText = (value: string) => value.replace(/["\\{}<>]/g, '').trim().slice(0, 80);
+
+export function formatRule(rule: VisibilityRule): string {
+  const prefix = rule.negate ? 'not-' : '';
+  if (rule.kind === 'tag') return `${prefix}tag:${ruleText(rule.value)}`;
+  if (rule.kind === 'field') return `${prefix}field:${rule.field}=${ruleText(rule.value)}`;
+  return `${prefix}consent:opted_in`;
+}
+
+export function parseRule(text: string): VisibilityRule | null {
+  const match = /^(not-)?(tag|field|consent):(.*)$/.exec(text.trim());
+  if (!match) return null;
+  const negate = !!match[1];
+  if (match[2] === 'tag') return match[3].trim() ? { kind: 'tag', negate, value: ruleText(match[3]) } : null;
+  if (match[2] === 'consent') return match[3] === 'opted_in' ? { kind: 'consent', negate, value: 'opted_in' } : null;
+  const [field, ...rest] = match[3].split('=');
+  return (ruleFields as readonly string[]).includes(field) ? { kind: 'field', negate, field: field as RuleField, value: ruleText(rest.join('=')) } : null;
+}
+
+export const ruleFieldLabels: Record<RuleField, string> = {
+  company: 'Company', position: 'Job title', stage: 'Lifecycle stage', first_name: 'First name', last_name: 'Last name', email: 'Email',
+};
+
+export function describeRule(rule: VisibilityRule): string {
+  if (rule.kind === 'tag') return rule.negate ? `Contacts without the tag “${rule.value}”` : `Contacts tagged “${rule.value}”`;
+  if (rule.kind === 'field') return `${ruleFieldLabels[rule.field]} ${rule.negate ? 'is not' : 'is'} “${rule.value}”`;
+  return rule.negate ? 'Contacts without recorded email consent' : 'Contacts with recorded email consent';
+}
+
+function toBase64Url(value: string) {
+  let binary = '';
+  for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function fromBase64Url(value: string) {
+  const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/'));
+  return new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+}
+
+export const ruleClassPrefix = 'ov-if--';
+export const ruleToClass = (rule: VisibilityRule) => ruleClassPrefix + toBase64Url(formatRule(rule));
+
+export function ruleFromClass(token: string): VisibilityRule | null {
+  if (!token.startsWith(ruleClassPrefix)) return null;
+  try {
+    return parseRule(fromBase64Url(token.slice(ruleClassPrefix.length)));
+  } catch {
+    return null;
+  }
+}
+
+/** One line of the deliverability report: a measured value, or "unavailable" with the reason. */
+export type DeliverabilityCheck = {
+  id: string;
+  group: 'Authentication' | 'Reputation' | 'List hygiene';
+  label: string;
+  status: 'pass' | 'warn' | 'fail' | 'info' | 'unavailable';
+  value: string;
+  detail: string;
+};
+
+export type LinkCheck = { url: string; status: 'ok' | 'redirect' | 'broken' | 'unreachable' | 'skipped'; code: number | null; detail: string };

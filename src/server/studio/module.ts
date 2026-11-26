@@ -4,9 +4,9 @@ import type { User } from '@/contracts';
 import type { SearchResult } from '@/contracts/platform';
 import { mergeTags, renderMergeTags, unknownMergeTags } from '@/contracts/merge-tags';
 import type {
-  AudienceEstimate, DesignStatus, EmailTemplateSummary, EngineExport, RenderedPreview, SampleContact, SentMessage, StoredMessage, TestSendResult,
+  AudienceEstimate, DeliverabilityCheck, Design, DesignStatus, EmailTemplateSummary, EngineExport, RenderedPreview, SampleContact, SentMessage, StoredMessage, TestSendResult,
 } from '@/contracts/studio';
-import { emailTemplates, findTemplate, templateSummary } from '@/templates/email';
+import { allTemplates, factoryIndustries, factoryUseCases, findTemplate, templateSummary } from '@/templates/email';
 import { rateLimit } from '../auth';
 import { AppError } from '../config';
 import { db } from '../db';
@@ -18,8 +18,10 @@ import { mergeValues, sendDesign } from '../mailer';
 import type { LaneModule } from '../platform/types';
 import { route } from '../routes/shared';
 import type { Context } from '../routes/shared';
-import { applyBrand, brandInput, getBrand, saveBrand, workspaceProfile } from './brand';
+import { applyBrand, brandInput, createBrand, deleteBrand, getBrand, listBrands, rethemeSource, saveBrand, setDefaultBrand, workspaceProfile } from './brand';
 import { compileMjml, htmlToMjml } from './compile';
+import { resolveConditionalBlocks } from './conditions';
+import { authenticationChecks, checkLinks, designLinks, reputationChecks } from './deliverability';
 import { fromListmonkHtml, toListmonkHtml, toMauticHtml } from './convert';
 import {
   compileDesign, createDesign, duplicateDesign, findLink, getDesign, getVersion, linkDesign, listDesigns, listVersions, restoreVersion,
@@ -39,6 +41,7 @@ const createInput = z.object({
   subject: z.string().trim().max(200).optional(),
   preheader: z.string().trim().max(200).optional(),
   templateKey: z.string().max(60).optional(),
+  brandId: z.uuid().optional(),
   source: source.optional(),
   /** Imports existing HTML (a Listmonk newsletter or template) as one raw-HTML section. */
   importHtml: z.string().max(600_000).optional(),
@@ -67,10 +70,10 @@ async function withExamples(html: string) {
   return renderMergeTags(html, values);
 }
 
-async function templateHtml(key: string) {
+async function templateHtml(key: string, brandId?: string | null) {
   const template = findTemplate(key);
   if (!template) throw new AppError(404, 'That template was not found.');
-  const brand = await getBrand();
+  const brand = await getBrand(db, brandId);
   const brandKey = JSON.stringify(brand);
   if (templateCache?.brandKey !== brandKey) templateCache = { brandKey, html: new Map() };
   const cached = templateCache.html.get(key);
@@ -98,7 +101,7 @@ async function render(designId: string, contactId: number | null): Promise<Rende
   return {
     subject: renderMergeTags(design.subject, values, { html: false }),
     preheader: renderMergeTags(design.preheader, values, { html: false }),
-    html: renderMergeTags(design.html, values),
+    html: renderMergeTags(resolveConditionalBlocks(design.html, contact), values),
     contact: contact ? toSample(contact) : null,
     unknownTags: unknownMergeTags(design.source + design.subject + design.preheader),
   };
@@ -167,6 +170,46 @@ async function audience(listIds: number[]): Promise<AudienceEstimate> {
   };
 }
 
+/** Switches a design to another brand kit and re-themes its colours, fonts and buttons (a version is kept first). */
+async function rebrand(id: string, brandId: string, version: number, userId: string): Promise<Design> {
+  const design = await getDesign(id);
+  const [from, to] = await Promise.all([getBrand(db, design.brandId), getBrand(db, brandId)]);
+  if (design.version !== version) throw new AppError(409, 'This email was changed somewhere else. Reload before changing its brand.');
+  await saveVersion(id, 'Before brand change', userId);
+  await saveDesign(id, { version, source: rethemeSource(design.source, from, to), document: {} }, userId);
+  await db.query('UPDATE designs SET brand_id = $2 WHERE id = $1', [id, brandId]);
+  return getDesign(id);
+}
+
+/** List hygiene from what can be measured: subscribers without consent or suppressed. Engagement is not measurable. */
+async function hygieneChecks(): Promise<DeliverabilityCheck[]> {
+  const unengaged: DeliverabilityCheck = {
+    id: 'unengaged', group: 'List hygiene', label: 'Unengaged and never-opened subscribers', status: 'unavailable', value: 'Unavailable',
+    detail: 'The newsletter engine counts opens per email, not per subscriber (individual tracking is off for privacy), and Apple Mail prefetches images, so per-person engagement cannot be measured honestly.',
+  };
+  try {
+    let ids: number[];
+    if (isDevPreviewMode()) {
+      const { handleDevPreviewConsole } = await import('../dev-preview');
+      ids = (await (await handleDevPreviewConsole(new Request('http://preview.local/api/console/lists'), ['lists'])).json() as { id: number }[]).map(list => list.id);
+    } else {
+      const { listmonk } = await import('../listmonk');
+      ids = (await listmonk.lists()).map(list => list.id);
+    }
+    if (!ids.length) return [{ id: 'consent', group: 'List hygiene', label: 'Subscribers without consent', status: 'unavailable', value: 'Unavailable', detail: 'There are no mailing lists yet.' }, unengaged];
+    const estimate = await audience(ids.slice(0, 20));
+    const total = (estimate.eligible ?? 0) + (estimate.excluded ?? 0);
+    const share = total ? (estimate.excluded ?? 0) / total : 0;
+    return [{
+      id: 'consent', group: 'List hygiene', label: 'Subscribers without consent or suppressed', status: share > 0.2 ? 'warn' : 'pass',
+      value: `${(estimate.excluded ?? 0).toLocaleString('en-GB')} of ${total.toLocaleString('en-GB')}`,
+      detail: `${estimate.lists.map(list => `${list.name}: ${list.excluded ?? 0} excluded`).join(' · ')}. They are skipped at send time; remove or re-permission them to keep lists clean. ${estimate.note}`,
+    }, unengaged];
+  } catch (error) {
+    return [{ id: 'consent', group: 'List hygiene', label: 'Subscribers without consent', status: 'unavailable', value: 'Unavailable', detail: `The newsletter engine did not answer: ${(error as Error).message.slice(0, 120)}` }, unengaged];
+  }
+}
+
 async function designsEndpoint({ query }: Context) {
   const items = await listDesigns({ kind: kind.parse(query.get('kind') ?? 'email'), status: query.get('status') ?? undefined, q: query.get('q') ?? undefined });
   return { items };
@@ -175,12 +218,16 @@ async function designsEndpoint({ query }: Context) {
 async function seed(sql: Sql) {
   const existing = await sql.query(`SELECT 1 FROM designs WHERE kind = 'email' LIMIT 1`);
   if (existing.rows.length) return;
-  const { updatedAt: _updatedAt, ...defaults } = await getBrand(sql);
-  void _updatedAt;
-  await sql.query(`INSERT INTO studio_brand_kits (id, kit) VALUES ('default', $1) ON CONFLICT (id) DO NOTHING`, [JSON.stringify({
-    ...defaults, footerText: 'You are receiving this sample email because you subscribed to OVELIO product news.',
-    social: [{ network: 'linkedin', url: 'https://linkedin.example/company/ovelio' }, { network: 'instagram', url: 'https://instagram.example/ovelio' }],
-  })]);
+  if (!(await sql.query('SELECT 1 FROM studio_brands LIMIT 1')).rows.length) {
+    await createBrand('OVELIO', null, sql, {
+      footerText: 'You are receiving this sample email because you subscribed to OVELIO product news.',
+      social: [{ network: 'linkedin', url: 'https://linkedin.example/company/ovelio' }, { network: 'instagram', url: 'https://instagram.example/ovelio' }],
+    });
+    await createBrand('Northbridge Studio (sample client brand)', null, sql, {
+      name: 'Northbridge Studio', primary: '#0f766e', accent: '#f97316', background: '#f1f5f4', headingFont: "Georgia, 'Times New Roman', serif",
+      buttonRadius: 24, buttonStyle: 'outline', footerText: 'Sample brand kit for a client workspace in this preview.',
+    });
+  }
   const brand = await getBrand(sql);
   const samples: [string, string][] = [
     ['newsletter-digest', 'Spring product dispatch'], ['event-webinar', 'Webinar invite: email meets analytics'],
@@ -205,13 +252,13 @@ export const studioModule: LaneModule = {
     route('GET', /^studio\/designs$/, designsEndpoint),
     route('POST', /^studio\/designs$/, async ({ request, user }) => {
       const input = await readBody(request, createInput, 4 * 1024 * 1024);
-      const brand = await getBrand();
+      const brand = await getBrand(db, input.brandId);
       if (input.templateKey) {
         const template = findTemplate(input.templateKey);
         if (!template) throw new AppError(404, 'That template was not found.');
         return json(await createDesign({
           kind: 'email', name: input.name ?? template.name, subject: applyBrand(template.subject, brand), preheader: applyBrand(template.preheader, brand),
-          source: applyBrand(template.mjml, brand), templateKey: template.key, category: template.category, userId: user.id,
+          source: applyBrand(template.mjml, brand), templateKey: template.key, category: template.category, userId: user.id, brandId: input.brandId ?? null,
         }), 201);
       }
       const mjml = input.importHtml ? htmlToMjml(fromListmonkHtml(input.importHtml)) : input.source ?? (input.kind === 'email' ? blankEmail : '');
@@ -256,7 +303,7 @@ export const studioModule: LaneModule = {
     route('GET', new RegExp(`^studio/designs/${uuid}/render$`), async ({ params, query }) =>
       render(params[0], query.get('contactId') ? z.coerce.number().int().min(1).parse(query.get('contactId')) : null)),
     route('GET', /^studio\/sample-contacts$/, async ({ query }) => {
-      const found = await searchContacts(z.string().max(120).parse(query.get('q') ?? ''), 12);
+      const found = await searchContacts(z.string().max(120).parse(query.get('q') ?? ''), 50);
       return { items: found.map(toSample) };
     }, 'marketer'),
     route('POST', new RegExp(`^studio/designs/${uuid}/test$`), async ({ params, request, user }) => {
@@ -303,10 +350,34 @@ export const studioModule: LaneModule = {
       const designId = await findLink(linkEngine.parse(query.get('engine')), z.string().min(1).max(60).parse(query.get('id')));
       return { designId };
     }),
-    route('GET', /^studio\/templates$/, async (): Promise<{ items: EmailTemplateSummary[] }> => ({ items: emailTemplates.map(templateSummary) })),
-    route('GET', /^studio\/templates\/([a-z0-9-]+)\/html$/, async ({ params }) => ({ html: await templateHtml(params[0]) })),
+    route('GET', /^studio\/templates$/, async (): Promise<{ items: EmailTemplateSummary[]; industries: { key: string; label: string }[]; useCases: { key: string; label: string }[] }> => ({
+      items: allTemplates.map(templateSummary), industries: factoryIndustries, useCases: factoryUseCases,
+    })),
+    route('GET', /^studio\/templates\/([a-z0-9-]+)\/html$/, async ({ params, query }) => ({ html: await templateHtml(params[0], query.get('brandId') ? z.uuid().parse(query.get('brandId')) : null) })),
     route('GET', /^studio\/brand$/, async () => getBrand()),
     route('PUT', /^studio\/brand$/, async ({ request, user }) => saveBrand(await readBody(request, brandInput), user.id), 'marketer'),
+    route('GET', /^studio\/deliverability$/, async () => {
+      const groups = await Promise.all([authenticationChecks(), reputationChecks(), hygieneChecks()]);
+      return { checks: groups.flat(), generatedAt: new Date().toISOString() };
+    }, 'marketer'),
+    route('POST', /^studio\/deliverability\/links$/, async ({ request, user }) => {
+      const { designId } = await readBody(request, z.object({ designId: z.uuid() }));
+      await rateLimit('studio:links:' + user.id, 6, 60);
+      const design = await getDesign(designId);
+      return { links: await checkLinks(designLinks(design.html)) };
+    }, 'marketer'),
+    route('GET', /^studio\/brands$/, async () => ({ items: await listBrands() })),
+    route('POST', /^studio\/brands$/, async ({ request, user }) => {
+      const { name } = await readBody(request, z.object({ name: z.string().trim().min(1).max(80) }));
+      return json(await createBrand(name, user.id), 201);
+    }, 'marketer'),
+    route('PUT', new RegExp(`^studio/brands/${uuid}$`), async ({ params, request, user }) => saveBrand(await readBody(request, brandInput), user.id, params[0]), 'marketer'),
+    route('POST', new RegExp(`^studio/brands/${uuid}/default$`), async ({ params }) => { await setDefaultBrand(params[0]); return { items: await listBrands() }; }, 'marketer'),
+    route('DELETE', new RegExp(`^studio/brands/${uuid}$`), async ({ params }) => { await deleteBrand(params[0]); return new Response(null, { status: 204 }); }, 'marketer'),
+    route('POST', new RegExp(`^studio/designs/${uuid}/brand$`), async ({ params, request, user }) => {
+      const { brandId, version } = await readBody(request, z.object({ brandId: z.uuid(), version: z.number().int().min(1) }));
+      return rebrand(params[0], brandId, version, user.id);
+    }, 'marketer'),
     route('GET', /^studio\/audience$/, async ({ query }) => {
       const ids = (query.get('listIds') ?? '').split(',').map(Number).filter(id => Number.isInteger(id) && id > 0).slice(0, 20);
       return audience(ids);
@@ -318,7 +389,7 @@ export const studioModule: LaneModule = {
     if (user.role === 'analyst') return [];
     const designs = await listDesigns({ kind: 'email', q, limit: 3 });
     const needle = q.trim().toLowerCase();
-    const templates = emailTemplates.filter(item => `${item.name} ${item.category}`.toLowerCase().includes(needle)).slice(0, 2);
+    const templates = allTemplates.filter(item => `${item.name} ${item.category}`.toLowerCase().includes(needle)).slice(0, 2);
     return [
       ...designs.map(item => ({ id: 'design:' + item.id, kind: 'email' as const, title: item.name, subtitle: item.subject || 'Email design', href: `/studio/email/${item.id}` })),
       ...templates.map(item => ({ id: 'template:' + item.key, kind: 'template' as const, title: item.name, subtitle: `${item.category} template`, href: `/marketing/templates?template=${item.key}` })),
