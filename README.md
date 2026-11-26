@@ -1,6 +1,6 @@
 # OVELIO
 
-**Marketing. Connected.** A self-hosted console for contacts, newsletters, marketing journeys and website analytics.
+**Marketing. Connected.** A self-hosted CRM, sales, marketing and analytics platform: contacts and companies, deal pipelines and tasks, a visual email studio, landing pages and funnels, campaigns and workflow automation, and revenue attribution, in one product with eight workspaces (Overview, CRM, Sales, Marketing, Sites & Forms, Automations, Analytics, Settings).
 
 ## Run locally
 
@@ -92,6 +92,26 @@ OVELIO defaults to no recorded marketing consent and stores consent evidence and
 
 Contact erasure removes the audience and subscriber records. Native form results can retain submitted values after the contact link is cleared. Include retained form results and backup retention in your operator's erasure process. [Mautic form submission storage](https://github.com/mautic/mautic/blob/7.2.2/app/bundles/FormBundle/Entity/Submission.php)
 
+### Hosted preview (Vercel)
+
+A Vercel deployment without engine URLs runs the **developer preview**: every screen works on labelled sample data, OVELIO's own records (deals, designs, pages, forms, campaigns, workflows) use real SQL, and engine features (Mautic contacts, Listmonk delivery, Umami tracking) are simulated. Vercel functions cannot host the worker, the SMTP policy gateway or the engines, so production is the Docker Compose stack above.
+
+| Setting | Effect |
+| --- | --- |
+| none | Embedded PGlite database per serverless instance; data resets when an instance restarts |
+| `DATABASE_URL` (Neon, Vercel Postgres; add `?sslmode=require`) | Preview data persists and is shared by every instance. The database migrates and seeds itself on first use |
+| `OVELIO_DEV_PREVIEW=true` | Forces the preview anywhere (never in `OVELIO_ENV=production`) |
+
+Preview contacts and other engine sample data stay in memory per instance even with `DATABASE_URL`.
+
+### New settings in OVELIO 2.0
+
+| Setting | Purpose |
+| --- | --- |
+| `SMTP_OVELIO_PASSWORD` | Gateway account for OVELIO's own email (sales, sequences, automations, test sends). `deploy/init-env.sh` generates it; add it to an older `.env` or native sends report that the account is missing |
+| `MAILBOX_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`/`SECRET`, `MICROSOFT_CLIENT_ID`/`SECRET` | Gmail and Outlook mailbox connections for Sales (OAuth clients registered with each provider) |
+| `OVELIO_WEBHOOK_ALLOW_PRIVATE` | `true` lets workflow webhooks call private network addresses |
+
 ## Verify
 
 ```sh
@@ -104,6 +124,7 @@ npm audit --omit=dev --audit-level=high
 npx playwright install chromium
 npm run test:integration
 npm run test:e2e
+npm run test:e2e:preview   # after npm run build: every workspace and the acceptance journeys on the developer preview
 ```
 
 The integration and browser suites require the local Compose stack and use synthetic addresses. Set `OVELIO_TEST_CHROMIUM` to use an existing Chromium binary instead of installing one. CI also checks restart persistence, a second installation, and a restore into a fresh project. See [Third-party notices](NOTICE.md) before redistributing OVELIO.

@@ -92,21 +92,21 @@ Rules: stay in your files. A change you need in a lead-owned file goes in its ow
 
 | # | Journey | Owner | Status |
 |---|---|---|---|
-| 1 | Import contacts, create companies, manage associated records | 1 | open |
-| 2 | Create a deal, drag between stages, reload, persisted | 1 | open |
-| 3 | Assign a task, record a follow-up, forecast updates | 1 | open |
-| 4 | Pick a template, edit visually, save, reopen | 2 | open |
-| 5 | Send a test email, verify rendered content | 2 | open |
-| 6 | Design and publish a responsive landing page without code | 3 | open |
-| 7 | Submit a published form, verify the CRM record | 3 | open |
-| 8 | Multi-step funnel with tracked conversion | 3 | open |
-| 9 | Campaign containing emails, forms, pages and automations | 4 | open |
-| 10 | Workflow triggered by a real form submission or CRM event | 4 | open |
-| 11 | Consent, suppression and unsubscribe enforced | lead, 2, 4 | open |
-| 12 | Leads and revenue attributed to a campaign | 5 | open |
-| 13 | Authentication, permissions, persistence, secure publishing | lead, 6 | open |
-| 14 | Desktop and mobile layouts with real browser interaction | 6 | open |
-| 15 | No regression in existing functionality | lead | open |
+| 1 | Import contacts, create companies, manage associated records | 1 | done (CRM-01..12, browser) |
+| 2 | Create a deal, drag between stages, reload, persisted | 1 | done (UX-10) |
+| 3 | Assign a task, record a follow-up, forecast updates | 1 | done (CRM tests, browser) |
+| 4 | Pick a template, edit visually, save, reopen | 2 | done (UX-11) |
+| 5 | Send a test email, verify rendered content | 2 | done (EML-06; preview stores `not_sent`, live delivery via gateway) |
+| 6 | Design and publish a responsive landing page without code | 3 | done (UX-12) |
+| 7 | Submit a published form, verify the CRM record | 3 | done (UX-12) |
+| 8 | Multi-step funnel with tracked conversion | 3 | done (SIT tests, browser) |
+| 9 | Campaign containing emails, forms, pages and automations | 4 | done (JRN-07, browser) |
+| 10 | Workflow triggered by a real form submission or CRM event | 4 | done (UX-13, JRN-02) |
+| 11 | Consent, suppression and unsubscribe enforced | lead, 2, 4 | done (UX-14, PLT-35) |
+| 12 | Leads and revenue attributed to a campaign | 5 | done (UX-16, BI-04) |
+| 13 | Authentication, permissions, persistence, secure publishing | lead, 6 | done (role-gated routes, signed unsubscribe, sanitised publishing; live Auth0 not exercised) |
+| 14 | Desktop and mobile layouts with real browser interaction | 6 | done (UX-01 sweep, 1440 and 390) |
+| 15 | No regression in existing functionality | lead | done (CI integration on live engines; unit 322/322) |
 
 ## 6. Known blockers
 
