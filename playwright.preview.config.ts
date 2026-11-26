@@ -33,7 +33,7 @@ export default defineConfig({
   projects: [
     { name: 'desktop', testMatch: /(workspaces|keyboard)\.spec\.ts$/, use: { viewport: { width: 1440, height: 900 } } },
     { name: 'mobile', testMatch: /(workspaces|keyboard)\.spec\.ts$/, use: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true } },
-    { name: 'journeys', testMatch: /(journeys|features)\.spec\.ts$/, dependencies: ['desktop', 'mobile'], use: { viewport: { width: 1440, height: 900 } } },
+    { name: 'journeys', testMatch: /(journeys|features|wave1)\.spec\.ts$/, dependencies: ['desktop', 'mobile'], use: { viewport: { width: 1440, height: 900 } } },
   ],
   webServer: {
     command: `npx next start -p ${port}`,

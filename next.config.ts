@@ -14,9 +14,14 @@ const nextConfig: NextConfig = {
       headers: [
         { key: 'X-Content-Type-Options', value: 'nosniff' },
         { key: 'X-Frame-Options', value: 'DENY' },
-        { key: 'Content-Security-Policy', value: "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" },
         { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
         { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+      ],
+    }, {
+      // Stored media sends its own stricter policy (a sandbox for SVG); a site-wide value here would replace it.
+      source: '/:path((?!media/).*)',
+      headers: [
+        { key: 'Content-Security-Policy', value: "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" },
       ],
     }];
   },
