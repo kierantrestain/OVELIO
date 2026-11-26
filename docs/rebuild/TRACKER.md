@@ -121,7 +121,7 @@ Specialists: **PE** Product Engineering (shell, navigation, dashboards, kit), **
 security), **IQ** Intelligence & Quality (analytics, AI, benchmarks, independent acceptance). Migration ranges for new
 work: PE 060-069, CR 011-019, MC 021-029 / 032-039, PL 042-049 / 070-079, IQ 051-059.
 
-### Wave one: perfect the core (status: in progress)
+### Wave one: perfect the core (status: done, gate passed 2026-11-26)
 
 | Capability | Exists | Gap | P | Owner | Acceptance |
 |---|---|---|---|---|---|
@@ -143,4 +143,14 @@ work: PE 060-069, CR 011-019, MC 021-029 / 032-039, PL 042-049 / 070-079, IQ 051
 | Persistent media | Engine media + preview data URLs | OVELIO media store with type sniffing, size limits, SVG sanitising | P1 | PL | Upload survives restart; a script in an SVG is removed |
 | Independent acceptance | Preview suite + CI on engines | Preview suite in CI; QA verification of specialists' claims | P0 | IQ | CI runs both suites green |
 
-Continuation point: recorded here at the end of each working session.
+Wave one gate: CI run 38 green on 2392ff6 (engines, preview suite, 2.0 records survive restart and restore);
+independent acceptance IQ-01..IQ-19 all pass (test/e2e/preview/wave1.spec.ts), with three defects found and fixed (CRM
+density, studio first-edit save, SVG sandbox CSP). Declined with reason: newsletter subject A/B (Listmonk reports opens
+per campaign and Apple Mail prefetch inflates them, so a significance test would crown unreliable winners).
+
+Rollback points: `fccb9d0` main before 2.0; `a29fb83` first CI-verified 2.0 build; `2392ff6` wave one complete.
+
+**Continuation point:** wave two. Start with the connected revenue journey (products and line items → proposals with
+acceptance → Stripe test-mode payment links and webhooks → revenue states), then appointments (availability, booking
+links, Google/Microsoft calendar sync), then threaded inbox and team assignment. External verification needs Stripe test
+keys and Google/Microsoft OAuth clients; mark those pending until provided.
