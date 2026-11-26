@@ -274,3 +274,34 @@ test('EML-11 conditional content resolves per contact in native sends and the pr
   assert.doesNotMatch(mautic.data.html, /VIP-ONLY|EVERYONE-ELSE|RETAIL-ONLY/);
   assert.match(mautic.data.notes[0], /3 conditional blocks were left out/);
 });
+
+test('EML-12 deliverability: every check is measured or unavailable with a reason, and link checks never reach private addresses', async () => {
+  const { isPublicAddress, checkLink, designLinks } = await import('../../src/server/studio/deliverability');
+  for (const address of ['10.0.0.1', '127.0.0.1', '169.254.169.254', '192.168.1.10', '100.64.0.1', '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1']) {
+    assert.equal(isPublicAddress(address), false, address);
+  }
+  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(isPublicAddress(address), true, address);
+  assert.equal((await checkLink('http://127.0.0.1/admin')).status, 'skipped');
+  assert.equal((await checkLink('http://[::1]/')).status, 'skipped');
+  assert.equal((await checkLink('http://example.com:8080/')).status, 'skipped');
+  assert.equal((await checkLink('ftp://example.com/file')).status, 'skipped');
+  const local = await checkLink('http://localhost/');
+  assert.equal(local.status, 'unreachable');
+  assert.match(local.detail, /private or reserved/, 'a name that resolves to a private address is refused at connect time');
+  assert.deepEqual(designLinks('<a href="https://a.example/x?y=1&amp;z=2">a</a><a href="{{unsubscribe_url}}">u</a><img src="https://a.example/i.png"><a href="mailto:x@y.z">m</a>'),
+    ['https://a.example/x?y=1&z=2', 'https://a.example/i.png']);
+
+  const report = await call<{ checks: { id: string; group: string; status: string; value: string; detail: string }[] }>('GET', 'studio/deliverability');
+  assert.equal(report.status, 200);
+  const ids = report.data.checks.map(check => check.id);
+  for (const id of ['spf', 'dkim', 'dmarc', 'bounce', 'complaint', 'suppressions', 'native', 'consent', 'unengaged']) assert.ok(ids.includes(id), id);
+  for (const check of report.data.checks) {
+    assert.ok(['pass', 'warn', 'fail', 'info', 'unavailable'].includes(check.status), check.id);
+    assert.ok(check.detail.length > 10, `${check.id} explains itself`);
+    if (check.status === 'unavailable') assert.equal(check.value, 'Unavailable');
+  }
+  const bounce = report.data.checks.find(check => check.id === 'bounce')!;
+  assert.equal(bounce.value, '1%', 'sample data: 12 bounces from 1,240 sent');
+  assert.equal(report.data.checks.find(check => check.id === 'unengaged')!.status, 'unavailable');
+  assert.match(report.data.checks.find(check => check.id === 'native')!.detail, /does not show inbox placement/);
+});

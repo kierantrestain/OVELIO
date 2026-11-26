@@ -219,3 +219,15 @@ export function ruleFromClass(token: string): VisibilityRule | null {
     return null;
   }
 }
+
+/** One line of the deliverability report: a measured value, or "unavailable" with the reason. */
+export type DeliverabilityCheck = {
+  id: string;
+  group: 'Authentication' | 'Reputation' | 'List hygiene';
+  label: string;
+  status: 'pass' | 'warn' | 'fail' | 'info' | 'unavailable';
+  value: string;
+  detail: string;
+};
+
+export type LinkCheck = { url: string; status: 'ok' | 'redirect' | 'broken' | 'unreachable' | 'skipped'; code: number | null; detail: string };

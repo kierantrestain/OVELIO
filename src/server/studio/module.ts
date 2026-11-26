@@ -4,7 +4,7 @@ import type { User } from '@/contracts';
 import type { SearchResult } from '@/contracts/platform';
 import { mergeTags, renderMergeTags, unknownMergeTags } from '@/contracts/merge-tags';
 import type {
-  AudienceEstimate, Design, DesignStatus, EmailTemplateSummary, EngineExport, RenderedPreview, SampleContact, SentMessage, StoredMessage, TestSendResult,
+  AudienceEstimate, DeliverabilityCheck, Design, DesignStatus, EmailTemplateSummary, EngineExport, RenderedPreview, SampleContact, SentMessage, StoredMessage, TestSendResult,
 } from '@/contracts/studio';
 import { allTemplates, factoryIndustries, factoryUseCases, findTemplate, templateSummary } from '@/templates/email';
 import { rateLimit } from '../auth';
@@ -21,6 +21,7 @@ import type { Context } from '../routes/shared';
 import { applyBrand, brandInput, createBrand, deleteBrand, getBrand, listBrands, rethemeSource, saveBrand, setDefaultBrand, workspaceProfile } from './brand';
 import { compileMjml, htmlToMjml } from './compile';
 import { resolveConditionalBlocks } from './conditions';
+import { authenticationChecks, checkLinks, designLinks, reputationChecks } from './deliverability';
 import { fromListmonkHtml, toListmonkHtml, toMauticHtml } from './convert';
 import {
   compileDesign, createDesign, duplicateDesign, findLink, getDesign, getVersion, linkDesign, listDesigns, listVersions, restoreVersion,
@@ -180,6 +181,35 @@ async function rebrand(id: string, brandId: string, version: number, userId: str
   return getDesign(id);
 }
 
+/** List hygiene from what can be measured: subscribers without consent or suppressed. Engagement is not measurable. */
+async function hygieneChecks(): Promise<DeliverabilityCheck[]> {
+  const unengaged: DeliverabilityCheck = {
+    id: 'unengaged', group: 'List hygiene', label: 'Unengaged and never-opened subscribers', status: 'unavailable', value: 'Unavailable',
+    detail: 'The newsletter engine counts opens per email, not per subscriber (individual tracking is off for privacy), and Apple Mail prefetches images, so per-person engagement cannot be measured honestly.',
+  };
+  try {
+    let ids: number[];
+    if (isDevPreviewMode()) {
+      const { handleDevPreviewConsole } = await import('../dev-preview');
+      ids = (await (await handleDevPreviewConsole(new Request('http://preview.local/api/console/lists'), ['lists'])).json() as { id: number }[]).map(list => list.id);
+    } else {
+      const { listmonk } = await import('../listmonk');
+      ids = (await listmonk.lists()).map(list => list.id);
+    }
+    if (!ids.length) return [{ id: 'consent', group: 'List hygiene', label: 'Subscribers without consent', status: 'unavailable', value: 'Unavailable', detail: 'There are no mailing lists yet.' }, unengaged];
+    const estimate = await audience(ids.slice(0, 20));
+    const total = (estimate.eligible ?? 0) + (estimate.excluded ?? 0);
+    const share = total ? (estimate.excluded ?? 0) / total : 0;
+    return [{
+      id: 'consent', group: 'List hygiene', label: 'Subscribers without consent or suppressed', status: share > 0.2 ? 'warn' : 'pass',
+      value: `${(estimate.excluded ?? 0).toLocaleString('en-GB')} of ${total.toLocaleString('en-GB')}`,
+      detail: `${estimate.lists.map(list => `${list.name}: ${list.excluded ?? 0} excluded`).join(' · ')}. They are skipped at send time; remove or re-permission them to keep lists clean. ${estimate.note}`,
+    }, unengaged];
+  } catch (error) {
+    return [{ id: 'consent', group: 'List hygiene', label: 'Subscribers without consent', status: 'unavailable', value: 'Unavailable', detail: `The newsletter engine did not answer: ${(error as Error).message.slice(0, 120)}` }, unengaged];
+  }
+}
+
 async function designsEndpoint({ query }: Context) {
   const items = await listDesigns({ kind: kind.parse(query.get('kind') ?? 'email'), status: query.get('status') ?? undefined, q: query.get('q') ?? undefined });
   return { items };
@@ -326,6 +356,16 @@ export const studioModule: LaneModule = {
     route('GET', /^studio\/templates\/([a-z0-9-]+)\/html$/, async ({ params, query }) => ({ html: await templateHtml(params[0], query.get('brandId') ? z.uuid().parse(query.get('brandId')) : null) })),
     route('GET', /^studio\/brand$/, async () => getBrand()),
     route('PUT', /^studio\/brand$/, async ({ request, user }) => saveBrand(await readBody(request, brandInput), user.id), 'marketer'),
+    route('GET', /^studio\/deliverability$/, async () => {
+      const groups = await Promise.all([authenticationChecks(), reputationChecks(), hygieneChecks()]);
+      return { checks: groups.flat(), generatedAt: new Date().toISOString() };
+    }, 'marketer'),
+    route('POST', /^studio\/deliverability\/links$/, async ({ request, user }) => {
+      const { designId } = await readBody(request, z.object({ designId: z.uuid() }));
+      await rateLimit('studio:links:' + user.id, 6, 60);
+      const design = await getDesign(designId);
+      return { links: await checkLinks(designLinks(design.html)) };
+    }, 'marketer'),
     route('GET', /^studio\/brands$/, async () => ({ items: await listBrands() })),
     route('POST', /^studio\/brands$/, async ({ request, user }) => {
       const { name } = await readBody(request, z.object({ name: z.string().trim().min(1).max(80) }));

@@ -135,6 +135,8 @@
 .ov-studio-choice-item .ov-studio-thumb { height: 180px; border-radius: 6px; border: 0; }
 .ov-studio-choice-item .ov-studio-thumb iframe { transform: translateX(-50%) scale(.3); }
 .ov-studio-count { font-variant-numeric: tabular-nums; font-weight: 600; }
+.ov-studio-check-value { flex-wrap: nowrap; justify-content: flex-end; text-align: right; max-width: 45%; }
+.ov-studio-url { word-break: break-all; font-weight: 500; }
 .ov-studio-swatch { display: inline-block; width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgb(0 0 0 / .1); vertical-align: middle; }
 .ov-studio-brand-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .ov-studio-color { display: grid; gap: 6px; font-size: 13px; }
