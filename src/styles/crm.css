@@ -40,6 +40,11 @@
 .ov-crm-next { font-size: var(--font-size-xs); color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ov-crm-next--none { color: var(--color-text-warning, #a35c00); }
 
+/* Date filters keep their calendar width; on phones each takes a full row instead of overflowing. */
+.ov-crm-date-filter { display: flex; flex: 0 1 200px; min-width: 180px; }
+.ov-crm-date-filter > * { width: 100%; }
+@media (max-width: 640px) { .ov-crm-date-filter { flex: 1 1 100%; } }
+
 /* Detail pages */
 .ov-crm-detail { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
 .ov-crm-side { display: grid; gap: 20px; }

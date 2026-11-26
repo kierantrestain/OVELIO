@@ -173,8 +173,8 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
           options={(tags.data ?? []).map(tag => ({ value: tag.tag, label: tag.tag }))} />
         <Selector label="Open deal" width={150} value={filters.hasOpenDeal || 'any'} onChange={value => set({ hasOpenDeal: value && value !== 'any' ? value : '' })}
           options={[{ value: 'any', label: 'Any' }, { value: 'yes', label: 'Has an open deal' }, { value: 'no', label: 'No open deal' }]} />
-        <DateInput label="Active since" hasClear value={(filters.activityAfter || undefined) as never} onChange={value => set({ activityAfter: value ?? '' })} />
-        <DateInput label="Last active before" hasClear value={(filters.activityBefore || undefined) as never} onChange={value => set({ activityBefore: value ?? '' })} />
+        <div className="ov-crm-date-filter"><DateInput label="Active since" hasClear value={(filters.activityAfter || undefined) as never} onChange={value => set({ activityAfter: value ?? '' })} /></div>
+        <div className="ov-crm-date-filter"><DateInput label="Last active before" hasClear value={(filters.activityBefore || undefined) as never} onChange={value => set({ activityBefore: value ?? '' })} /></div>
         <Selector label="Email consent" width={150} value={filters.consent || 'any'} onChange={value => set({ consent: value && value !== 'any' ? value : '' })}
           options={[{ value: 'any', label: 'Any' }, { value: 'opted_in', label: 'Opted in' }, { value: 'unknown', label: 'No consent' }, { value: 'suppressed', label: 'Suppressed' }]} />
       </FilterRow>
@@ -194,7 +194,7 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
       </div> : null}
       {contacts.data?.note ? <Banner status="info" title={contacts.data.note} /> : null}
       {!contacts.data ? <AsyncState loading={contacts.loading} error={contacts.error} retry={contacts.refresh} /> : <>
-        <DataTable label="Contacts" minWidth={1240}>
+        <DataTable label="Contacts" minWidth={1080}>
           <Table data={items} idKey="id" hasHover density="compact"
             emptyState={<Empty title={active.length ? 'No contacts match these filters' : 'No contacts yet'} description={active.length ? undefined : 'Add a contact or import a CSV.'} />}
             columns={[
@@ -207,10 +207,10 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
                 <Text type="supporting" color="secondary">{contact.email}</Text></span> },
               { key: 'company', header: 'Company', renderCell: (contact: CrmContact) => <span className="ov-cell"><span>{contact.company || '—'}</span>
                 {contact.position ? <Text type="supporting" color="secondary">{contact.position}</Text> : null}</span> },
-              { key: 'owner', header: 'Owner', width: pixel(170), renderCell: (contact: CrmContact) => <OwnerSelect label={`Owner of ${contact.name}`} isLabelHidden size="sm" width={156}
+              { key: 'owner', header: 'Owner', width: pixel(150), renderCell: (contact: CrmContact) => <OwnerSelect label={`Owner of ${contact.name}`} isLabelHidden size="sm" width={138}
                 value={contact.ownerId} members={members}
                 onChange={owner => void action.run(async () => { await api('/crm/owners', 'POST', { object: 'contact', ids: [contact.id], ownerId: owner }); contacts.refresh(); })} /> },
-              { key: 'stage', header: 'Lifecycle stage', width: pixel(170), renderCell: (contact: CrmContact) => <Selector label={`Stage of ${contact.name}`} isLabelHidden size="sm" width={156}
+              { key: 'stage', header: 'Lifecycle stage', width: pixel(150), renderCell: (contact: CrmContact) => <Selector label={`Stage of ${contact.name}`} isLabelHidden size="sm" width={138}
                 value={contact.stageName ?? '__none'} options={[{ value: '__none', label: 'No stage' }, ...stageOptions]}
                 onChange={value => void action.run(async () => { await setStage([contact.id], value && value !== '__none' ? value : null)(); contacts.refresh(); })} /> },
               { key: 'points', header: 'Score', width: pixel(70), renderCell: (contact: CrmContact) => contact.points },
