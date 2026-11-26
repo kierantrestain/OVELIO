@@ -109,7 +109,7 @@ export const workspaces: Workspace[] = [
     items: [
       { label: 'Company', href: '/settings', aliases: ['branding', 'profile'] },
       { label: 'Team', href: '/settings/team', aliases: ['users', 'roles', 'permissions'] },
-      { label: 'Mailboxes', href: '/settings/mailboxes', aliases: ['gmail', 'outlook', 'email accounts'] },
+      { label: 'Mailboxes', href: '/settings/mailboxes', role: 'marketer', aliases: ['gmail', 'outlook', 'email accounts'] },
       { label: 'Connections', href: '/settings/connections', aliases: ['smtp', 'dns', 'engines', 'health'] },
       { label: 'Data & privacy', href: '/settings/privacy', aliases: ['gdpr', 'backup', 'export', 'licences'] },
     ],

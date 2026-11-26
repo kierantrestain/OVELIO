@@ -57,8 +57,9 @@ const kindLabel: Record<SearchResult['kind'], string> = {
 function navigationCommands(user: User): CommandEntry[] {
   const entries: CommandEntry[] = [];
   for (const space of workspaces) {
-    if (!allowed(user.role, space.role)) continue;
-    entries.push({ id: 'ws:' + space.id, label: space.label, auxiliaryData: { href: space.href, group: 'Go to', subtitle: space.description, aliases: [] } });
+    if (allowed(user.role, space.role)) {
+      entries.push({ id: 'ws:' + space.id, label: space.label, auxiliaryData: { href: space.href, group: 'Go to', subtitle: space.description, aliases: [] } });
+    }
     for (const leaf of space.items) {
       if (!allowed(user.role, leaf.role ?? space.role) || leaf.href === space.href) continue;
       entries.push({ id: 'leaf:' + leaf.href, label: `${space.label} › ${leaf.label}`, auxiliaryData: { href: leaf.href, group: 'Go to', aliases: leaf.aliases ?? [] } });
@@ -193,7 +194,7 @@ function ShellFrame({ user, workspace, devPreview = false, children }: ShellProp
     heading={<NextLink href="/overview" aria-label="OVELIO overview" className="ov-brand-link"><Brand /></NextLink>}
     startContent={<Breadcrumbs label="Location">
       <BreadcrumbItem href="/overview">{workspace.name || 'Workspace'}</BreadcrumbItem>
-      {current ? <BreadcrumbItem href={onLeaf || isDetail ? current.href : undefined} isCurrent={!onLeaf && !isDetail}>{current.label}</BreadcrumbItem> : null}
+      {current ? <BreadcrumbItem href={(onLeaf || isDetail) && allowed(user.role, current.role) ? current.href : undefined} isCurrent={!onLeaf && !isDetail}>{current.label}</BreadcrumbItem> : null}
       {onLeaf && leaf ? <BreadcrumbItem href={isDetail ? leaf.href : undefined} isCurrent={!isDetail}>{leaf.label}</BreadcrumbItem> : null}
       {isDetail ? <BreadcrumbItem isCurrent>Details</BreadcrumbItem> : null}
     </Breadcrumbs>}
@@ -223,7 +224,7 @@ function ShellFrame({ user, workspace, devPreview = false, children }: ShellProp
       <div style={accent}>
         <AppShell sideNav={sideNav} topNav={topNav} variant="elevated">
           <div className="ov-page">
-            {current && !allowed(user.role, current.role)
+            {current && !allowed(user.role, leaf?.role ?? current.role)
               ? <Panel><Empty title="Your role cannot access this workspace" action={<Link href="/overview">Return to Overview</Link>} /></Panel>
               : children}
           </div>
