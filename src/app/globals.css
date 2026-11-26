@@ -148,7 +148,7 @@ body { background: var(--color-background-body); color: var(--color-text-primary
 /* ── Design system pass (UX lane) ────────────────────────────────────────── */
 
 /* Page headers: one title size across workspaces; descriptions stay readable. */
-.ov-page-header h1 { font-size: var(--font-size-2xl); line-height: 1.2; letter-spacing: -0.015em; }
+.ov-page h1 { font-size: var(--font-size-2xl); line-height: 1.2; letter-spacing: -0.015em; }
 .ov-page-header > div:first-child > p, .ov-page-header > div:first-child > span:last-child { max-width: 72ch; }
 .ov-page-header .ov-actions { flex-shrink: 0; }
 .ov-section-title { font-size: var(--font-size-base); font-weight: var(--font-weight-semibold); }
@@ -214,16 +214,15 @@ body { background: var(--color-background-body); color: var(--color-text-primary
 
 @media (max-width: 860px) {
   :root { --ov-gap: 16px; }
-  .ov-page-header h1 { font-size: var(--font-size-xl); }
+  .ov-page h1 { font-size: var(--font-size-xl); }
   .ov-page-header { align-items: flex-start; }
 }
 
 /* Phones: toolbars stack, controls fill the row, actions wrap under the title. */
 @media (max-width: 640px) {
-  .ov-toolbar, .ov-tbar, .ov-sites-toolbar, .ov-studio-toolbar { flex-direction: column; align-items: stretch; }
-  :is(.ov-toolbar, .ov-tbar, .ov-sites-toolbar, .ov-studio-toolbar, .ov-journeys-toolbar) > *,
-  .ov-toolbar form, .ov-toolbar .ov-actions, .ov-tbar-start, .ov-tbar-end { width: 100%; max-width: 100%; margin-inline-start: 0; }
-  :is(.ov-toolbar, .ov-tbar, .ov-filter-row, .ov-filter-bar, .ov-sites-toolbar, .ov-studio-toolbar, .ov-journeys-toolbar) .astryx-field { flex: 1 1 9rem; width: auto; }
+  .ov-toolbar, .ov-tbar, .ov-sites-toolbar, .ov-studio-toolbar { align-items: flex-end; }
+  .ov-toolbar form, .ov-toolbar > .ov-actions, .ov-tbar-start, .ov-tbar-end, .ov-sites-toolbar > div { flex: 1 1 100%; max-width: 100%; margin-inline-start: 0; }
+  :is(.ov-toolbar, .ov-tbar, .ov-filter-row, .ov-filter-bar, .ov-actions, .ov-sites-toolbar, .ov-studio-toolbar, .ov-journeys-toolbar) .astryx-field { flex: 1 1 9rem; width: auto; }
   .ov-toolbar form > .astryx-field { flex: 1 1 0; }
   .ov-page-header .ov-actions { width: 100%; }
   .ov-rows > li > :not(:first-child) { flex-shrink: 1; }
