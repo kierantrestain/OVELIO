@@ -18,7 +18,7 @@ import { BarList } from './insights/charts';
 import { ProvenanceBadge } from './insights/controls';
 import { newsletterTotals, useNewsletters, useWebsite } from './insights/engines';
 import { formatCount, formatMoney, formatPercent } from './insights/format';
-import { usePreview, useUser } from './shell';
+import { useUser } from './shell';
 import { AsyncState, Empty, Metric, Modal, PageHeader, Panel, Rows } from './ui';
 import { useWorkspace } from './workspace';
 import type { OverviewLayout } from '@/contracts/workspace';
@@ -201,7 +201,6 @@ function Starred() {
 
 export function Overview() {
   const user = useUser();
-  const preview = usePreview();
   const home = useResource<HomeData>('/insights/home');
   const websites = useResource<unknown[]>('/websites');
   const greeting = useSyncExternalStore(noSubscription, greetingNow, () => 'Welcome back');
@@ -221,7 +220,6 @@ export function Overview() {
   return <div className="ov-insights-root">
     <PageHeader title={`${greeting}, ${firstName}`} description={`${today ? today + ' · ' : ''}Today across sales, marketing and your websites.`}
       actions={<>
-        {preview ? <Badge label="Sample data" variant="info" /> : null}
         <Button label="Customise" icon={<SlidersHorizontal size={15} />} onClick={() => setCustomising(true)} />
         <Button label="Executive analytics" href="/analytics" />
       </>} />
