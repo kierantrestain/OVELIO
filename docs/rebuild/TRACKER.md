@@ -14,6 +14,10 @@ updates it at merge. Older parity work (Mautic/Listmonk/Umami engine parity) sta
 | D6 | **Native flows** on `@xyflow/react` 12.12.1 (MIT), executed by the OVELIO worker via platform jobs. The Mautic workflow canvas stays for engine journeys. | Mautic cannot trigger on deals, tasks or OVELIO forms. |
 | D7 | **Analytics** reads the `events` table, OVELIO records and the existing Umami/Listmonk adapters. No new analytics engine. | Requirement §9. |
 | D8 | Kanban drag and drop: `@dnd-kit/core` 6.3.1 + `@dnd-kit/sortable` 10.0.0 (MIT). | Accessible keyboard dragging. |
+| D9 | **Payments through Stripe's REST API, no SDK**: hosted Checkout per invoice balance, refunds, and a webhook verified with the documented HMAC scheme (5-minute tolerance), processed once per event id in a transaction. OVELIO never handles card data. | Three endpoints do not justify a dependency; idempotency is ours to guarantee either way. |
+| D10 | **Native simple e-signature** on proposals (typed name + consent + evidence record with a SHA-256 of the accepted content). Documenso (AGPL-3.0) evaluated and not incorporated; a qualified-signature provider can be added behind the same acceptance step. | Licence, and the evidence a simple signature needs is small. |
+| D11 | **Experiments judge outcomes, never opens**: workflow A/B splits measure clicks (signed `/r/` redirects, scanners flagged), conversions, qualified leads or won revenue; two-proportion z-test or Welch, minimum 100 contacts and 5 outcomes per path, p < 0.05. | Apple Mail Privacy Protection and scanners make opens unreliable. |
+| D12 | **Public revenue paths are `/proposal/` and `/pay/`**, never `/q/` or `/p/` (Caddy sends those to Umami tracked links). Public OVELIO paths are listed in Caddy's `@ovelioPublic` so they never receive the console session. | Found as a production routing defect during wave two. |
 
 Licences checked 2026-11-25: all of the above are MIT, BSD-3-Clause or Apache-2.0. Twenty (AGPL-3.0), Mautic (GPL-3.0) and Listmonk (AGPL-3.0) are references only: read behaviour, never copy code.
 
@@ -150,7 +154,27 @@ per campaign and Apple Mail prefetch inflates them, so a significance test would
 
 Rollback points: `fccb9d0` main before 2.0; `a29fb83` first CI-verified 2.0 build; `2392ff6` wave one complete.
 
-**Continuation point:** wave two. Start with the connected revenue journey (products and line items → proposals with
-acceptance → Stripe test-mode payment links and webhooks → revenue states), then appointments (availability, booking
-links, Google/Microsoft calendar sync), then threaded inbox and team assignment. External verification needs Stripe test
-keys and Google/Microsoft OAuth clients; mark those pending until provided.
+### Wave two: complete the customer lifecycle (status: in progress)
+
+Branch `claude/serene-brahmagupta-ekl58t` (from main e56d866). Migration ranges in use: 014 revenue, 015 inbox, 071 calendar.
+
+| Slice | Status | Evidence |
+|---|---|---|
+| Wave-one carry-over: outcome-based experiments | done | JRN-09, JRN-10, IQ-22; signed click tracking PLT-37 |
+| Revenue: catalogue, price lists, tax, deal line items, proposals, e-signature, deposits, invoices, Stripe Checkout + webhook, refunds, subscriptions and renewals, onboarding tasks, revenue states, accounting CSV | done | REV-01..REV-09 unit; IQ-20, IQ-21 browser (signing on a 390 px phone) |
+| Workflow triggers: proposal viewed/accepted/declined, payment received/failed, subscription cancelled, meetings | done | REV-09 (accepted proposal enrols the signer) |
+| Calendar: booking types, availability, round-robin, public booking, reminders, ICS feed | in progress (Calendar specialist worktree) | CAL- tests |
+| Inbox: threads, mailbox privacy, shared inboxes, notes, saved replies, assignment, response times, provider sync | in progress (Communications specialist worktree) | INB- tests |
+| Connector infrastructure, advanced automation (webhooks in, sub-workflows, replay) | not started | |
+
+Defects found and fixed in wave two: deal line editor overflowing its column (browser), Save draft disabled after typing a
+number (IQ-20), proposal links colliding with Umami's `/q/` route in production (Caddy review), CR-03 relying on a fixed
+job budget.
+
+Pending external verification: Stripe test keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`), Google/Microsoft OAuth
+clients. The Vercel deployment was not reachable from the build container, so its commit could not be confirmed;
+`/api/health` now reports `commit` for every later deployment.
+
+**Continuation point:** merge the calendar and inbox worktrees into the wave two branch, run the full gate (unit, preview
+browser suite, CI engines), then connector infrastructure and advanced automation, then the end-to-end lifecycle check
+(lead → CRM → appointment → proposal → contract → payment → onboarding → renewal) and the wave two checkpoint.
