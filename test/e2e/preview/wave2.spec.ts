@@ -108,7 +108,8 @@ test('IQ-26 inbox reading, saved replies and team handling fit on desktop and mo
   await expect(status).toHaveText(/Pending/);
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
-  await page.getByText('Response times', { exact: true }).click();
+  await page.reload();
+  await page.getByText('Response', { exact: true }).click();
   await expect(page.getByText('Median first reply')).toBeVisible();
   await evidence(page, testInfo, '/sales/inbox-response-mobile');
   expect(guard.problems()).toEqual([]);

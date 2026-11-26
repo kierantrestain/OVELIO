@@ -723,9 +723,9 @@ export function SalesInbox() {
         <Button type="submit" label="Search" />
       </form> : undefined}>
         <SegmentedControl label="Inbox view" value={view} onChange={setView}>
-          <SegmentedControlItem value="conversations" label="Conversations" />
-          <SegmentedControlItem value="activity" label="Contact activity" />
-          <SegmentedControlItem value="response" label="Response times" />
+          <SegmentedControlItem value="conversations" label="Threads" />
+          <SegmentedControlItem value="activity" label="Activity" />
+          <SegmentedControlItem value="response" label="Response" />
         </SegmentedControl>
         {view === 'conversations' ? <Switch label="Unread only" value={unreadOnly} onChange={setUnreadOnly} ref={unreadFilter} /> : null}
       </Toolbar>
