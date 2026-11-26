@@ -119,3 +119,38 @@ test('SIT-14 rollback republishes a past snapshot; a changed slug redirects with
   assert.match(pub.robotsTxt('https://pages.example'), /Allow: \/s\/\nDisallow: \/\n\nSitemap: https:\/\/pages\.example\/sitemap\.xml/);
   assert.match(pub.robotsTxt('', 'go.example.com'), /Sitemap: https:\/\/go\.example\.com\/sitemap\.xml/);
 });
+
+test('SIT-15 funnel branching routes by form answer and reports conversion per branch', async () => {
+  const funnels = await import('../../src/server/sites/funnels');
+  const ids: string[] = [];
+  let formId = '';
+  for (const [index, key] of ['saas-demo', 'ebook-download', 'live-webinar'].entries()) {
+    const created = await pages.createPage({ name: `SIT branch ${index}`, templateKey: key, slug: `sit-branch-${index}` }, user);
+    await pages.publishPage(created.id, user);
+    ids.push(created.id);
+    if (index === 0) formId = created.formId!;
+  }
+  const funnel = await funnels.saveFunnel(null, { name: 'SIT branching', status: 'active', steps: [
+    { name: 'Qualify', pageId: ids[0], routes: [{ field: 'team_size', operator: 'equals', value: '1,000+', toPosition: 2 }] },
+    { name: 'Small teams', pageId: ids[1] }, { name: 'Enterprise', pageId: ids[2] },
+  ] }, user);
+  assert.equal(funnel.steps[0].routes[0].toPosition, 2);
+  assert.ok(funnel.steps[0].fields.some(field => field.key === 'team_size' && field.options?.includes('1,000+')), 'routes can pick from the page form fields');
+  await assert.rejects(funnels.saveFunnel(funnel.id, { steps: [{ name: 'A', pageId: ids[0], routes: [{ field: 'team_size', operator: 'checked', toPosition: 0 }] }, { name: 'B', pageId: ids[1] }] }, user), /does not exist/);
+  const answer = (visitor: string, size: string, email: string) => pub.submitForm(formId, {
+    first_name: 'Branch', email, company: 'Acme', team_size: size, _page: ids[0], _funnel: funnel.id, _step: '0', _vid: visitor,
+  }, meta);
+  const big = await answer('sit15-visitor-big', '1,000+', 'big.sit15@example.com');
+  assert.ok(big.result.ok && big.result.redirect?.startsWith('/s/sit-branch-2?fn='), 'large teams skip to the enterprise step');
+  const small = await answer('sit15-visitor-small', '11–50', 'small.sit15@example.com');
+  assert.ok(small.result.ok && small.result.redirect?.startsWith('/s/sit-branch-1?fn='), 'everyone else continues to the next step');
+  await pub.recordView({ pageId: ids[2], visitorId: 'sit15-visitor-big', funnelId: funnel.id, stepIndex: 2, utm: {} });
+  const stats = await funnels.funnelStats(funnel.id);
+  const [route, otherwise] = stats.steps[0].branches;
+  assert.equal(route.label, 'If Team size is “1,000+”');
+  assert.equal(route.toName, 'Enterprise');
+  assert.deepEqual([route.visitors, route.reached, route.conversion], [1, 1, 100]);
+  assert.equal(otherwise.label, 'Otherwise');
+  assert.deepEqual([otherwise.visitors, otherwise.reached, otherwise.conversion], [1, 0, 0]);
+  assert.equal(stats.completed, 1, 'reaching the last step completes the funnel');
+});

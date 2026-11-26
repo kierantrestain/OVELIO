@@ -69,7 +69,16 @@ const funnelInput = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   description: z.string().trim().max(500).optional(),
   status: z.enum(['draft', 'active', 'archived']).optional(),
-  steps: z.array(z.object({ name: z.string().trim().max(120), pageId: z.uuid() })).max(20).optional(),
+  steps: z.array(z.object({
+    name: z.string().trim().max(120),
+    pageId: z.uuid(),
+    routes: z.array(z.object({
+      field: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
+      operator: z.enum(['equals', 'not_equals', 'contains', 'checked', 'not_checked', 'not_empty']),
+      value: z.string().max(200).optional(),
+      toPosition: z.number().int().min(0).max(19),
+    })).max(8).optional(),
+  })).max(20).optional(),
 });
 
 const sectionInput = z.object({ name: z.string().trim().min(1).max(120), html: z.string().min(1).max(400_000), css: z.string().max(400_000) });

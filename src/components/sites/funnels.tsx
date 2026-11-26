@@ -7,7 +7,7 @@ import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, us
 import type { DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { ExternalLink, GripVertical, Plus, Trash2 } from 'lucide-react';
+import { ExternalLink, GitBranch, GripVertical, Plus, Trash2 } from 'lucide-react';
 import NextLink from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -19,7 +19,7 @@ import { Selector } from '@astryxdesign/core/Selector';
 import { Table } from '@astryxdesign/core/Table';
 import { Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
-import type { FunnelDetail, FunnelStats, FunnelSummary, LandingPageSummary } from '@/contracts/sites';
+import type { FieldRule, FunnelDetail, FunnelStats, FunnelStep, FunnelSummary, LandingPageSummary, RuleOperator } from '@/contracts/sites';
 import { api, date, message, number, useResource } from '../client';
 import { AsyncState, ConfirmDialog, Empty, Metric, Modal, PageHeader, Panel, StatusBadge } from '../ui';
 import { absoluteUrl, percent } from './shared';
@@ -70,9 +70,46 @@ export function FunnelsList() {
   </div>;
 }
 
-type DraftStep = { uid: string; name: string; pageId: string };
+type DraftRoute = FieldRule & { toUid: string };
+type DraftStep = { uid: string; name: string; pageId: string; routes: DraftRoute[] };
 
-function SortableStep({ step, index, pages, onChange, onRemove }: { step: DraftStep; index: number; pages: LandingPageSummary[]; onChange: (step: DraftStep) => void; onRemove: () => void }) {
+const routeOperators: { value: RuleOperator; label: string }[] = [
+  { value: 'equals', label: 'is' }, { value: 'not_equals', label: 'is not' }, { value: 'contains', label: 'contains' },
+  { value: 'checked', label: 'is ticked' }, { value: 'not_checked', label: 'is not ticked' }, { value: 'not_empty', label: 'is filled in' },
+];
+
+function BranchEditor({ step, steps, fields, onChange }: { step: DraftStep; steps: DraftStep[]; fields: FunnelStep['fields'] | undefined; onChange: (routes: DraftRoute[]) => void }) {
+  const others = steps.filter(item => item.uid !== step.uid);
+  const update = (index: number, patch: Partial<DraftRoute>) => onChange(step.routes.map((route, other) => other === index ? { ...route, ...patch } : route));
+  return <div className="ov-sites-branches">
+    {step.routes.map((route, index) => {
+      const source = fields?.find(item => item.key === route.field);
+      const needsValue = ['equals', 'not_equals', 'contains'].includes(route.operator);
+      return <div key={index} className="ov-sites-branch">
+        <Text type="supporting" weight="medium">{index ? 'Else if' : 'If'}</Text>
+        {fields?.length ? <Selector label="Answer" isLabelHidden width={170} value={route.field} onChange={value => update(index, { field: value ?? route.field, value: '' })} options={fields.map(item => ({ value: item.key, label: item.label }))} />
+          : <TextInput label="Field key" isLabelHidden width={150} placeholder="field_key" value={route.field} onChange={value => update(index, { field: value.toLowerCase().replace(/[^a-z0-9_]/g, '_') })} />}
+        <Selector label="Condition" isLabelHidden width={130} value={route.operator} onChange={value => update(index, { operator: (value ?? 'equals') as RuleOperator })} options={routeOperators} />
+        {needsValue ? source?.options?.length && route.operator !== 'contains'
+          ? <Selector label="Value" isLabelHidden width={150} placeholder="Answer" value={route.value ?? ''} onChange={value => update(index, { value: value ?? '' })} options={source.options.map(option => ({ value: option, label: option }))} />
+          : <TextInput label="Value" isLabelHidden width={140} placeholder="Answer" value={route.value ?? ''} onChange={value => update(index, { value })} /> : null}
+        <Text type="supporting" weight="medium">go to</Text>
+        <Selector label="Go to step" isLabelHidden width={170} placeholder="Choose a step" value={route.toUid} onChange={value => update(index, { toUid: value ?? '' })}
+          options={others.map(item => ({ value: item.uid, label: `${steps.indexOf(item) + 1}. ${item.name || 'Untitled step'}` }))} />
+        <IconButton label="Remove branch" icon={<Trash2 size={14} />} variant="ghost" size="sm" onClick={() => onChange(step.routes.filter((_, other) => other !== index))} />
+      </div>;
+    })}
+    <div className="ov-actions">
+      <Button size="sm" variant="ghost" icon={<GitBranch size={14} />} label={step.routes.length ? 'Add another branch' : 'Branch by form answer'} isDisabled={!others.length || step.routes.length >= 8}
+        onClick={() => onChange([...step.routes, { field: fields?.[0]?.key ?? '', operator: 'equals', value: '', toUid: others.at(-1)?.uid ?? '' }])} />
+      {step.routes.length ? <Text type="supporting" color="secondary">Otherwise visitors continue to the next step.</Text> : null}
+      {!fields ? <Text type="supporting" color="secondary">Save the funnel to load this page&apos;s form fields.</Text> : null}
+    </div>
+  </div>;
+}
+
+
+function SortableStep({ step, index, steps, fields, pages, onChange, onRemove }: { step: DraftStep; index: number; steps: DraftStep[]; fields: FunnelStep['fields'] | undefined; pages: LandingPageSummary[]; onChange: (step: DraftStep) => void; onRemove: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: step.uid });
   const page = pages.find(item => item.id === step.pageId);
   return <li ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={'ov-sites-step' + (isDragging ? ' ov-sites-field is-dragging' : '')}>
@@ -83,6 +120,7 @@ function SortableStep({ step, index, pages, onChange, onRemove }: { step: DraftS
       options={pages.map(item => ({ value: item.id, label: item.name, description: item.status === 'published' ? item.url : 'Draft: publish it before activating' }))}
       status={page && page.status !== 'published' ? { type: 'warning', message: 'Not published yet' } : undefined} />
     <IconButton label={`Remove step ${index + 1}`} icon={<Trash2 size={15} />} variant="ghost" onClick={onRemove} />
+    <BranchEditor step={step} steps={steps} fields={fields} onChange={routes => onChange({ ...step, routes })} />
   </li>;
 }
 
@@ -101,16 +139,19 @@ export function FunnelEditor({ id }: { id: string }) {
   if (loaded.data && loaded.data !== synced) {
     setSynced(loaded.data);
     setName(loaded.data.name);
-    setSteps(loaded.data.steps.map(step => ({ uid: step.id, name: step.name, pageId: step.pageId })));
+    setSteps(loaded.data.steps.map(step => ({ uid: step.id, name: step.name, pageId: step.pageId,
+      routes: step.routes.map(route => ({ field: route.field, operator: route.operator, value: route.value, toUid: loaded.data!.steps.find(other => other.position === route.toPosition)?.id ?? '' })) })));
   }
   if (!loaded.data) return <div className="ov-stack"><PageHeader title="Funnel" back={{ href: '/sites/funnels', label: 'Funnels' }} /><AsyncState loading={loaded.loading} error={loaded.error} retry={loaded.refresh} /></div>;
   const funnel = loaded.data;
-  const dirty = name !== funnel.name || JSON.stringify(steps.map(step => [step.name, step.pageId])) !== JSON.stringify(funnel.steps.map(step => [step.name, step.pageId]));
+  const toRoutes = (step: DraftStep) => step.routes.filter(route => route.toUid && route.field).map(route => ({ field: route.field, operator: route.operator, value: route.value ?? '', toPosition: steps.findIndex(other => other.uid === route.toUid) })).filter(route => route.toPosition >= 0);
+  const dirty = name !== funnel.name || JSON.stringify(steps.map(step => [step.name, step.pageId, toRoutes(step)])) !== JSON.stringify(funnel.steps.map(step => [step.name, step.pageId, step.routes.map(route => ({ field: route.field, operator: route.operator, value: route.value ?? '', toPosition: route.toPosition }))]));
+  const fieldsByPage = new Map(funnel.steps.map(step => [step.pageId, step.fields]));
   const save = async (status?: FunnelDetail['status']) => {
     setState({ busy: true });
     try {
       if (steps.some(step => !step.pageId)) throw new Error('Choose a page for every step, or remove the empty step.');
-      await api<FunnelDetail>(`/sites/funnels/${id}`, 'PATCH', { name: name.trim(), steps: steps.map(step => ({ name: step.name, pageId: step.pageId })), ...(status ? { status } : {}) });
+      await api<FunnelDetail>(`/sites/funnels/${id}`, 'PATCH', { name: name.trim(), steps: steps.map(step => ({ name: step.name, pageId: step.pageId, routes: toRoutes(step) })), ...(status ? { status } : {}) });
       loaded.refresh();
       stats.refresh();
       setState({ notice: status === 'active' ? 'Funnel activated. Steps now record visits and form submissions continue to the next step.' : status === 'draft' ? 'Funnel paused.' : 'Funnel saved.' });
@@ -141,14 +182,14 @@ export function FunnelEditor({ id }: { id: string }) {
           }}>
             <SortableContext items={steps.map(step => step.uid)} strategy={verticalListSortingStrategy}>
               <ul className="ov-sites-steps">
-                {steps.map((step, index) => <SortableStep key={step.uid} step={step} index={index} pages={pages.data!.items}
+                {steps.map((step, index) => <SortableStep key={step.uid} step={step} index={index} steps={steps} fields={fieldsByPage.get(step.pageId)} pages={pages.data!.items}
                   onChange={next => setSteps(current => current.map(item => item.uid === step.uid ? next : item))}
                   onRemove={() => setSteps(current => current.filter(item => item.uid !== step.uid))} />)}
               </ul>
             </SortableContext>
           </DndContext> : <Empty title="No steps yet" description="Add at least two pages, in the order visitors should see them." />}
           <div className="ov-actions">
-            <Button label="Add step" variant="secondary" icon={<Plus size={15} />} isDisabled={steps.length >= 20} onClick={() => setSteps(current => [...current, { uid: `new-${Date.now()}`, name: '', pageId: '' }])} />
+            <Button label="Add step" variant="secondary" icon={<Plus size={15} />} isDisabled={steps.length >= 20} onClick={() => setSteps(current => [...current, { uid: `new-${Date.now()}`, name: '', pageId: '', routes: [] }])} />
             <Link href="/sites?create=page" as={NextLink}>Create a new page</Link>
           </div>
           {funnel.steps.length ? <Text type="supporting" color="secondary">Entry address: <Link href={absoluteUrl(funnel.steps[0].url)} target="_blank"><span className="ov-actions">{funnel.steps[0].url}<ExternalLink size={12} aria-hidden="true" /></span></Link></Text> : null}
@@ -166,6 +207,9 @@ export function FunnelEditor({ id }: { id: string }) {
               <span><strong>{index + 1}.</strong> {step.name}</span>
               <div className="ov-sites-funnel-bar"><span style={{ width: `${Math.max(4, (step.visitors / max) * 100)}%` }}>{number(step.visitors)}</span></div>
               <span className="ov-sites-funnel-drop">{index === 0 ? 'Entry step' : `${percent(step.conversionFromPrevious)} continued · ${number(step.dropOff)} dropped off`}</span>
+              {step.branches.length ? <ul className="ov-sites-branch-stats">{step.branches.map(branch => <li key={branch.label + branch.toPosition}>
+                <GitBranch size={13} aria-hidden="true" /> {branch.label} → {branch.toName}: <strong>{number(branch.visitors)}</strong> took this path, {number(branch.reached)} arrived ({percent(branch.conversion)})
+              </li>)}</ul> : null}
             </div>)}
           </div> : <Empty title="No steps to measure yet" />}
           {funnel.status !== 'active' ? <Banner status="info" title="Activate the funnel to record step visits." /> : null}

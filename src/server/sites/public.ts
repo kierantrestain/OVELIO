@@ -13,7 +13,7 @@ import { createTask, resolveCampaignId } from '../records';
 import type { DomainRow, FormRow, PageRow, VariantRow } from './data';
 import { formSettings, getForm, pageUrl, uuidPattern } from './data';
 import { validateAnswers } from './forms';
-import { funnelForPage } from './funnels';
+import { branchTarget, funnelForPage } from './funnels';
 import { formsByIds } from './pages';
 import { escapeHtml, hydratePage, renderDocument, renderFormHtml } from './render';
 import { boundFormIds } from './sanitize';
@@ -297,6 +297,7 @@ export async function submitForm(formId: string, raw: Record<string, unknown>, m
     return { status, result: { ok: false, error: status === 422 ? detail : 'We could not save your details right now. Please try again in a few minutes.', fieldErrors: {} } };
   }
 
+  const route = step && page ? await branchTarget(step.funnelId, step.stepIndex, values) : null;
   const campaignId = await resolveCampaignId({
     assets: [{ type: 'form', id: form.id }, ...(page ? [{ type: 'page', id: page.id }] : []), ...(step ? [{ type: 'funnel', id: step.funnelId }] : [])],
     utmCampaign: utm.campaign,
@@ -314,7 +315,10 @@ export async function submitForm(formId: string, raw: Record<string, unknown>, m
     );
     await emitEvent({
       type: 'form.submitted', contactId, entityType: 'form', entityId: form.id, campaignId, utm, visitorId, source: 'sites',
-      properties: { formName: form.name, pageId: page?.id ?? null, funnelId: step?.funnelId ?? null, fields: values, submissionId, consent: consentGiven },
+      properties: {
+        formName: form.name, pageId: page?.id ?? null, funnelId: step?.funnelId ?? null, fields: values, submissionId, consent: consentGiven,
+        ...(step && route ? { stepIndex: step.stepIndex, branch: route.branch, nextStep: route.toPosition } : {}),
+      },
       idempotencyKey: `form.submitted:${submissionId}`,
     }, client);
     if (page) {
@@ -357,12 +361,9 @@ export async function submitForm(formId: string, raw: Record<string, unknown>, m
       const domain = target.domain_id ? (await db.query<DomainRow>('SELECT * FROM site_domains WHERE id = $1', [target.domain_id])).rows[0] : null;
       redirect = pageUrl(target, domain);
     }
-  } else if (step && page) {
-    const placement = await funnelForPage(page.id, step.funnelId);
-    if (placement?.nextPage) {
-      const target = pageUrl(placement.nextPage, placement.nextPage.domain);
-      redirect = `${target}${target.includes('?') ? '&' : '?'}fn=${placement.funnelId}`;
-    }
+  } else if (step && route?.page) {
+    const target = pageUrl(route.page, route.page.domain);
+    redirect = `${target}${target.includes('?') ? '&' : '?'}fn=${step.funnelId}`;
   }
   return { status: 200, result: { ok: true, message: settings.successMessage + emailNote, redirect, submissionId } };
 }
