@@ -1,6 +1,6 @@
 # OVELIO
 
-**Marketing. Connected.** A self-hosted console for contacts, newsletters, marketing journeys and website analytics.
+**Marketing. Connected.** A self-hosted CRM, sales, marketing and analytics platform: contacts and companies, deal pipelines and tasks, a visual email studio, landing pages and funnels, campaigns and workflow automation, and revenue attribution, in one product with eight workspaces (Overview, CRM, Sales, Marketing, Sites & Forms, Automations, Analytics, Settings).
 
 ## Run locally
 
@@ -38,9 +38,11 @@ Interface code lives in `src/components`: `ui.tsx` is the shared OVELIO kit over
 
 1. Import an Audience CSV (up to 25 MB and 200,000 rows) with `email`, `first_name`, `last_name`, `company`, `phone`, `position`, `city`, `country`, `website`, `tags` and `consent`, plus one column per custom contact field named by its alias (download the starter CSV template inside the Import dialog). Map columns to core or custom fields, run a dry run to see what would be created, updated or skipped, then import in the background with progress and a downloadable list of skipped rows. Use `opted_in` and record where and when permission was obtained for recipients who have given it.
 2. Create dynamic or manual segments, custom contact and company fields (with values editable on each contact and included in exports), tags, lifecycle stages, B2B companies, lead scoring rules and triggers with their actions, and suppressions, sync segments into newsletter mailing lists, and inspect unified contact engagement, bounces and direct email sends.
-3. Compose newsletters with the split HTML editor and live Desktop/Mobile preview, manage reusable campaign and transactional templates, upload images in the Media library, publish public web archives, preview and send tests to consenting contacts before starting or scheduling delivery, and inspect opens, clicks, bounces and clicked links.
+3. Design emails visually in the full-screen Email Studio (Marketing › Templates: 24 editable MJML templates in eight categories, your brand kit applied automatically, drag-and-drop blocks, merge tags, versions, personalised preview and consent-checked test sends whose rendered message is stored), then use Create email campaign in Marketing › Emails to choose lists (with consent and exclusion counts), test and send or schedule through the newsletter engine. Existing HTML newsletters open in the studio as an editable raw-HTML section. You can still compose newsletters with the split HTML editor and live Desktop/Mobile preview, manage reusable campaign and transactional templates, upload images in the Media library, publish public web archives, preview and send tests to consenting contacts before starting or scheduling delivery, and inspect opens, clicks, bounces and clicked links.
 4. Create journey emails, custom lead capture forms (with submissions viewer and embed code), downloadable assets, landing pages, dynamic web content slots, website popups and bars, categories, webhooks and multi-action automations (email, tags, points, segment, stage) triggered by segments or forms.
-5. Add a website in Analytics and install its tracking snippet. Explore live realtime visitors, compact and expanded breakdowns across 22 dimensions, saved segments and cohorts, raw events feed, weekly heatmaps, anonymous sessions and properties, goals, saved funnels, user journeys, retention cohorts, first/last-click attribution, revenue, Core Web Vitals, annotations, tracked links and pixels with charts, and native marketing reports.
+5. Build landing pages in Sites & Forms: pick one of 16 templates (lead generation, services, events, webinars, products, waitlists, lead magnets), edit it in the full-screen builder with Desktop/Tablet/Mobile styles, autosave and version history, then publish it at `/s/<page>` or on a verified custom domain. Forms built in Sites › Forms work on pages, as a hosted link (`/f/<form>`) and as an embed script; each submission creates or updates the CRM contact (consent only when its box is ticked), and funnels report visitors, drop-off and completion per step.
+6. Start the day on Overview (today's leads, deals and wins, your overdue and due tasks, pipeline snapshot, recent leads, campaigns in flight, email and website pulse, and a setup checklist built from what the workspace already has). In Analytics, the executive dashboard, Sales, Marketing, Attribution, Funnels and Reports share one date range, comparison period (previous period or same period last year) and pipeline, owner, campaign and source filters. Every number says whether it is measured, a current snapshot, an estimate (weighted pipeline, forecast, velocity) or a model allocation (attribution), explains its calculation, opens the deals, contacts, tasks or emails behind it, and exports to CSV. Attribution credits won revenue and leads to campaigns under first-touch, last-touch, linear and 40/20/40 position-based models with a chosen lookback window; credit always adds up to measured won revenue and the rest is shown as unattributed.
+7. Add a website in Analytics › Website and install its tracking snippet. Explore live realtime visitors, compact and expanded breakdowns across 22 dimensions, saved segments and cohorts, raw events feed, weekly heatmaps, anonymous sessions and properties, goals, saved funnels, user journeys, retention cohorts, first/last-click attribution, revenue, Core Web Vitals, annotations, tracked links and pixels with charts, and native marketing reports.
 
 ## Production
 
@@ -90,6 +92,26 @@ OVELIO defaults to no recorded marketing consent and stores consent evidence and
 
 Contact erasure removes the audience and subscriber records. Native form results can retain submitted values after the contact link is cleared. Include retained form results and backup retention in your operator's erasure process. [Mautic form submission storage](https://github.com/mautic/mautic/blob/7.2.2/app/bundles/FormBundle/Entity/Submission.php)
 
+### Hosted preview (Vercel)
+
+A Vercel deployment without engine URLs runs the **developer preview**: every screen works on labelled sample data, OVELIO's own records (deals, designs, pages, forms, campaigns, workflows) use real SQL, and engine features (Mautic contacts, Listmonk delivery, Umami tracking) are simulated. Vercel functions cannot host the worker, the SMTP policy gateway or the engines, so production is the Docker Compose stack above.
+
+| Setting | Effect |
+| --- | --- |
+| none | Embedded PGlite database per serverless instance; data resets when an instance restarts |
+| `DATABASE_URL` (Neon, Vercel Postgres; add `?sslmode=require`) | Preview data persists and is shared by every instance. The database migrates and seeds itself on first use |
+| `OVELIO_DEV_PREVIEW=true` | Forces the preview anywhere (never in `OVELIO_ENV=production`) |
+
+Preview contacts and other engine sample data stay in memory per instance even with `DATABASE_URL`.
+
+### New settings in OVELIO 2.0
+
+| Setting | Purpose |
+| --- | --- |
+| `SMTP_OVELIO_PASSWORD` | Gateway account for OVELIO's own email (sales, sequences, automations, test sends). `deploy/init-env.sh` generates it; add it to an older `.env` or native sends report that the account is missing |
+| `MAILBOX_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`/`SECRET`, `MICROSOFT_CLIENT_ID`/`SECRET` | Gmail and Outlook mailbox connections for Sales (OAuth clients registered with each provider) |
+| `OVELIO_WEBHOOK_ALLOW_PRIVATE` | `true` lets workflow webhooks call private network addresses |
+
 ## Verify
 
 ```sh
@@ -102,6 +124,7 @@ npm audit --omit=dev --audit-level=high
 npx playwright install chromium
 npm run test:integration
 npm run test:e2e
+npm run test:e2e:preview   # after npm run build: every workspace and the acceptance journeys on the developer preview
 ```
 
 The integration and browser suites require the local Compose stack and use synthetic addresses. Set `OVELIO_TEST_CHROMIUM` to use an existing Chromium binary instead of installing one. CI also checks restart persistence, a second installation, and a restore into a fresh project. See [Third-party notices](NOTICE.md) before redistributing OVELIO.
@@ -124,5 +147,11 @@ The integration and browser suites require the local Compose stack and use synth
 - Unsubscribes made in the audience engine reach OVELIO within one worker cycle. Those made in the newsletter engine are found by a changed-since check, and a slower full pass catches bounces that the engine records without a timestamp. The OVELIO and engine clocks need to agree to within about a minute.
 - A suppression with no matching contact (for example from an authenticated provider webhook) can't be removed from the console.
 - Any newsletter unsubscribe is treated as a marketing opt-out across both sending engines, so the per-list preferences page stays off.
+- Studio merge tags that the newsletter engine has no field for (company, job title, city, country, phone) come from newsletter subscriber attributes and are blank unless the subscriber carries them; workspace name, address and website are written in when the newsletter is created. In the developer preview, uploaded media is not stored, so uploaded images show as broken there.
 - Website report filters follow Umami 3.5.0: "equals" and "not equals" can take several values, but a single value can't contain a comma. Other operators take one value each.
+- Custom publishing domains verify by DNS TXT record and are routed by `src/proxy.ts`, but HTTPS for them needs a Caddy site block with on-demand TLS whose `ask` hook is `/api/public/domains/check`; the default Caddyfile serves only the workspace address. Set `SITES_CNAME_TARGET` and `SITES_SERVER_IP` to show the exact DNS targets.
+- Landing-page form confirmation emails use an OVELIO email design and go only to people who ticked the consent box; each submission shows the mailer's result (blocked without consent, not sent without a relay).
+- Analytics money totals use one currency (the default pipeline's, or the selected pipeline's); deals in other currencies are counted and named but left out of sums. Campaign ROI compares revenue in the period with the campaign's total budget and is shown only when both exist in the same currency. Attribution touchpoints are OVELIO events that carry a campaign; website visits count only when a published OVELIO page or form recorded them.
 - Each client runs as a separate Compose project with its own credentials and volumes. There is no shared multi-tenant control plane.
+- Gmail and Outlook mailboxes (Settings › Mailboxes) connect only after an administrator registers OAuth clients and sets `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` or `MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET`, plus `MAILBOX_ENCRYPTION_KEY` (generated by `deploy/init-env.sh`). The page names whichever are missing. Sync reads the last three days every 15 minutes and logs only conversations with known contacts.
+- Sales sequences send through OVELIO's email gateway with the same consent checks as other email; "business hours" means Monday to Friday, 09:00 to 17:00 UTC. In the developer preview nothing is delivered and each step shows "Not delivered" with the reason.

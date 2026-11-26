@@ -13,13 +13,17 @@
   --color-on-accent: light-dark(#ffffff, #0d1630);
   --ov-chart: var(--color-accent);
   --ov-chart-muted: var(--color-accent-muted);
+  /* Layout rhythm: 4px base, 20px between page blocks, 16px inside panels. */
+  --ov-gap: 20px;
+  --ov-gap-sm: 12px;
+  --ov-table-head: var(--color-background-surface);
 }
 
 html, body { min-height: 100%; }
 body { background: var(--color-background-body); color: var(--color-text-primary); }
 
 /* Page frame */
-.ov-page { display: grid; gap: 20px; padding: 28px 32px 48px; max-width: 1380px; margin-inline: auto; width: 100%; }
+.ov-page { display: grid; gap: var(--ov-gap); padding: 24px 32px 48px; max-width: 1560px; margin-inline: auto; width: 100%; min-width: 0; align-content: start; }
 .ov-page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .ov-page-header > div:first-child { display: grid; gap: 4px; min-width: 0; }
 .ov-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -33,8 +37,8 @@ body { background: var(--color-background-body); color: var(--color-text-primary
 .ov-metrics { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .ov-form-grid { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ov-form-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.ov-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; justify-content: space-between; }
-.ov-toolbar form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.ov-toolbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; justify-content: space-between; min-width: 0; }
+.ov-toolbar form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .ov-filter-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; border-radius: var(--radius-element); background: var(--color-background-muted); border: 1px solid var(--color-border); }
 .ov-split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
 
@@ -42,15 +46,15 @@ body { background: var(--color-background-body); color: var(--color-text-primary
 .ov-panel { display: grid; gap: 16px; min-width: 0; }
 .ov-panel-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .ov-panel-heading > div:first-child { display: grid; gap: 2px; min-width: 0; }
-.ov-panel-title { font-size: var(--font-size-lg); }
+.ov-panel-title { font-size: var(--font-size-lg); font-weight: var(--font-weight-semibold); letter-spacing: -0.005em; }
 .ov-metric { display: grid; gap: 6px; }
 .ov-metric-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--color-text-secondary); }
 .ov-metric-value { font-size: var(--font-size-3xl); font-weight: var(--font-weight-semibold); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .ov-rows { list-style: none; margin: 0; padding: 0; display: grid; }
-.ov-rows > li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--color-border); min-width: 0; }
+.ov-rows > li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--color-border); min-width: 0; }
 .ov-rows > li:last-child { border-bottom: 0; }
-.ov-rows > li > span:first-child { display: grid; gap: 2px; min-width: 0; flex: 1; }
-.ov-rows > li > :not(:first-child) { flex-shrink: 0; }
+.ov-rows > li > span:first-child { display: grid; gap: 2px; min-width: 0; flex: 1 1 14rem; overflow-wrap: anywhere; }
+.ov-rows > li > :not(:first-child) { flex-shrink: 0; max-width: 100%; }
 .ov-cell { display: grid; gap: 2px; min-width: 0; }
 .ov-cell--nowrap { white-space: nowrap; }
 .ov-cell--nowrap > * { overflow: hidden; text-overflow: ellipsis; }
@@ -128,3 +132,136 @@ body { background: var(--color-background-body); color: var(--color-text-primary
   .ov-login { grid-template-columns: 1fr; }
   .ov-login-art { display: none; }
 }
+
+/* OVELIO 2.0 shell */
+.ov-brand-link { display: inline-flex; align-items: center; width: 236px; padding-inline: 8px; text-decoration: none; }
+.ov-cmd-item { display: grid; gap: 2px; min-width: 0; }
+.ov-cmd-item-title { font-weight: var(--font-weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-cmd-item-meta { font-size: var(--font-size-xs); color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Data-dense workspaces (boards, tables, canvases) use the full width. */
+.ov-page:has(> .ov-wide), .ov-page:has(> * > .ov-wide) { max-width: none; }
+@media (max-width: 860px) {
+  .ov-brand-link { width: auto; }
+  .ov-cmd-trigger span { display: none; }
+}
+
+/* ── Design system pass (UX lane) ────────────────────────────────────────── */
+
+/* Page headers: one title size across workspaces; descriptions stay readable. */
+.ov-page h1 { font-size: var(--font-size-2xl); line-height: 1.2; letter-spacing: -0.015em; }
+.ov-page-header > div:first-child > p, .ov-page-header > div:first-child > span:last-child { max-width: 72ch; }
+.ov-page-header .ov-actions { flex-shrink: 0; }
+.ov-section-title { font-size: var(--font-size-base); font-weight: var(--font-weight-semibold); }
+
+/* Form controls never exceed their container, whatever fixed width a screen asked for. */
+.ov-page .astryx-field { max-width: 100%; min-width: 0; }
+
+/* Toolbars and filter rows wrap cleanly; on phones each control takes a full row. */
+.ov-tbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; justify-content: space-between; min-width: 0; }
+.ov-tbar-start, .ov-tbar-end, .ov-filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; min-width: 0; max-width: 100%; }
+.ov-tbar-start { flex: 1 1 18rem; }
+.ov-tbar-end { margin-inline-start: auto; justify-content: flex-end; }
+.ov-filter-bar { min-width: 0; }
+
+/* Tables: content-sized columns that scroll sideways on narrow screens instead of breaking words,
+   compact readable rows, tabular numerals, and a sticky header wherever the table scrolls vertically. */
+.astryx-table-scroll-wrapper { overflow-x: auto; max-width: 100%; }
+.astryx-table { table-layout: auto; word-break: normal; --_table-cell-word-break: normal; --_table-header-white-space: nowrap; font-variant-numeric: tabular-nums; }
+.astryx-table .astryx-table-header-cell { white-space: nowrap; font-weight: var(--font-weight-semibold); color: var(--color-text-secondary); font-size: var(--font-size-sm); position: sticky; top: 0; z-index: 1; background: var(--ov-table-head); }
+.astryx-table .astryx-table-cell { min-width: 4.5rem; }
+.astryx-table .astryx-table-cell:has(> .astryx-checkbox-input) { min-width: 0; }
+.astryx-table .astryx-table-cell .ov-cell { min-width: 9rem; max-width: 26rem; }
+.astryx-table .astryx-table-cell .ov-cell--nowrap { max-width: 18rem; }
+.ov-num, .astryx-table [data-align="end"] { text-align: end; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ov-table { position: relative; min-width: 0; max-width: 100%; overflow: auto; max-height: var(--ov-table-max-height, none); border-radius: inherit; }
+.ov-table:has(.astryx-table-scroll-wrapper) { overflow: visible; max-height: none; }
+.ov-table .astryx-table-scroll-wrapper { max-height: var(--ov-table-max-height, none); overflow: auto; }
+.ov-table[data-min-width] .astryx-table, .ov-table[data-min-width] > table { min-width: max(100%, var(--ov-table-min-width)) !important; }
+/* Plain tables a screen builds itself get the same look. */
+.ov-table > table { width: 100%; border-collapse: collapse; font-size: var(--font-size-base); font-variant-numeric: tabular-nums; }
+.ov-table > table th { position: sticky; top: 0; z-index: 1; background: var(--ov-table-head); text-align: start; white-space: nowrap; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--color-text-secondary); }
+.ov-table > table :is(th, td) { padding: 8px 12px; border-bottom: 1px solid var(--color-border); vertical-align: middle; }
+
+/* KPI tiles */
+.ov-kpi { display: grid; gap: 4px; min-width: 0; }
+.ov-kpi-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--color-text-secondary); font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); }
+.ov-kpi-value { font-size: var(--font-size-2xl); font-weight: var(--font-weight-semibold); letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ov-kpi-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+.ov-kpi-delta { font-weight: var(--font-weight-semibold); font-variant-numeric: tabular-nums; }
+.ov-kpi-delta--good { color: var(--color-text-success); }
+.ov-kpi-delta--bad { color: var(--color-text-error); }
+
+/* Loading skeletons */
+.ov-skeleton-rows { display: grid; gap: 0; }
+.ov-skeleton-row { display: grid; grid-template-columns: var(--ov-skeleton-cols, 2fr 1fr 1fr); gap: 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--color-border); }
+.ov-skeleton-row:last-child { border-bottom: 0; }
+.ov-visually-hidden { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Empty states sit centred with breathing room inside panels. */
+.ov-panel > .astryx-empty-state, .astryx-card > .astryx-empty-state { padding-block: 24px; }
+
+/* Visible focus for OVELIO's own controls (Astryx components draw their own rings). */
+:is(a, button, input, select, textarea, summary, [tabindex]):not([class*="astryx"]):focus-visible {
+  outline: var(--focus-outline-width, 2px) solid var(--focus-outline-color, var(--color-accent));
+  outline-offset: 2px;
+}
+.ov-dist-row--clickable:focus-visible { outline-offset: 0; }
+
+/* Respect reduced motion everywhere, including Astryx and lane animations. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+@media (max-width: 860px) {
+  :root { --ov-gap: 16px; }
+  .ov-page h1 { font-size: var(--font-size-xl); }
+  .ov-page-header { align-items: flex-start; }
+}
+
+/* Phones: toolbars stack, controls fill the row, actions wrap under the title. */
+@media (max-width: 640px) {
+  .ov-toolbar, .ov-tbar, .ov-sites-toolbar, .ov-studio-toolbar { align-items: flex-end; }
+  .ov-toolbar form, .ov-toolbar > .ov-actions, .ov-tbar-start, .ov-tbar-end, .ov-sites-toolbar > div { flex: 1 1 100%; max-width: 100%; margin-inline-start: 0; }
+  :is(.ov-toolbar, .ov-tbar, .ov-filter-row, .ov-filter-bar, .ov-actions, .ov-sites-toolbar, .ov-studio-toolbar, .ov-journeys-toolbar) .astryx-field { flex: 1 1 9rem; width: auto; }
+  .ov-toolbar form > .astryx-field { flex: 1 1 0; }
+  .ov-page-header .ov-actions { width: 100%; }
+  .ov-rows > li > :not(:first-child) { flex-shrink: 1; }
+  .ov-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+}
+
+/* ── Workspace chrome (Product Engineering) ──────────────────────────────── */
+.ov-density { display: contents; }
+.ov-topbar-actions { flex-wrap: nowrap; gap: 6px; }
+.ov-env { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--radius-full); border: 1px solid var(--color-border); background: var(--color-info-muted); color: var(--color-on-info-muted); font: inherit; font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); white-space: nowrap; cursor: pointer; }
+.ov-env:hover { border-color: var(--color-border-emphasized); }
+.ov-env-short { display: none; }
+.ov-bell { position: relative; display: inline-grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: var(--radius-element); background: transparent; color: var(--color-text-primary); cursor: pointer; }
+.ov-bell:hover { background: var(--color-overlay-hover); }
+.ov-bell-count { position: absolute; top: 1px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--radius-full); background: var(--color-accent); color: var(--color-on-accent); font-size: 10px; font-weight: var(--font-weight-bold); line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+.ov-notes { display: grid; gap: 8px; max-height: min(70dvh, 520px); overflow: auto; }
+.ov-notes-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.ov-notes-list > li { display: grid; gap: 2px; padding: 8px 0 8px 12px; border-top: 1px solid var(--color-border); position: relative; }
+.ov-notes-list > li[data-unread="true"]::before { content: ""; position: absolute; left: 0; top: 14px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); }
+.ov-notes-list a { color: var(--color-text-primary); font-weight: var(--font-weight-medium); text-decoration: none; }
+.ov-notes-list a:hover { text-decoration: underline; }
+.ov-star-on { fill: #f5b301; color: #c98f00; }
+.ov-dash-picker { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ov-dash-picker > li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-element); }
+@media (max-width: 860px) {
+  .ov-env-full { display: none; }
+  .ov-env-short { display: inline; }
+  .ov-topbar-actions { gap: 2px; }
+}
+
+/* Table density (per user, from the account menu). Comfortable is the default. */
+[data-ov-density="compact"] .astryx-table .astryx-table-cell,
+[data-ov-density="compact"] .astryx-table .astryx-table-header-cell { padding-block: 4px; padding-inline: 8px; }
+[data-ov-density="compact"] .ov-table > table :is(th, td) { padding: 4px 8px; }
+[data-ov-density="compact"] .ov-rows > li { padding-block: 6px; }
+[data-ov-density="compact"] .ov-skeleton-row { padding-block: 8px; }
+
+/* Configurable Overview */
+.ov-dash { display: grid; gap: var(--ov-gap); grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.ov-dash-item { min-width: 0; }
+.ov-dash-item--kpis { grid-column: 1 / -1; }
+@media (max-width: 1100px) { .ov-dash { grid-template-columns: minmax(0, 1fr); } }

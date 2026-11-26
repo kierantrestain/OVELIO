@@ -11,6 +11,8 @@ export type JobData = {
   campaign_refresh: { campaignId: number; runId: string };
   erase: { contactId: number };
   contact_import: { importId: string };
+  /** OVELIO 2.0 module jobs, dispatched by name through src/server/platform/jobs.ts. */
+  platform: { handler: string; data: unknown };
 };
 export type Job = {
   [Kind in keyof JobData]: {
@@ -54,7 +56,7 @@ export async function finishJob(job: Job, error?: unknown) {
       status = CASE WHEN generation <> $3 THEN 'pending' WHEN $4::text IS NULL THEN 'done'
         WHEN attempts >= 8 THEN 'dead' ELSE 'pending' END,
       attempts = CASE WHEN generation <> $3 THEN 0 ELSE attempts END,
-      run_at = CASE WHEN generation <> $3 THEN now() ELSE now() + make_interval(secs => $5) END,
+      run_at = CASE WHEN generation <> $3 THEN greatest(run_at, now()) ELSE now() + make_interval(secs => $5) END,
       finished_at = CASE WHEN generation = $3 AND ($4::text IS NULL OR attempts >= 8) THEN now() ELSE NULL END,
       locked_at = NULL, lease_id = NULL, last_error = $4
      WHERE id = $1 AND lease_id = $2`,

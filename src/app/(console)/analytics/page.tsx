@@ -1,14 +1,11 @@
-import { Analytics } from '@/components/analytics';
+import { redirect } from 'next/navigation';
+import { Suspense } from 'react';
+import { ExecutiveAnalytics } from '@/components/insights/executive';
 
-export const metadata = { title: 'Analytics' };
+export const metadata = { title: 'Executive analytics' };
 
-export default async function AnalyticsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+export default async function Page({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
   const { tab } = await searchParams;
-  return (
-    <Analytics
-      key={tab ?? ''}
-      initialTab={tab}
-      trackingOrigin={process.env.TRACKING_ORIGIN || process.env.APP_ORIGIN}
-    />
-  );
+  if (tab) redirect('/analytics/website?tab=' + encodeURIComponent(tab));
+  return <Suspense><ExecutiveAnalytics /></Suspense>;
 }

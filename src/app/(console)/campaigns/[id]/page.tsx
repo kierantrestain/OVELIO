@@ -1,7 +1,5 @@
-import { CampaignView } from '@/components/campaigns';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Newsletter' };
-
-export default async function CampaignPage({ params }: { params: Promise<{ id: string }> }) {
-  return <CampaignView id={(await params).id} />;
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  redirect(`/marketing/emails/${encodeURIComponent((await params).id)}`);
 }

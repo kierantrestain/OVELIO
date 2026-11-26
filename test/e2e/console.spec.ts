@@ -16,10 +16,14 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('console navigation and an interactive CSV import', async ({ page }) => {
-  await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
-  for (const section of ['Campaigns', 'Automations', 'Analytics', 'Settings', 'Audience']) {
+  // The Overview home greets the signed-in user, so check the route and its page heading.
+  await expect(page).toHaveURL(/\/overview$/);
+  await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
+  // OVELIO 2.0 workspaces: each side-navigation entry opens its workspace with a page heading. CRM last, for the import.
+  for (const [section, path] of [['Sales', '/sales'], ['Marketing', '/marketing'], ['Automations', '/automations'], ['Analytics', '/analytics'], ['Settings', '/settings'], ['CRM', '/crm']]) {
     await page.getByRole('link', { name: section, exact: true }).click();
-    await expect(page.getByRole('heading', { name: section, level: 1, exact: true })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(path.replace('/', '\\/') + '$'));
+    await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
   }
   const address = 'browser-' + Date.now().toString(36) + '@example.test';
   await page.getByRole('button', { name: 'Import CSV', exact: true }).click();
@@ -31,7 +35,7 @@ test('console navigation and an interactive CSV import', async ({ page }) => {
   });
   // AUD-10: upload, check the suggested mapping, then run the import in the background and wait for it to finish.
   await form.getByRole('button', { name: 'Continue', exact: true }).click();
-  const started = page.waitForResponse(response => /\/api\/console\/contacts\/imports\/[0-9a-f-]{36}\/start$/.test(response.url()));
+  const started = page.waitForResponse(response => /\/api\/console\/(contacts|crm)\/imports\/[0-9a-f-]{36}\/start$/.test(response.url()));
   await form.getByRole('button', { name: 'Import contacts', exact: true }).click();
   expect((await started).ok()).toBe(true);
   await expect(form.getByText('Import finished')).toBeVisible({ timeout: 60_000 });
@@ -57,7 +61,7 @@ test('the tracking snippet records a real browser visit and event', async ({ pag
   try {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Tracker test site did not bind a port.');
-    await page.getByRole('link', { name: 'Analytics', exact: true }).click();
+    await page.goto('/analytics/website');
     await page.getByRole('button', { name: 'Add website', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByLabel('Website name').fill('Tracker QA ' + Date.now().toString(36));
@@ -132,36 +136,39 @@ test('deep-linked workspace tools, command palette, and dark theme render cleanl
 
   // Exercise global CommandPalette shortcut
   await page.keyboard.press('Control+k');
-  await expect(page.getByRole('dialog', { name: 'Jump to section or tool' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Search records, pages and actions' })).toBeVisible();
   await page.keyboard.press('Escape');
 
-  // Visit deep-linked tabs across all expanded sections
-  const routes: Array<[string, string]> = [
-    ['/audience?tab=Segments', 'Audience'],
-    ['/audience?tab=Lead+scoring', 'Audience'],
-    ['/audience?tab=Custom+fields', 'Audience'],
-    ['/audience?tab=Suppressions', 'Audience'],
-    ['/campaigns?tab=Templates', 'Campaigns'],
-    ['/campaigns?tab=Media', 'Campaigns'],
-    ['/automations?tab=Lead+forms', 'Automations'],
-    ['/automations?tab=Assets', 'Automations'],
-    ['/automations?tab=Landing+pages', 'Automations'],
-    ['/automations?tab=Dynamic+content', 'Automations'],
-    ['/automations?tab=Popups+%26+bars', 'Automations'],
-    ['/automations?tab=Categories', 'Automations'],
-    ['/analytics?tab=Realtime', 'Analytics'],
-    ['/analytics?tab=Sessions', 'Analytics'],
-    ['/analytics?tab=Goals+%26+Funnels', 'Analytics'],
-    ['/analytics?tab=Insights', 'Analytics'],
-    ['/analytics?tab=Links+%26+Pixels', 'Analytics'],
-    ['/analytics?tab=Marketing+reports', 'Analytics'],
-    ['/settings?view=team', 'Settings'],
-    ['/settings?view=connections', 'Settings'],
-    ['/settings?view=data+%26+privacy', 'Settings'],
+  // Links from before OVELIO 2.0 redirect to each section's new home. A null heading is a page a lane rebuilt.
+  const routes: Array<[string, string, string | null]> = [
+    ['/audience?tab=Segments', '/crm/segments', 'Segments'],
+    ['/audience?tab=Lead+scoring', '/crm/scoring', 'Lead scoring'],
+    ['/audience?tab=Custom+fields', '/crm/fields', 'Custom fields'],
+    ['/audience?tab=Suppressions', '/crm/consent', 'Consent & suppressions'],
+    ['/campaigns?tab=Templates', '/marketing/templates', null],
+    ['/campaigns?tab=Media', '/marketing/media', null],
+    ['/automations?tab=Lead+forms', '/sites/classic-forms', 'Classic forms'],
+    ['/automations?tab=Assets', '/sites/assets', 'Downloads'],
+    ['/automations?tab=Landing+pages', '/sites/classic-pages', 'Classic pages'],
+    ['/automations?tab=Dynamic+content', '/sites/dynamic-content', 'Dynamic content'],
+    ['/automations?tab=Popups+%26+bars', '/sites/popups', 'Popups & bars'],
+    ['/automations?tab=Categories', '/automations/categories', 'Categories'],
+    ['/analytics?tab=Realtime', '/analytics/website', 'Website analytics'],
+    ['/analytics?tab=Sessions', '/analytics/website', 'Website analytics'],
+    ['/analytics?tab=Goals+%26+Funnels', '/analytics/website', 'Website analytics'],
+    ['/analytics?tab=Insights', '/analytics/website', 'Website analytics'],
+    ['/analytics?tab=Links+%26+Pixels', '/analytics/website', 'Website analytics'],
+    ['/analytics?tab=Marketing+reports', '/analytics/website', 'Website analytics'],
+    ['/settings?view=team', '/settings/team', 'Team'],
+    ['/settings?view=connections', '/settings/connections', 'Connections'],
+    ['/settings?view=data+%26+privacy', '/settings/privacy', 'Data & privacy'],
   ];
-  for (const [route, heading] of routes) {
+  for (const [route, path, heading] of routes) {
     await page.goto(route, { waitUntil: 'networkidle' });
-    await expect(page.getByRole('heading', { name: heading, level: 1, exact: true })).toBeVisible();
+    expect(new URL(page.url()).pathname).toBe(path);
+    await expect(heading
+      ? page.getByRole('heading', { name: heading, level: 1, exact: true })
+      : page.getByRole('heading', { level: 1 }).first()).toBeVisible();
   }
 
   // Toggle dark mode and back to light mode

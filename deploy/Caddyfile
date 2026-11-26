@@ -126,10 +126,25 @@ http://127.0.0.1:9900 {
 		}
 	}
 
+	# SIT: published pages, hosted forms and the public form/tracking endpoints never receive the console session.
+	@ovelioPublic {
+		path /s/* /f/* /api/public/*
+	}
+	handle @ovelioPublic {
+		request_body {
+			max_size 256KB
+		}
+		reverse_proxy app:3000 {
+			header_up -Authorization
+			header_up Cookie "(^|; *)ovelio_session=[^;]*" ""
+			header_up X-Ovelio-Client-Ip {remote_host}
+		}
+	}
+
 	# AUD-10: contact CSV imports accept up to 25 MB (the app enforces the exact limit); everything else stays at 5 MB.
 	@contactImport {
 		method POST
-		path /api/console/contacts/imports
+		path /api/console/contacts/imports /api/console/crm/imports
 	}
 	handle @contactImport {
 		request_body {

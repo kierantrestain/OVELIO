@@ -32,6 +32,10 @@ jobs:
           npm audit --omit=dev --audit-level=high
       - name: Install acceptance browser
         run: npx playwright install --with-deps chromium
+      - name: Preview suite on the embedded database (no Docker)
+        run: |
+          npm run build
+          npm run test:e2e:preview
       - name: Build and start test deployment
         run: |
           sh deploy/init-env.sh

@@ -6,6 +6,7 @@ import { createRelay, runCampaignRefresh, sweepScheduledRefreshes } from '../src
 import { claimJob, enqueueReconciliation, finishJob, maintainJobs } from '../src/server/jobs';
 import type { Job } from '../src/server/jobs';
 import { listmonk } from '../src/server/listmonk';
+import { runPlatformJob } from '../src/server/platform/jobs';
 import { mautic } from '../src/server/mautic';
 
 let running = true;
@@ -28,6 +29,7 @@ async function run(job: Job) {
     case 'erase': return eraseContact(job.payload.contactId);
     case 'contact_import': return runContactImport(job.payload.importId);
     case 'campaign_refresh': return runCampaignRefresh(job.payload.campaignId, job.payload.runId);
+    case 'platform': return runPlatformJob(job.payload, job.attempts);
   }
 }
 

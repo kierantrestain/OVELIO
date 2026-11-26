@@ -8,6 +8,8 @@ const relay = createRelay();
 const accounts = Object.fromEntries([
   [requiredEnv('SMTP_LISTMONK_USERNAME'), requiredEnv('SMTP_LISTMONK_PASSWORD')],
   [requiredEnv('SMTP_MAUTIC_USERNAME'), requiredEnv('SMTP_MAUTIC_PASSWORD')],
+  // OVELIO's own sends; optional so an .env from before OVELIO 2.0 still starts.
+  ...(process.env.SMTP_OVELIO_PASSWORD ? [[process.env.SMTP_OVELIO_USERNAME || 'console', process.env.SMTP_OVELIO_PASSWORD]] : []),
 ]) as Record<string, string>;
 const from = requiredEnv('SMTP_FROM_EMAIL').toLowerCase();
 const smtpError = (responseCode: number, message: string) => Object.assign(new Error(message), { responseCode });
