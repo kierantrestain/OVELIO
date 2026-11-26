@@ -27,9 +27,11 @@ async function submitPublicForm(browser: Browser, baseURL: string, url: string, 
     await form.locator('input[type="email"]').fill(email);
     const consent = form.locator('input[name="_consent"]');
     if (await consent.count()) await consent.check();
+    const start = page.url();
     await form.locator('button[type="submit"]').click();
-    // The page script replaces the form with its thank-you message once the submission is stored.
-    await expect(page.locator('form.ovf')).toHaveCount(0);
+    // Once stored, the page replaces the form with its thank-you message, or a funnel moves on to its next step.
+    await expect.poll(async () => page.url() !== start || await page.locator('form.ovf').count() === 0, { timeout: 15_000 }).toBe(true);
+    await page.waitForLoadState('load');
   } finally {
     await visitor.close();
   }
