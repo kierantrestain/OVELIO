@@ -213,6 +213,43 @@ test('CRM-11 preview seed creates two pipelines and sample deals; search finds d
   assert.ok(results.some(item => item.kind === 'task'));
 });
 
+test('INB-05 mailbox connection state belongs to the signed-in owner and reconnect preserves ownership', async t => {
+  const owner = { id: '00000000-0000-4000-8000-000000000002', name: 'Maya', email: 'maya@ovelio.test', role: 'marketer' as const };
+  const state = 'synthetic-mailbox-connection';
+  const email = 'reconnect@ovelio.test';
+  const previousKey = process.env.MAILBOX_ENCRYPTION_KEY;
+  process.env.MAILBOX_ENCRYPTION_KEY = Buffer.alloc(32, 3).toString('base64');
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.MAILBOX_ENCRYPTION_KEY;
+    else process.env.MAILBOX_ENCRYPTION_KEY = previousKey;
+  });
+  const provider = t.mock.method(globalThis, 'fetch', async (url: string) => {
+    if (url === 'https://oauth2.googleapis.com/token') {
+      return Response.json({ access_token: 'synthetic-access', refresh_token: 'synthetic-refresh' });
+    }
+    assert.equal(url, 'https://openidconnect.googleapis.com/v1/userinfo');
+    return Response.json({ email });
+  });
+  const callbackPath = 'mailboxes/oauth/google/callback';
+  const entry = crmModule.endpoints.find(item => item.method === 'GET' && item.path.test(callbackPath));
+  assert.ok(entry);
+  const request = new Request(`http://localhost/api/console/${callbackPath}?code=synthetic&state=${state}`);
+  const callback = async (actor: import('../../src/contracts').User) => {
+    const response = await entry.handler({ request, user: actor, params: ['google'], query: new URL(request.url).searchParams });
+    assert.ok(response instanceof Response && response.status === 302);
+    return new URL(response.headers.get('location')!);
+  };
+  await db.query(`INSERT INTO crm_mailboxes (user_id, provider, email, refresh_token_enc) VALUES ($1, 'google', $2, 'unchanged')`, [owner.id, email]);
+  await db.query(`INSERT INTO crm_mailbox_oauth_states (state, provider, user_id, code_verifier) VALUES ($1, 'google', $2, 'synthetic-pkce')`, [state, owner.id]);
+  assert.match((await callback(user)).searchParams.get('error') ?? '', /expired/);
+  assert.equal(provider.mock.callCount(), 0);
+  assert.equal((await callback(owner)).searchParams.get('connected'), email);
+  await db.query(`INSERT INTO crm_mailbox_oauth_states (state, provider, user_id, code_verifier) VALUES ($1, 'google', $2, 'synthetic-pkce')`, [state, user.id]);
+  assert.match((await callback(user)).searchParams.get('error') ?? '', /cannot be connected/);
+  const { rows } = await db.query<{ user_id: string }>('SELECT user_id FROM crm_mailboxes WHERE email = $1', [email]);
+  assert.deepEqual(rows, [{ user_id: owner.id }]);
+});
+
 test('CRM-12 contact profile: owner change emits an event, 1:1 email reports the mailer status, activities join the timeline', async () => {
   const [daniel] = await searchContacts('daniel');
   await call('POST', 'crm/owners', { object: 'contact', ids: [daniel.id], ownerId: '00000000-0000-4000-8000-000000000003' });
