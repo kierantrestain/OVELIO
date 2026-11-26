@@ -4,7 +4,7 @@ import type { Role } from '@/contracts';
 import type { SavedView, SearchResult } from '@/contracts/platform';
 import { platformEventTypes } from '@/contracts/platform';
 import { AppError } from '../config';
-import { db } from '../db';
+import { db, usesEmbeddedDatabase } from '../db';
 import { isDevPreviewMode } from '../dev-preview';
 import { searchCompanies, searchContacts } from '../directory';
 import { listEvents } from '../events';
@@ -54,7 +54,7 @@ async function globalSearch(query: string, role: Role, user: Parameters<typeof l
 export const platformEndpoints: Entry[] = [
   route('GET', /^platform\/status$/, async () => ({
     preview: isDevPreviewMode(),
-    database: process.env.DATABASE_URL ? 'postgresql' : 'embedded',
+    database: usesEmbeddedDatabase() ? 'embedded' : 'postgresql',
   })),
   route('GET', /^platform\/search$/, async ({ query, user }) => ({ items: await globalSearch(query.get('q') ?? '', user.role, user) })),
   route('GET', /^platform\/users$/, async () => {

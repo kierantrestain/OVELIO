@@ -4,7 +4,7 @@ import { after, before, test } from 'node:test';
 process.env.OVELIO_EMBEDDED_DB = 'true';
 delete process.env.DATABASE_URL;
 
-const { db, transaction } = await import('../../src/server/db');
+const { db, transaction, usesEmbeddedDatabase } = await import('../../src/server/db');
 const { emitEvent, listEvents } = await import('../../src/server/events');
 const { drainPlatformJobs, schedulePlatformJob } = await import('../../src/server/platform/jobs');
 
@@ -19,6 +19,28 @@ test('PLT-20 embedded database applies every migration', async () => {
   const types = await db.query<{ a: string; d: string }>(`SELECT 9007199254740993::bigint AS a, DATE '2026-11-25' AS d`);
   assert.equal(types.rows[0].a, '9007199254740993', 'bigint stays a string like node-pg');
   assert.equal(types.rows[0].d, '2026-11-25', 'dates stay calendar strings');
+});
+
+test('PLT-20 developer preview can use embedded SQL with an inherited database URL', () => {
+  const settings = ['DATABASE_URL', 'OVELIO_DEV_PREVIEW', 'OVELIO_PREVIEW_DB', 'OVELIO_ENV'] as const;
+  const previous = settings.map(key => process.env[key]);
+  try {
+    process.env.DATABASE_URL = 'postgresql://example.invalid/inherited';
+    process.env.OVELIO_DEV_PREVIEW = 'true';
+    delete process.env.OVELIO_ENV;
+    delete process.env.OVELIO_PREVIEW_DB;
+    assert.equal(usesEmbeddedDatabase(), false, 'configured persistent previews keep their database by default');
+    process.env.OVELIO_PREVIEW_DB = 'embedded';
+    assert.equal(usesEmbeddedDatabase(), true);
+    process.env.OVELIO_ENV = 'production';
+    assert.equal(usesEmbeddedDatabase(), false, 'production always uses its configured PostgreSQL');
+  } finally {
+    settings.forEach((key, index) => {
+      const value = previous[index];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    });
+  }
 });
 
 test('PLT-21 transactions roll back and nested queries join the open transaction', async () => {

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
+import { isDevPreviewMode } from './dev-preview';
 
 export type Sql = { query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: unknown[]): Promise<QueryResult<T>> };
 
@@ -23,10 +24,10 @@ const globalPg = globalThis as typeof globalThis & {
  * when the process restarts, which the preview banner states.
  */
 export function usesEmbeddedDatabase(): boolean {
-  if (process.env.DATABASE_URL) return false;
   if (process.env.OVELIO_ENV === 'production') return false;
-  if (process.env.OVELIO_EMBEDDED_DB === 'true' || process.env.OVELIO_DEV_PREVIEW === 'true') return true;
-  return process.env.VERCEL === '1' && !process.env.MAUTIC_URL && !process.env.LISTMONK_URL && !process.env.UMAMI_URL;
+  if (process.env.OVELIO_PREVIEW_DB === 'embedded' && isDevPreviewMode()) return true;
+  if (process.env.DATABASE_URL) return false;
+  return process.env.OVELIO_EMBEDDED_DB === 'true' || isDevPreviewMode();
 }
 
 function getPool() {
@@ -47,9 +48,7 @@ function getPool() {
  * full deployments migrate with scripts/migrate.ts instead.
  */
 function hostedPreview(): boolean {
-  if (!process.env.DATABASE_URL || process.env.OVELIO_ENV === 'production') return false;
-  if (process.env.OVELIO_DEV_PREVIEW === 'true') return true;
-  return process.env.VERCEL === '1' && !process.env.MAUTIC_URL && !process.env.LISTMONK_URL && !process.env.UMAMI_URL;
+  return Boolean(process.env.DATABASE_URL) && isDevPreviewMode();
 }
 
 const preparing = new AsyncLocalStorage<boolean>();

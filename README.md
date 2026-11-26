@@ -103,6 +103,7 @@ A Vercel deployment without engine URLs runs the **developer preview**: every sc
 | --- | --- |
 | none | Embedded PGlite database per serverless instance; data resets when an instance restarts |
 | `DATABASE_URL` (Neon, Vercel Postgres; add `?sslmode=require`) | Preview data persists and is shared by every instance. The database migrates and seeds itself on first use |
+| `OVELIO_PREVIEW_DB=embedded` | Selects the ephemeral embedded database in developer preview mode, even if the project inherits a `DATABASE_URL`. Configure in the Vercel Preview environment |
 | `OVELIO_DEV_PREVIEW=true` | Forces the preview anywhere (never in `OVELIO_ENV=production`) |
 
 Preview contacts and other engine sample data stay in memory per instance even with `DATABASE_URL`.

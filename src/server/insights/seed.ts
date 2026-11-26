@@ -3,6 +3,7 @@
 // when a kind of record is missing. Revenue only ever comes from deal rows: deal.won events carry their deal's amount.
 // Events are written directly (not through emitEvent) so sample history never triggers automations.
 import type { Sql } from '../db';
+import { usesEmbeddedDatabase } from '../db';
 import { devPreviewContacts, DEV_PREVIEW_USER } from '../dev-preview';
 import { upsertContact } from '../directory';
 import { DAY } from './params';
@@ -116,7 +117,7 @@ export async function seedInsightsPreview(sql: Sql, now = Date.now()) {
     if (!contact.createdAt) continue;
     leads.push({ id: contact.id, at: Date.parse(contact.createdAt), name: `${contact.firstName} ${contact.lastName}`.trim(), email: contact.email, campaign: pick(campaigns), visitor: `sample-visitor-c${contact.id}` });
   }
-  if (!process.env.DATABASE_URL) {
+  if (usesEmbeddedDatabase()) {
     for (const [index, [first, last, company]] of people.entries()) {
       const ago = Math.floor(118 * (1 - Math.sqrt(rand()))) + 1;
       const at = now - ago * DAY - Math.floor(rand() * 9) * 3_600_000;
