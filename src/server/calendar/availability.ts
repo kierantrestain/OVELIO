@@ -19,7 +19,7 @@ export const availabilityInput = z.object({
   windows: z.array(z.object({
     weekday: z.number().int().min(0).max(6),
     start: z.string().regex(clockTime, 'Use a quarter-hour time, such as 09:00.'),
-    end: z.string().regex(clockTime, 'Use a quarter-hour time, such as 17:00.'),
+    end: z.string().regex(/^(?:([01]\d|2[0-3]):(00|15|30|45)|24:00)$/, 'Use a quarter-hour time, such as 17:00.'),
   })).max(21),
 }).refine(input => input.windows.every((current, index) =>
   current.start < current.end && !input.windows.slice(0, index).some(other =>

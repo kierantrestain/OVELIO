@@ -25,6 +25,7 @@ export type ConsoleAppointment = Appointment & {
   guestEmail: string;
   contactId: number;
   dealId: string | null;
+  hasStarted: boolean;
 };
 export type PublicBooking = {
   name: string;
@@ -32,7 +33,7 @@ export type PublicBooking = {
   durationMinutes: number;
   slots: string[];
 };
-export type ManagedBooking = Appointment & { slots: string[] };
+export type ManagedBooking = Appointment & { slots: string[]; canChange: boolean };
 export type BookingConfirmation = Appointment & { manageUrl: string };
 export type CalendarOverview = {
   availability: Availability;
