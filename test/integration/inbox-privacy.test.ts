@@ -1,31 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import type { InboxConversation, MailboxOverview } from '../../src/contracts/crm';
 import { apiClient, testEnv } from './client';
+import { fixtureSql } from './database';
 
 type Api = Awaited<ReturnType<typeof apiClient>>;
-
-// Use the Compose database's client in CI. An isolated PostgreSQL service can instead supply its own psql and PG* env.
-async function fixtureSql(sql: string, values: Record<string, string | number>) {
-  const local = process.env.OVELIO_TEST_PSQL;
-  const composeFile = process.env.OVELIO_TEST_ENV_FILE;
-  const command = local || process.env.OVELIO_TEST_DOCKER || 'docker';
-  const args = local ? [] : ['compose', ...(composeFile ? ['--env-file', composeFile] : []),
-    'exec', '-T', 'ovelio-db', 'psql', '-U', 'ovelio', '-d', 'ovelio'];
-  args.push('-X', '-q', '--set=ON_ERROR_STOP=1', '--file=-',
-    ...Object.entries(values).map(([key, value]) => '--set=' + key + '=' + value));
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'pipe'] });
-    let error = '';
-    child.stderr.setEncoding('utf8').on('data', chunk => { error += chunk; });
-    child.on('error', reject);
-    child.on('close', code => code === 0 ? resolve() : reject(new Error('Inbox fixture SQL failed: ' + error)));
-    child.stdin.on('error', reject);
-    child.stdin.end(sql);
-  });
-}
 
 test('INB-01 mailbox ownership and sharing apply across authenticated console surfaces', { timeout: 120_000 }, async context => {
   const env = testEnv();
