@@ -281,17 +281,7 @@ test('extended audience, delivery, automation and analytics capabilities across 
   const png1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   const formBody = new FormData();
   formBody.append('file', new Blob([png1x1], { type: 'image/png' }), 'pixel-' + tag + '.png');
-  const login = await fetch(env.origin + '/api/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin: env.origin },
-    body: JSON.stringify({ email: env.email, password: env.password }),
-  });
-  const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? '';
-  const uploadRes = await fetch(env.origin + '/api/console/media', {
-    method: 'POST',
-    headers: { origin: env.origin, cookie },
-    body: formBody,
-  });
+  const uploadRes = await api.response('/media', 'POST', formBody);
   assert.equal(uploadRes.status, 201);
   const uploaded = await uploadRes.json() as { id: number; url: string };
 

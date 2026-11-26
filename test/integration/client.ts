@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { User } from '../../src/contracts';
 
 export function testEnv() {
   const file = process.env.OVELIO_TEST_ENV_FILE ?? '.env';
@@ -22,12 +23,15 @@ export async function apiClient(environment = testEnv()) {
   assert.equal(login.status, 200, 'OVELIO sign-in');
   const session = login.headers.getSetCookie().find(cookie => cookie.startsWith('ovelio_session='))?.split(';', 1)[0];
   assert.ok(session, 'authenticated session cookie');
+  const user = await login.json() as User;
   return {
+    user,
     async response(path: string, method = 'GET', data?: unknown, requestOrigin = origin) {
+      const multipart = data instanceof FormData;
       return fetch(origin + '/api/console' + path, {
         method,
-        headers: { origin: requestOrigin, cookie: session, ...(data !== undefined ? { 'content-type': 'application/json' } : {}) },
-        body: data === undefined ? undefined : JSON.stringify(data),
+        headers: { origin: requestOrigin, cookie: session, ...(data !== undefined && !multipart ? { 'content-type': 'application/json' } : {}) },
+        body: multipart ? data : data === undefined ? undefined : JSON.stringify(data),
       });
     },
     async get<T>(path: string, method = 'GET', data?: unknown): Promise<T> {

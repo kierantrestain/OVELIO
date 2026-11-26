@@ -7,12 +7,7 @@ test('CAL-05 PostgreSQL serializes overlapping public bookings across booking ty
   const env = testEnv();
   const admin = await apiClient(env);
   const current = await admin.get<{ availability: object }>('/calendar');
-  const actor = await fetch(env.origin + '/api/auth/login', {
-    method: 'POST', headers: { origin: env.origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ email: env.email, password: env.password }),
-  });
-  assert.equal(actor.status, 200);
-  const { id: hostId } = await actor.json() as { id: string };
+  const { id: hostId } = admin.user;
   t.after(() => admin.get('/calendar/availability', 'PATCH', current.availability).then(() => undefined));
   await admin.get('/calendar/availability', 'PATCH', { timeZone: 'UTC',
     windows: Array.from({ length: 7 }, (_, weekday) => ({ weekday, start: '08:00', end: '18:00' })) });

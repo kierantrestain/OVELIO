@@ -30,15 +30,11 @@ test('OVELIO 2.0 records exist for the persistence checks', { timeout: 120000 },
   });
   assert.equal((await api.get<{ status: string }>('/journeys/flows/' + flow.id + '/publish', 'POST')).status, 'published');
 
-  const login = await fetch(env.origin + '/api/auth/login', {
-    method: 'POST', headers: { origin: env.origin, 'content-type': 'application/json' }, body: JSON.stringify({ email: env.email, password: env.password }),
-  });
-  const cookie = login.headers.getSetCookie().find(item => item.startsWith('ovelio_session='))?.split(';', 1)[0] ?? '';
   const form = new FormData();
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   // Declared as SVG on purpose: the store keeps what the bytes are.
   form.append('file', new Blob([png], { type: 'image/svg+xml' }), 'persisted-' + tag + '.svg');
-  const upload = await fetch(env.origin + '/api/console/media', { method: 'POST', headers: { origin: env.origin, cookie }, body: form });
+  const upload = await api.response('/media', 'POST', form);
   assert.equal(upload.status, 201);
   const media = await upload.json() as { contentType: string; url: string };
   assert.equal(media.contentType, 'image/png');
