@@ -23,6 +23,21 @@ assert.equal(campaigns.items.some(item => item.subject === state.subject), inclu
 assert.equal(workflows.some(item => item.name === state.workflowName), included, 'automation isolation or persistence');
 assert.equal(websites.some(item => item.id === analytics.website.id), included, 'website isolation or persistence');
 
+// OVELIO 2.0 records (test/integration/records.test.ts): present after restart and restore, absent elsewhere.
+const records = JSON.parse(await readFile('test-results/records.json', 'utf8')) as { dealId: string; designId: string; pageId: string; flowId: string; mediaPath: string };
+const checks: [string, string][] = [
+  ['deal', '/sales/deals/' + records.dealId], ['email design', '/studio/designs/' + records.designId],
+  ['published page', '/sites/pages/' + records.pageId], ['native flow', '/journeys/flows/' + records.flowId],
+];
+for (const [label, path] of checks) {
+  const response = await api.response(path);
+  assert.equal(response.ok, included, label + ' isolation or persistence (' + response.status + ')');
+  if (included && label !== 'deal' && label !== 'email design') assert.equal((await response.json() as { status: string }).status, 'published', label + ' stays published');
+}
+const media = await fetch(env.origin + records.mediaPath);
+assert.equal(media.ok, included, 'uploaded media isolation or persistence (' + media.status + ')');
+if (included) assert.equal(media.headers.get('content-type'), 'image/png', 'media keeps its sniffed type');
+
 if (included) {
   const [goals, report] = await Promise.all([
     api.get<Goal[]>('/websites/' + analytics.website.id + '/goals'),

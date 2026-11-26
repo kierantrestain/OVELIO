@@ -1,11 +1,14 @@
+import { existsSync } from 'node:fs';
 import { defineConfig, devices } from '@playwright/test';
 
 // Preview-mode browser harness (UX lane). Runs against an existing production build in developer preview mode:
 //   npm run build && npm run test:e2e:preview
 // No Docker needed: the preview runs every migration on embedded PGlite with labelled sample data.
-// Set OVELIO_TEST_CHROMIUM to use a locally installed Chromium instead of Playwright's download.
+// Set OVELIO_TEST_CHROMIUM to use a locally installed Chromium. Otherwise the sandbox's /opt/pw-browsers/chromium is used
+// when it exists, and Playwright's own browser everywhere else (CI installs it with `npx playwright install chromium`).
 const port = Number(process.env.OVELIO_PREVIEW_PORT || 3206);
 const origin = `http://localhost:${port}`;
+const sandboxChromium = '/opt/pw-browsers/chromium';
 
 // The specs in test/e2e/preview skip themselves unless this config loaded them (the CI config also scans test/e2e).
 process.env.OVELIO_PREVIEW_E2E = '1';
@@ -24,7 +27,7 @@ export default defineConfig({
     baseURL: origin,
     colorScheme: 'light',
     reducedMotion: 'reduce',
-    launchOptions: { executablePath: process.env.OVELIO_TEST_CHROMIUM || '/opt/pw-browsers/chromium' },
+    launchOptions: { executablePath: process.env.OVELIO_TEST_CHROMIUM || (existsSync(sandboxChromium) ? sandboxChromium : undefined) },
   },
   // The evidence sweep runs first on clean seeded data; specs that create records run after it.
   projects: [
