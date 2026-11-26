@@ -7,7 +7,7 @@ export function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
-export async function readBodyBytes(request: Request, limit: number): Promise<Buffer> {
+export async function readBodyBytes(request: Pick<Request, 'body' | 'headers'>, limit: number): Promise<Buffer> {
   const reader = request.body?.getReader();
   if (!reader || Number(request.headers.get('content-length')) > limit) {
     throw new AppError(413, 'The request is missing data or exceeds the upload limit.');
