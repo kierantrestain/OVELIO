@@ -112,3 +112,35 @@ Rules: stay in your files. A change you need in a lead-owned file goes in its ow
 
 - Live Gmail/Outlook sync needs OAuth client credentials (`GOOGLE_CLIENT_ID/SECRET`, `MICROSOFT_CLIENT_ID/SECRET`) registered with each provider.
 - The Vercel deployment can only run the developer preview: Vercel functions cannot host the worker, the SMTP gateway or the three engines. Production is the Docker Compose stack.
+
+## 7. Growth OS programme (waves)
+
+Brief of 2026-11-26: four waves in dependency order, at most three specialists at once, specialists reused across waves.
+Specialists: **PE** Product Engineering (shell, navigation, dashboards, kit), **CR** CRM & Revenue, **MC** Marketing & Content
+(email studio, sites, templates), **PL** Platform Engineering (communications, automation, integrations, infrastructure,
+security), **IQ** Intelligence & Quality (analytics, AI, benchmarks, independent acceptance). Migration ranges for new
+work: PE 060-069, CR 011-019, MC 021-029 / 032-039, PL 042-049 / 070-079, IQ 051-059.
+
+### Wave one: perfect the core (status: in progress)
+
+| Capability | Exists | Gap | P | Owner | Acceptance |
+|---|---|---|---|---|---|
+| Environment indicator | Large preview banner | Compact, persistent, truthful badge | P0 | PE | Badge in top bar on every page; banner gone |
+| Demo-data hygiene | Seeds + QA records in screenshots | Evidence sweep runs on clean data | P0 | PE | Sweep screenshots contain no test-created records |
+| Notifications, recents, favourites | None | Bell with unread count; recent and starred records in search | P0 | PE | Task reminder, flow failure and form lead create notifications; star a deal and find it in search |
+| Configurable dashboards | Overview + 6 analytics pages | Executive, Sales and Marketing dashboards with widget choice and date comparison | P1 | PE | Hide a widget, reload, still hidden |
+| Table density and kit | DataTable added | Density toggle, inline edit, used by CRM lists | P1 | PE, CR | Compact and comfortable both readable at 390 px |
+| CRM lists | Legacy contacts/companies tables | Owner, stage, last activity, open deals, inline edit, advanced filters, saved views | P0 | CR | Filter by owner and stage, save view, bulk reassign |
+| Duplicates and merge | None | Detect and merge contacts with all OVELIO associations moved | P0 | CR | Merge two contacts; deals, tasks and activities follow the survivor |
+| Lead routing | None | Round-robin and rule-based assignment on new leads | P0 | CR | Form lead is assigned to the next rep in rotation |
+| Deal cards and stage rules | Value, owner, close date | Last interaction, next action, health, stage requirements | P1 | CR | Move into a stage with a missing required field is refused with the reason |
+| Sequence safety | Delays, stop on reply | Recipient time zone send windows, daily limits | P1 | CR | Steps outside the window wait for the next window |
+| Email studio depth | GrapesJS/MJML studio, one brand kit | Multiple brand kits, global styles, conditional content, contact preview | P0 | MC | Conditional block renders per contact in preview and native send |
+| Deliverability | DNS check in Settings | SPF, DKIM, DMARC, bounce and complaint rates, broken links, list hygiene in one view | P1 | MC | Report lists each check with measured values or "unavailable" |
+| Email experiments | None | Subject A/B with deterministic allocation, minimum sample and significance | P1 | MC | Winner is declared only when the test is significant |
+| Template factory | 24 email + 16 page templates written by hand | Layouts x brand tokens x content schemas, industry kits, auto thumbnails, validation | P0 | MC | Factory output compiles with zero MJML errors and renders thumbnails |
+| Forms and funnels | Single-step forms, linear funnels | Multi-step forms, conditional fields, secure uploads, page rollback | P1 | MC | Conditional field shows only when its rule matches; rollback restores a page |
+| Persistent media | Engine media + preview data URLs | OVELIO media store with type sniffing, size limits, SVG sanitising | P1 | PL | Upload survives restart; a script in an SVG is removed |
+| Independent acceptance | Preview suite + CI on engines | Preview suite in CI; QA verification of specialists' claims | P0 | IQ | CI runs both suites green |
+
+Continuation point: recorded here at the end of each working session.
