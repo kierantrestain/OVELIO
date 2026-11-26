@@ -7,17 +7,19 @@ const mode = process.argv[2];
 if (mode !== 'persisted' && mode !== 'isolated') throw new Error('Specify persisted or isolated.');
 const state = JSON.parse(await readFile('test-results/acceptance.json', 'utf8')) as {
   recipient: string; subject: string; workflowName: string;
+  persistenceLogin: { email: string; password: string; id: string };
 };
 const analytics = JSON.parse(await readFile('test-results/analytics-receipt.json', 'utf8')) as { website: Website; goalId: string };
 const env = testEnv();
-const api = await apiClient(env);
+const included = mode === 'persisted';
+const api = await apiClient(included ? { ...env, ...state.persistenceLogin } : env);
+if (included) assert.equal(api.user.id, state.persistenceLogin.id, 'original workspace credentials persisted');
 const [contacts, campaigns, workflows, websites] = await Promise.all([
   api.get<Page<Contact>>('/contacts?q=' + encodeURIComponent(state.recipient)),
   api.get<Page<Campaign>>('/campaigns'),
   api.get<Workflow[]>('/workflows'),
   api.get<Website[]>('/websites'),
 ]);
-const included = mode === 'persisted';
 assert.equal(contacts.items.some(item => item.email === state.recipient), included, 'audience isolation or persistence');
 assert.equal(campaigns.items.some(item => item.subject === state.subject), included, 'newsletter isolation or persistence');
 assert.equal(workflows.some(item => item.name === state.workflowName), included, 'automation isolation or persistence');
@@ -47,11 +49,14 @@ if (included) {
   assert.ok((report.current?.pageviews ?? 0) > 0, 'tracked browser visit persisted');
 } else {
   assert.ok(process.env.OVELIO_PRIMARY_TEST_PASSWORD, 'first installation test password');
-  const invalid = await fetch(env.origin + '/api/auth/login', {
+  const rejectLogin = (credentials: { email: string; password: string }) => fetch(env.origin + '/api/auth/login', {
     method: 'POST',
     headers: { origin: env.origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ email: env.email, password: process.env.OVELIO_PRIMARY_TEST_PASSWORD }),
+    body: JSON.stringify(credentials),
   });
-  assert.equal(invalid.status, 401, 'second installation rejects the first administrator password');
+  const initialAdmin = await rejectLogin({ email: env.email, password: process.env.OVELIO_PRIMARY_TEST_PASSWORD });
+  assert.equal(initialAdmin.status, 401, 'second installation rejects the first administrator password');
+  const initialUser = await rejectLogin({ email: state.persistenceLogin.email, password: state.persistenceLogin.password });
+  assert.equal(initialUser.status, 401, 'second installation rejects the first installation user');
 }
 console.info('Verified ' + mode + ' application data.');

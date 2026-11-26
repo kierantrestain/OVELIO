@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
@@ -170,8 +171,16 @@ test('real audience, newsletter, suppression and welcome workflows', { timeout: 
   assert.ok((summary.email.sent ?? 0) >= 1);
   assert.ok((summary.activeWorkflows ?? 0) >= 1);
 
+  // A dedicated user proves that restore recovered user records, including
+  // credentials. The bootstrap administrator is also used by the browser suite.
+  const credentials = { email: 'restore-' + unique + '@example.test', password: randomBytes(32).toString('base64url') };
+  const persistenceUser = await api.get<{ id: string }>('/settings/team', 'POST', {
+    ...credentials, name: 'Restore verification', role: 'marketer',
+  });
   await mkdir('test-results', { recursive: true });
-  await writeFile('test-results/acceptance.json', JSON.stringify({ recipient, subject, workflowName: active.name }), { mode: 0o600 });
+  await writeFile('test-results/acceptance.json', JSON.stringify({
+    recipient, subject, workflowName: active.name, persistenceLogin: { ...credentials, id: persistenceUser.id },
+  }), { mode: 0o600 });
   context.diagnostic('Confirmed native contacts, list membership, test and bulk mail, cross-engine unsubscribe and workflow delivery.');
 });
 
