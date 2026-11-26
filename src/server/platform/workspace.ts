@@ -42,7 +42,10 @@ async function marks(userId: string): Promise<RecordMarks> {
 
 async function saveMark(userId: string, mark: 'star' | 'recent', type: RecordKind, id: string) {
   const label = await recordLabel(type, id);
-  if (!label) throw new AppError(404, 'That record no longer exists.');
+  if (!label) {
+    if (mark === 'recent') return;
+    throw new AppError(404, 'That record no longer exists.');
+  }
   const href = recordRoutes.find(item => item.kind === type)!.href(id);
   await db.query(
     `INSERT INTO user_record_marks (user_id, mark, kind, record_id, label, href) VALUES ($1, $2, $3, $4, $5, $6)

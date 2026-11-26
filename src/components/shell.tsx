@@ -3,11 +3,9 @@
 import { LogOut, Moon, Plus, Search, Sun } from 'lucide-react';
 import NextLink from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { AppShell } from '@astryxdesign/core/AppShell';
-import { Avatar } from '@astryxdesign/core/Avatar';
-import { Banner } from '@astryxdesign/core/Banner';
 import { BreadcrumbItem, Breadcrumbs } from '@astryxdesign/core/Breadcrumbs';
 import { CommandPalette } from '@astryxdesign/core/CommandPalette';
 import { DropdownMenu } from '@astryxdesign/core/DropdownMenu';
@@ -24,6 +22,8 @@ import { api, request, useAction } from './client';
 import { allowed, createActions, locate, workspaces } from './nav';
 import { useColorMode } from './providers';
 import { Empty, Feedback, Panel } from './ui';
+import { AccountMenu, EnvironmentBadge, NotificationBell, StarToggle, useWorkspace, WorkspaceProvider } from './workspace';
+import type { RecordMark } from '@/contracts/workspace';
 
 const UserContext = createContext<User | null>(null);
 const PreviewContext = createContext(false);
@@ -78,13 +78,22 @@ function matches(entry: CommandEntry, query: string) {
 }
 
 /** Navigation and create commands answer instantly; live records from every workspace are appended when they arrive. */
+const markEntry = (group: string) => (mark: RecordMark): CommandEntry => ({
+  id: `${group}:${mark.kind}:${mark.recordId}`, label: mark.label,
+  auxiliaryData: { href: mark.href, group, subtitle: kindLabel[mark.kind], aliases: [] },
+});
+
 function useCommandSource(user: User): { source: SearchSource<CommandEntry>; lookup: Map<string, CommandEntry> } {
+  const { marks } = useWorkspace();
   return useMemo(() => {
     const commands = navigationCommands(user);
-    const lookup = new Map(commands.map(entry => [entry.id, entry]));
+    // Before a query is typed: starred records, then recently opened ones, then navigation.
+    const starred = marks.starred.slice(0, 6).map(markEntry('Starred'));
+    const recent = marks.recent.filter(item => !marks.starred.some(star => star.kind === item.kind && star.recordId === item.recordId)).slice(0, 5).map(markEntry('Recent'));
+    const lookup = new Map([...starred, ...recent, ...commands].map(entry => [entry.id, entry]));
     const inflight: { controller?: AbortController } = {};
     const source: SearchSource<CommandEntry> = {
-      bootstrap: () => commands.slice(0, 12),
+      bootstrap: () => [...starred, ...recent, ...commands.slice(0, 12)],
       cancel: () => inflight.controller?.abort(),
       async search(query, context) {
         const local = commands.filter(entry => matches(entry, query)).slice(0, 8);
@@ -108,12 +117,16 @@ function useCommandSource(user: User): { source: SearchSource<CommandEntry>; loo
       },
     };
     return { source, lookup };
-  }, [user]);
+  }, [user, marks]);
 }
 
-export function Shell({ user, workspace, devPreview = false, children }: {
-  user: User; workspace: Pick<CompanySettings, 'name' | 'accent'>; devPreview?: boolean; children: ReactNode;
-}) {
+type ShellProps = { user: User; workspace: Pick<CompanySettings, 'name' | 'accent'>; devPreview?: boolean; children: ReactNode };
+
+export function Shell(props: ShellProps) {
+  return <WorkspaceProvider><ShellFrame {...props} /></WorkspaceProvider>;
+}
+
+function ShellFrame({ user, workspace, devPreview = false, children }: ShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { mode, toggle } = useColorMode();
@@ -183,7 +196,9 @@ export function Shell({ user, workspace, devPreview = false, children }: {
       {onLeaf && leaf ? <BreadcrumbItem href={isDetail ? leaf.href : undefined} isCurrent={!isDetail}>{leaf.label}</BreadcrumbItem> : null}
       {isDetail ? <BreadcrumbItem isCurrent>Details</BreadcrumbItem> : null}
     </Breadcrumbs>}
-    endContent={<div className="ov-actions">
+    endContent={<div className="ov-actions ov-topbar-actions">
+      <StarToggle />
+      <EnvironmentBadge preview={devPreview} />
       <button type="button" className="ov-cmd-trigger" onClick={() => setPaletteOpen(true)} aria-label="Search records and pages">
         <Search size={14} aria-hidden="true" />
         <span>Search…</span>
@@ -198,7 +213,8 @@ export function Shell({ user, workspace, devPreview = false, children }: {
         }))}
       /> : null}
       <IconButton variant="ghost" label={mode === 'light' ? 'Use dark theme' : 'Use light theme'} icon={mode === 'light' ? <Moon size={18} /> : <Sun size={18} />} onClick={toggle} />
-      <Avatar name={user.name} size="sm" tooltip={`${user.name} · ${user.role}`} />
+      <NotificationBell />
+      <AccountMenu user={user} />
     </div>} />;
 
   return <UserContext.Provider value={user}>
@@ -206,7 +222,6 @@ export function Shell({ user, workspace, devPreview = false, children }: {
       <div style={accent}>
         <AppShell sideNav={sideNav} topNav={topNav} variant="elevated">
           <div className="ov-page">
-            {devPreview ? <PreviewBanner /> : null}
             {current && !allowed(user.role, current.role)
               ? <Panel><Empty title="Your role cannot access this workspace" action={<Link href="/overview">Return to Overview</Link>} /></Panel>
               : children}
@@ -235,28 +250,6 @@ export function Shell({ user, workspace, devPreview = false, children }: {
   </UserContext.Provider>;
 }
 
-const noSubscription = () => () => {};
-
-function readBannerHidden() {
-  try { return sessionStorage.getItem('ov-preview-banner') === 'hidden'; } catch { return false; }
-}
-
-function PreviewBanner() {
-  // The server render always shows the banner; the client hides it once dismissed in this tab.
-  const hidden = useSyncExternalStore(noSubscription, readBannerHidden, () => false);
-  const [dismissed, setDismissed] = useState(false);
-  if (dismissed || hidden) return null;
-  return <Banner
-    status="info"
-    title="Developer preview · sample data"
-    description="Every record here is demonstration data, labelled as such, in an embedded database that resets when the preview restarts. Email delivery, the audience engine and website tracking are simulated. Run OVELIO with Docker Compose for live engines."
-    onDismiss={() => {
-      setDismissed(true);
-      try { sessionStorage.setItem('ov-preview-banner', 'hidden'); } catch { /* storage unavailable */ }
-    }}
-  />;
-}
-
 /** Fetches the workspace's team for owner and assignee pickers. */
 export async function loadTeam() {
   return api<Pick<User, 'id' | 'name' | 'email' | 'role'>[]>('/platform/users');
@@ -265,6 +258,6 @@ export async function loadTeam() {
 /** Full-screen editors (email studio, page builder) render without the workspace chrome but share the user and preview state. */
 export function StudioFrame({ user, devPreview = false, children }: { user: User; devPreview?: boolean; children: ReactNode }) {
   return <UserContext.Provider value={user}>
-    <PreviewContext.Provider value={devPreview}>{children}</PreviewContext.Provider>
+    <PreviewContext.Provider value={devPreview}><WorkspaceProvider>{children}</WorkspaceProvider></PreviewContext.Provider>
   </UserContext.Provider>;
 }
