@@ -97,3 +97,23 @@ test('CAL-04 calendar subscriptions are host-scoped and can be revoked', async (
   await consoleEndpoint(owner, 'DELETE', 'calendar/feed');
   await assert.rejects(calendarFeed(token), /not found/);
 });
+
+test('CAL-06 future appointments queue a reminder and completion outcomes are idempotent', async () => {
+  const type = await bookingType('cal-outcomes', [owner.id]);
+  const { slots } = await publicBooking(type.slug);
+  const [first, second] = [slots.find(slot => Date.parse(slot) > Date.now() + 2 * 86_400_000)!, slots.at(-1)!];
+  const completed = await book(type.slug, guest(first, 'cal-completed'), origin);
+  const absent = await book(type.slug, guest(second, 'cal-absent'), origin);
+  const planned = await db.query<{ dedupe_key: string }>('SELECT dedupe_key FROM jobs WHERE dedupe_key LIKE $1', [
+    `platform:calendar.appointment_mail:${completed.id}:%`,
+  ]);
+  assert.deepEqual(planned.rows.map(row => row.dedupe_key.split(':').at(-1)).sort(), ['confirmed', 'reminder']);
+  await assert.rejects(consoleEndpoint(owner, 'PATCH', 'calendar/appointments/' + completed.id, { status: 'completed' }), /has started/);
+  await db.query(`UPDATE calendar_appointments SET starts_at = now() - interval '2 hours',
+    ends_at = now() - interval '1 hour', blocked_until = now() - interval '1 hour' WHERE id = ANY($1::uuid[])`, [[completed.id, absent.id]]);
+  await consoleEndpoint(owner, 'PATCH', 'calendar/appointments/' + completed.id, { status: 'completed' });
+  await consoleEndpoint(owner, 'PATCH', 'calendar/appointments/' + completed.id, { status: 'completed' });
+  await consoleEndpoint(owner, 'PATCH', 'calendar/appointments/' + absent.id, { status: 'no_show' });
+  assert.equal((await listEvents({ entityId: completed.id, types: ['appointment.completed'] })).length, 1);
+  assert.equal((await listEvents({ entityId: absent.id, types: ['appointment.no_show'] })).length, 1);
+});

@@ -157,11 +157,11 @@ Rollback points: `fccb9d0` main before 2.0; `a29fb83` first CI-verified 2.0 buil
 
 ### Wave two: complete the customer lifecycle (status: in progress)
 
-Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resumed at `b361bee` after [CI 45847631358](https://github.com/kierantrestain/OVELIO/actions/runs/45847631358) passed. Migration ranges in use: 014 revenue, 015 inbox, 042–043 webhooks, 071 reserved for calendar. Assignment and release rules live in [AGENTS.md](../../AGENTS.md).
+Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resumed at `b361bee` after [CI 45847631358](https://github.com/kierantrestain/OVELIO/actions/runs/45847631358) passed. Migration ranges in use: 014 revenue, 015 inbox, 042–043 webhooks, 071 calendar. Assignment and release rules live in [AGENTS.md](../../AGENTS.md).
 
 #### Priority zero: recovery and mailbox privacy
 
-- No calendar or threaded-inbox specialist branch was found on the remote or in the accessible previous checkout. Keep `b361bee` and `e56d866` as rollback points.
+- No calendar or threaded-inbox branch from the previous session was found on the remote or in the accessible checkout. Keep `b361bee` and `e56d866` as rollback points.
 - INB-01–04 require the same current mailbox ownership or membership on inbox summaries, threads, search, CRM timelines and events, and CSV export. Migration 015 backfills mailbox provenance and keeps unassignable historical copies private. Administrators can disconnect mailboxes and inspect connection metadata. Owners grant and revoke read access and retain sending and manual sync.
 - The authenticated INB-01–04 suite passed on PostgreSQL 18 with a synthetic directory. INB-05 checks session-bound OAuth state and preserves mailbox ownership on reconnect using synthetic provider responses. [CI 45866331774](https://github.com/kierantrestain/OVELIO/actions/runs/45866331774) passed for `b7707df`, including the Compose integration, persistence, isolation and backup restore steps. The local browser gate reported 159 passes and one existing skip.
 - The [protected developer preview](https://ovelio-p3nj15enf-kierantrestain-9646s-projects.vercel.app) returned HTTP 200 and `a503d64cc3080e6fb00eaf1830669ba17dc3e4b3` from `/api/health`. The earlier or inherited PostgreSQL configuration returned 503 in the new preview. Vercel has no connected Git repository, so the lead deployed the exact SHA manually and scoped the embedded override to Preview. The public alias resolved to `fccb9d0` at recovery.
@@ -171,7 +171,8 @@ Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resume
 | Wave-one carry-over: outcome-based experiments | done | JRN-09, JRN-10, IQ-22; signed click tracking PLT-37 |
 | Revenue: catalogue, price lists, tax, deal line items, proposals, e-signature, deposits, invoices, Stripe Checkout + webhook, refunds, subscriptions and renewals, onboarding tasks, revenue states, accounting CSV | done | REV-01..REV-09 unit; IQ-20, IQ-21 browser (signing on a 390 px phone) |
 | Workflow triggers: proposal viewed/accepted/declined, payment received/failed, subscription cancelled, meetings | done | REV-09 (accepted proposal enrols the signer) |
-| Calendar: booking types, availability, round-robin, public booking, reminders, ICS feed | pending recovery implementation | |
+| Calendar: personal and team booking types, time zones, round-robin, public booking and management, reminders, ICS feed | implemented on native SQL and jobs | CAL-01–06, IQ-24. A PostgreSQL 18 contention check granted exactly one of two overlapping public slots for the same host. |
+| Calendar: external busy time and Google/Microsoft synchronisation | pending | needs OAuth and calendar provider fixtures |
 | Inbox: mailbox privacy, explicit sharing, threaded reads, search, scoped CSV | implemented | INB-01–05 synthetic-provider / real PostgreSQL checks |
 | Inbox: full bodies, attachments, unread, assignment, notes, saved replies, response times, incremental provider sync | pending | |
 | Inbound webhooks: exact-byte HMAC, Bearer auth, mappings, retries, diagnostics, hook-specific workflow trigger | implemented | JRN-11 unit, IQ-23 browser, JRN-12 Compose gateway coverage |
@@ -184,4 +185,6 @@ job budget.
 Pending external verification: Stripe test keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`), Google/Microsoft OAuth
 clients. `/api/health` reports `commit` on deployments built after the Wave Two health change.
 
-**Continuation point** — Build and verify the missing calendar and inbox capabilities on the current contracts, finish the connector and advanced automation work, then verify the Wave Two lifecycle (lead → CRM → appointment → proposal → contract → payment → onboarding → renewal).
+Native calendar uses the existing directory, event and jobs contracts. Reservations lock host rows across booking types. This keeps scheduling on OVELIO's existing PostgreSQL runtime. [Easy!Appointments requirements](https://github.com/alextselegidis/easyappointments#-installation-production)
+
+**Continuation point** — Complete mailbox bodies, attachments and unread state with the existing ACL, then incremental provider sync, team ownership and notes. Add external calendar busy time and Google/Microsoft synchronisation, finish the connector and advanced automation work, then verify the Wave Two lifecycle (lead → CRM → appointment → proposal → contract → payment → onboarding → renewal). Release Waves Three and Four after that gate.

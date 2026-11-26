@@ -1,12 +1,80 @@
 import { createHmac } from 'node:crypto';
+import type { CalendarOverview } from '../../../src/contracts/calendar';
+import type { ContactProfile } from '../../../src/contracts/crm';
 import type { FlowDetail, InboundHook } from '../../../src/contracts/journeys';
-import { anonymous, expect, horizontalOverflow, isPreviewRun, json, test, unique } from './fixtures';
+import { anonymous, evidence, expect, horizontalOverflow, isPreviewRun, json, test, unique } from './fixtures';
 
 // Wave two independent acceptance (Intelligence & Quality): the connected revenue journey and outcome-based
 // experiments, driven through the browser. Runs in the 'journeys' project because it creates records.
 test.skip(!isPreviewRun, 'Preview harness only: npm run build && npm run test:e2e:preview');
 
 type Quote = { id: string; status: string; publicUrl: string | null; totals: { total: number }; invoices: { id: string; kind: string; total: number; status: string }[] };
+
+test('IQ-24 public booking on a phone links to CRM and starts an appointment workflow', async ({ page, browser, baseURL }, testInfo) => {
+  const origin = new URL(baseURL!).origin;
+  const id = unique();
+  const slug = `discovery-${id}`;
+  const name = 'Sample discovery call';
+  const email = `calendar.${id}@example.test`;
+  await page.goto('/sales/calendar');
+  await page.getByRole('button', { name: 'Use weekday hours' }).click();
+  await page.getByRole('button', { name: 'Save availability' }).click();
+  await expect(page.getByText('Availability saved.').first()).toBeVisible();
+  await page.getByRole('button', { name: 'New booking type' }).click();
+  await page.getByLabel('Booking name').fill(name);
+  await page.getByLabel('Booking address').fill(slug);
+  await page.getByRole('button', { name: 'Save booking type' }).click();
+  await expect(page.getByRole('link', { name: 'Open booking page' })).toHaveAttribute('href', `/book/${slug}`);
+  expect(await horizontalOverflow(page)).toEqual([]);
+  await evidence(page, testInfo, '/sales/calendar-desktop');
+
+  const flow = await json<FlowDetail>(await page.request.post('/api/console/journeys/flows', { headers: { origin }, data: {
+    name: `New appointment workflow ${id}`,
+    triggers: [{ id: 'booked', type: 'appointment.booked', filters: {} }],
+    graph: {
+      nodes: [{ id: 'start', type: 'start', config: {}, position: { x: 0, y: 0 } },
+        { id: 'finish', type: 'exit', config: {}, position: { x: 0, y: 160 } }],
+      edges: [{ id: 'next', source: 'start', target: 'finish', sourceHandle: 'next' }],
+    },
+  } }));
+  await json(await page.request.post(`/api/console/journeys/flows/${flow.id}/publish`, { headers: { origin } }));
+
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  try {
+    const client = await phone.newPage();
+    await client.goto(`${origin}/book/${slug}`);
+    await expect(client.getByRole('heading', { name })).toBeVisible();
+    const time = client.getByRole('combobox', { name: 'Time', exact: true })
+      .or(client.getByRole('button', { name: /^Time(?: Choose a time)?$/ }));
+    await time.click();
+    await client.getByRole('option').first().click();
+    await client.getByLabel('First name').fill('Casey');
+    await client.getByLabel('Last name').fill('Sample');
+    await client.getByLabel('Email').fill(email, { timeout: 10_000 });
+    expect(await horizontalOverflow(client)).toEqual([]);
+    await evidence(client, testInfo, '/book/mobile');
+    await client.getByRole('button', { name: 'Confirm booking' }).click();
+    await expect(client.getByRole('heading', { name: 'Booking confirmed' })).toBeVisible();
+    const calendar = await json<CalendarOverview>(await page.request.get('/api/console/calendar'));
+    const appointment = calendar.meetings.find(item => item.guestEmail === email);
+    expect(appointment?.status).toBe('booked');
+    const profile = await json<ContactProfile>(await page.request.get(`/api/console/crm/contacts/${appointment!.contactId}/profile`));
+    expect(profile.events.some(event => event.type === 'appointment.booked' && event.entityId === appointment?.id)).toBe(true);
+    await expect.poll(async () => (await json<FlowDetail>(await page.request.get(`/api/console/journeys/flows/${flow.id}`))).counts.enrolled).toBe(1);
+
+    const deal = await json<{ id: string }>(await page.request.post('/api/console/sales/deals', { headers: { origin },
+      data: { name: `Discovery deal ${id}`, contactId: appointment!.contactId } }));
+    await json(await page.request.patch(`/api/console/calendar/appointments/${appointment!.id}`, { headers: { origin }, data: { dealId: deal.id } }));
+    await client.getByRole('link', { name: 'Manage your booking' }).click();
+    await client.getByRole('button', { name: 'Cancel appointment' }).click();
+    await client.getByRole('alertdialog').getByRole('button', { name: 'Cancel appointment' }).click({ timeout: 10_000 });
+    await expect(client.getByText('Appointment cancelled.').first()).toBeVisible();
+    const after = await json<CalendarOverview>(await page.request.get('/api/console/calendar'));
+    expect(after.meetings.find(item => item.id === appointment?.id)).toMatchObject({ status: 'cancelled', dealId: deal.id });
+  } finally {
+    await phone.close();
+  }
+});
 
 test('IQ-23 configure an inbound webhook, select it in a workflow and enrol a contact from a signed delivery', async ({ page, baseURL, guard }) => {
   const origin = new URL(baseURL!).origin;
