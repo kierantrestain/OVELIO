@@ -2,7 +2,6 @@
 // version history, publish a sanitised snapshot, A/B variants and the signed-in draft preview.
 import type { User } from '@/contracts';
 import type { DesignVersion, LandingPageDetail, LandingPageSummary, PageDesign, PagePublication, PageSettings, PageVariant } from '@/contracts/sites';
-import { pageTemplate } from '@/templates/pages';
 import { AppError } from '../config';
 import { db, transaction } from '../db';
 import type { Sql } from '../db';
@@ -10,6 +9,7 @@ import { audit } from '../events';
 import type { DomainRow, FormRow, PageRow, VariantRow } from './data';
 import { domainsById, iso, pageUrl, requirePage, slugify, uniqueSlug, uuidPattern } from './data';
 import { createForm } from './forms';
+import { catalogTemplate } from './templates';
 import { hydratePage, renderDocument } from './render';
 import { boundFormIds, sanitizePageCss, sanitizePageHtml, unboundFormBlocks } from './sanitize';
 
@@ -39,7 +39,7 @@ export type CreatePageInput = { name: string; templateKey: string; slug?: string
 
 /** Creates a page from a template. When the template has a form block, it is bound to `formId` or to a new form made from the template's suggestion. */
 export async function createPage(input: CreatePageInput, user: Pick<User, 'id'> | null, client?: Sql): Promise<{ id: string; formId: string | null }> {
-  const template = pageTemplate(input.templateKey);
+  const template = catalogTemplate(input.templateKey);
   if (!template) throw new AppError(404, 'That template was not found.');
   const name = input.name.trim();
   if (!name) throw new AppError(400, 'Name the page.');

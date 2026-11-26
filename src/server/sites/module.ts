@@ -3,7 +3,6 @@
 import { z } from 'zod';
 import type { SearchResult } from '@/contracts/platform';
 import type { PageTemplate, SavedSection } from '@/contracts/sites';
-import { pageTemplate, pageTemplateSummaries } from '@/templates/pages';
 import { AppError } from '../config';
 import { db } from '../db';
 import { requestOrigin } from '../dev-preview';
@@ -20,6 +19,7 @@ import {
   publishPage, restoreVersion, saveDesign, saveNamedVersion, searchPages, setPageStatus, updatePageSettings, updateVariant,
 } from './pages';
 import { seedSites } from './seed';
+import { catalogSummaries, catalogTemplate } from './templates';
 
 const uuid = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 const path = (pattern: string) => new RegExp(`^sites/${pattern.replace(/:id/g, uuid)}$`);
@@ -99,9 +99,9 @@ export const sitesModule: LaneModule = {
   name: 'sites',
   endpoints: [
     // Templates and saved sections
-    route('GET', path('templates'), async () => ({ items: pageTemplateSummaries() })),
+    route('GET', path('templates'), async () => ({ items: catalogSummaries() })),
     route('GET', path('templates/([a-z0-9-]{1,60})'), async ({ params }): Promise<PageTemplate> => {
-      const template = pageTemplate(params[0]);
+      const template = catalogTemplate(params[0]);
       if (!template) throw new AppError(404, 'That template was not found.');
       return template;
     }),

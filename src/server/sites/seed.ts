@@ -14,8 +14,8 @@ async function publish(sql: Sql, pageId: string) {
     [pageId, sanitizePageHtml(row.source), sanitizePageCss(row.css), row.version],
   );
   await sql.query(
-    `INSERT INTO page_publications (page_id, design_version, html, css, label, published_at) VALUES ($1, $2, $3, $4, 'Published version ' || $2, now() - interval '20 days')`,
-    [pageId, row.version, sanitizePageHtml(row.source), sanitizePageCss(row.css)],
+    `INSERT INTO page_publications (page_id, design_version, html, css, label, published_at) VALUES ($1, $2, $3, $4, $5, now() - interval '20 days')`,
+    [pageId, row.version, sanitizePageHtml(row.source), sanitizePageCss(row.css), `Published version ${row.version}`],
   );
 }
 

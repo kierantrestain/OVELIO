@@ -154,3 +154,26 @@ test('SIT-15 funnel branching routes by form answer and reports conversion per b
   assert.deepEqual([otherwise.visitors, otherwise.reached, otherwise.conversion], [1, 0, 0]);
   assert.equal(stats.completed, 1, 'reaching the last step completes the funnel');
 });
+
+test('SIT-16 the page template factory is deterministic, covers every industry and layout, and every output validates and survives sanitising', async () => {
+  const { buildFactoryTemplates, layouts } = await import('../../src/templates/pages/factory');
+  const { templateIndustries } = await import('../../src/contracts/sites');
+  const { validatePageTemplate, templateCatalog, catalogSummaries } = await import('../../src/server/sites/templates');
+  const first = buildFactoryTemplates();
+  assert.deepEqual(buildFactoryTemplates(), first, 'same kits, same templates');
+  assert.equal(first.length, templateIndustries.length * layouts.length);
+  assert.equal(new Set(first.map(item => item.key)).size, first.length);
+  for (const industry of templateIndustries) assert.equal(first.filter(item => item.industry === industry).length, layouts.length, `${industry} has every layout`);
+  assert.ok(new Set(first.map(item => item.palette[0])).size >= 5, 'brand tokens vary across the set');
+  for (const template of first) assert.deepEqual(validatePageTemplate(template), [], template.key);
+  const bad = { ...first[0], html: first[0].html.replace('<section', '<section onclick="alert(1)"') + '<script>alert(1)</script>' };
+  assert.ok(validatePageTemplate(bad).includes('contains script'));
+  assert.ok(validatePageTemplate({ ...first[0], html: first[0].html.replace(/<h1[^>]*>[\s\S]*?<\/h1>/, '') }).includes('needs exactly one h1'));
+  assert.equal(templateCatalog().length, first.length + 16, 'curated and factory templates all pass');
+  assert.ok(catalogSummaries().some(item => item.source === 'factory' && item.industry === 'E-commerce'));
+  const created = await pages.createPage({ name: 'SIT factory page', templateKey: 'f-events-event-registration', slug: 'sit-factory' }, user);
+  await pages.publishPage(created.id, user);
+  const html = await (await pub.servePage(new Request('http://localhost/s/sit-factory'), 'sit-factory')).text();
+  assert.match(html, /Momentum Summit 2027/);
+  assert.match(html, /name="ticket"/, 'the generated form is live on the page');
+});

@@ -16,7 +16,7 @@ import { Table } from '@astryxdesign/core/Table';
 import { Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import type { FormSummary, LandingPageSummary, PageStats, PageTemplate, PageTemplateSummary } from '@/contracts/sites';
-import { pageTemplateCategories } from '@/contracts/sites';
+import { pageTemplateCategories, templateIndustries } from '@/contracts/sites';
 import { api, date, message, number, request, useResource } from '../client';
 import { AsyncState, Bars, ConfirmDialog, Distribution, Empty, Metric, Modal, PageHeader, Panel, SlideDrawer, StatusBadge } from '../ui';
 import { absoluteUrl, pageStatusTone, percent } from './shared';
@@ -147,13 +147,14 @@ function TemplateGallery({ onClose, onCreated }: { onClose: () => void; onCreate
   const templates = useResource<{ items: PageTemplateSummary[] }>('/sites/templates');
   const forms = useResource<{ items: FormSummary[] }>('/sites/forms');
   const [category, setCategory] = useState<string>('All');
+  const [industry, setIndustry] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [chosen, setChosen] = useState<PageTemplateSummary | null>(null);
   const [name, setName] = useState('');
   const [formChoice, setFormChoice] = useState('new');
   const [state, setState] = useState<{ busy?: boolean; error?: string }>({});
   const all = useMemo(() => templates.data?.items ?? [], [templates.data]);
-  const visible = all.filter(item => (category === 'All' || item.category === category)
+  const visible = all.filter(item => (category === 'All' || item.category === category) && (industry === 'all' || item.industry === industry)
     && (!search.trim() || `${item.name} ${item.description} ${item.category}`.toLowerCase().includes(search.trim().toLowerCase())));
   const blank: PageTemplateSummary = { key: 'blank', name: 'Blank page', category: 'Lead generation', description: 'An empty canvas with the OVELIO styles.', palette: ['#ffffff', '#2457d6'], hasForm: false };
 
@@ -190,7 +191,11 @@ function TemplateGallery({ onClose, onCreated }: { onClose: () => void; onCreate
 
   return <Modal title="Choose a template" onClose={onClose} size="wide">
     <div className="ov-stack-sm">
-      <TextInput label="Search templates" isLabelHidden placeholder="Search templates" value={search} onChange={setSearch} hasClear />
+      <div className="ov-sites-toolbar"><div>
+        <TextInput label="Search templates" isLabelHidden placeholder="Search templates" value={search} onChange={setSearch} hasClear width={320} />
+        <Selector label="Industry" isLabelHidden width={220} value={industry} onChange={value => setIndustry(value ?? 'all')}
+          options={[{ value: 'all', label: 'All industries' }, ...templateIndustries.map(item => ({ value: item, label: item }))]} />
+      </div><Text type="supporting" color="secondary">{visible.length} template{visible.length === 1 ? '' : 's'}</Text></div>
       {!templates.data ? <AsyncState loading={templates.loading} error={templates.error} retry={templates.refresh} /> : <div className="ov-sites-gallery">
         <nav className="ov-sites-categories" aria-label="Template categories">
           {['All', ...pageTemplateCategories].map(item => <button key={item} type="button" className={category === item ? 'is-active' : ''} aria-pressed={category === item} onClick={() => setCategory(item)}>
@@ -202,11 +207,11 @@ function TemplateGallery({ onClose, onCreated }: { onClose: () => void; onCreate
             <Thumbnail label={`Preview of the ${template.name} template`} load={() => templateDocument(template.key)} />
             <div className="ov-sites-card-body">
               <div className="ov-sites-card-title"><strong>{template.name}</strong><span className="ov-sites-palette" aria-hidden="true">{template.palette.map(colour => <span key={colour} style={{ background: colour }} />)}</span></div>
-              <Text type="supporting" color="secondary">{template.category}{template.hasForm ? ' · includes a form' : ''}</Text>
+              <Text type="supporting" color="secondary">{[template.category, template.industry, template.hasForm ? 'includes a form' : null].filter(Boolean).join(' · ')}</Text>
               <Text type="supporting">{template.description}</Text>
             </div>
           </button>)}
-          {category === 'All' && !search ? <button type="button" className="ov-sites-card ov-sites-template" onClick={() => { setChosen(blank); setName('Untitled page'); }}>
+          {category === 'All' && industry === 'all' && !search ? <button type="button" className="ov-sites-card ov-sites-template" onClick={() => { setChosen(blank); setName('Untitled page'); }}>
             <div className="ov-sites-thumb" style={{ display: 'grid', placeContent: 'center' }}><Plus size={28} aria-hidden="true" /></div>
             <div className="ov-sites-card-body"><strong>Blank page</strong><Text type="supporting" color="secondary">Start from an empty canvas.</Text></div>
           </button> : null}
