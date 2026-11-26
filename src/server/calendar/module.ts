@@ -8,6 +8,7 @@ import { json, readBody } from '../http';
 import { route } from '../routes/shared';
 import type { LaneModule } from '../platform/types';
 import { availabilityInput } from './availability';
+import { calendarConnectionEndpoints } from './connections';
 import { APPOINTMENT_MAIL, bookingSlug, runAppointmentMail, setStatus, toAppointment } from './booking';
 import type { AppointmentRow, BookingRow } from './booking';
 
@@ -142,6 +143,7 @@ export async function calendarFeed(token: string) {
 export const calendarModule: LaneModule = {
   name: 'calendar',
   endpoints: [
+    ...calendarConnectionEndpoints,
     route('GET', /^calendar$/, async ({ user }) => overview(user), 'marketer'),
     route('PATCH', /^calendar\/availability$/, async ({ request, user }) => {
       const input = await readBody(request, availabilityInput, 16_384);

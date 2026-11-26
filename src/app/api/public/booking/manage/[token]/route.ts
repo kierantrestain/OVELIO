@@ -17,7 +17,10 @@ export async function POST(request: Request, context: Context) {
   }
 }
 
-export async function GET(_: Request, context: Context) {
-  try { return json(await manageBooking((await context.params).token)); }
+export async function GET(request: Request, context: Context) {
+  try {
+    await rateLimit('booking-availability:' + hashIp(clientIp(request)), 60, 60);
+    return json(await manageBooking((await context.params).token));
+  }
   catch (error) { return respondError('manage-booking', error); }
 }
