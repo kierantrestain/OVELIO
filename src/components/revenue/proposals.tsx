@@ -102,7 +102,8 @@ export function ProposalEditor({ id }: { id: string }) {
       actions={<>
         <QuoteBadge quote={data} />
         {editable ? <>
-          <Button label="Save draft" isDisabled={!dirty} isLoading={action.busy && dirty} onClick={() => void action.run(save, 'Draft saved.')} />
+          {/* Always available: number fields commit on blur, so gating on unsaved changes would ignore a just-typed value. */}
+          <Button label="Save draft" isLoading={action.busy} onClick={() => void action.run(save, 'Draft saved.')} />
           <Button label="Send proposal" variant="primary" icon={<Send size={15} />} onClick={() => void action.run(async () => { if (dirty) await save(); setSending(true); })} />
         </> : null}
         {data.status !== 'draft' ? <Button label="Revise" icon={<FileSignature size={15} />} onClick={() => void action.run(async () => {
@@ -234,8 +235,8 @@ export function DealRevenuePanel({ dealId, onChanged }: { dealId: string; onChan
       <Feedback error={action.error ?? lineError} />
       <LinesEditor lines={draft} currency={currency} onError={setLineError} onChange={next => { setLineError(undefined); setDraft(next); }} />
       {draft.length ? <TotalsBox lines={draft} currency={currency} /> : null}
-      {dirty ? <FormActions>
-        <Button label="Discard" variant="ghost" onClick={() => setDraft(lines.data!.lines.map(line => keyed(stripLine(line))))} />
+      {dirty || draft.length ? <FormActions>
+        {dirty ? <Button label="Discard" variant="ghost" onClick={() => setDraft(lines.data!.lines.map(line => keyed(stripLine(line))))} /> : null}
         <Button label="Save line items" variant="primary" isLoading={action.busy} onClick={() => void action.run(async () => {
           await api(`/revenue/deals/${dealId}/lines`, 'POST', { lines: draft.map(toLineInput) }); lines.refresh(); onChanged();
         }, 'Line items saved; deal value updated.')} />
