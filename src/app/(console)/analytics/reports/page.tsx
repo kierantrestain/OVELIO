@@ -1,7 +1,8 @@
-import { LaneStub } from '@/components/lane-stub';
+import { Suspense } from 'react';
+import { ReportCatalogue } from '@/components/insights/detail';
 
 export const metadata = { title: 'Reports' };
 
 export default function Page() {
-  return <LaneStub title="Reports" lane="Agent 5 · Analytics" />;
+  return <Suspense><ReportCatalogue /></Suspense>;
 }
