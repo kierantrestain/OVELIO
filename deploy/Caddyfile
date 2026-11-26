@@ -126,11 +126,25 @@ http://127.0.0.1:9900 {
 		}
 	}
 
+	# Inbound hooks need the sender's Bearer token, but never a browser session.
+	@inboundHook path /api/public/hooks/*
+	handle @inboundHook {
+		request_body {
+			max_size 256KB
+		}
+		reverse_proxy app:3000 {
+			header_up -Cookie
+			header_down -Set-Cookie
+			header_up X-Ovelio-Client-Ip {remote_host}
+		}
+	}
+
 	# SIT: published pages, hosted forms and the public form/tracking endpoints never receive the console session.
 	# Wave two: proposals (/proposal/), invoices (/pay/), email click redirects (/r/) and booking pages (/book/).
 	# /q/ and /p/ belong to the analytics engine's tracked links above, so OVELIO's public pages never use them.
 	@ovelioPublic {
 		path /s/* /f/* /api/public/* /proposal/* /pay/* /r/* /book/*
+		not path /api/public/hooks/*
 	}
 	handle @ovelioPublic {
 		request_body {

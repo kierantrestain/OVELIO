@@ -7,7 +7,7 @@ export function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
-export async function readBody<T>(request: Request, schema: ZodType<T>, limit = 1024 * 1024): Promise<T> {
+export async function readBodyBytes(request: Request, limit: number): Promise<Buffer> {
   const reader = request.body?.getReader();
   if (!reader || Number(request.headers.get('content-length')) > limit) {
     throw new AppError(413, 'The request is missing data or exceeds the upload limit.');
@@ -24,9 +24,14 @@ export async function readBody<T>(request: Request, schema: ZodType<T>, limit = 
     }
     chunks.push(value);
   }
+  return Buffer.concat(chunks, bytes);
+}
+
+export async function readBody<T>(request: Request, schema: ZodType<T>, limit = 1024 * 1024): Promise<T> {
+  const body = await readBodyBytes(request, limit);
   let data: unknown;
   try {
-    data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    data = JSON.parse(body.toString('utf8'));
   } catch {
     throw new AppError(400, 'Send a valid JSON request.');
   }
