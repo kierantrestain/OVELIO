@@ -13,7 +13,7 @@ const { drainPlatformJobs } = await import('../../src/server/platform/jobs');
 const { getContact, tagContact } = await import('../../src/server/directory');
 const { setMailTransport } = await import('../../src/server/mailer');
 const { createDeal } = await import('../../src/server/records');
-const { handlePlatformEvent, webhookSignature, dryRun } = await import('../../src/server/journeys/engine');
+const { enrol, handlePlatformEvent, webhookSignature, dryRun } = await import('../../src/server/journeys/engine');
 const flows = await import('../../src/server/journeys/flows');
 const campaigns = await import('../../src/server/journeys/campaigns');
 const { validateFlow, flowTemplates, tidyLayout, buildTrackedUrl } = await import('../../src/contracts/journeys');
@@ -300,6 +300,37 @@ test('JRN-06 a dry run evaluates conditions and lists actions without side effec
   assert.match(sam.steps[1].detail, /design was not found/);
   assert.ok(!(await getContact(1))!.tags.includes('dry-run'));
   assert.equal((await db.query('SELECT 1 FROM messages')).rows.length, messages);
+});
+
+test('JRN-13 rollback creates a live snapshot without replacing the draft or moving existing enrolments', async () => {
+  const graph = (delta: number) => graphOf([node('wait', 'wait', { amount: 1, unit: 'hours' }), node('score', 'adjust_score', { delta })],
+    [['start', 'wait'], ['wait', 'score']]);
+  const flow = await flows.createFlow({ name: 'JRN-13 rollback', graph: graph(3) }, ADMIN);
+  await flows.publishFlow(flow.id, ADMIN);
+  await flows.updateFlow(flow.id, { graph: graph(6) }, ADMIN);
+  await flows.publishFlow(flow.id, ADMIN);
+  await flows.enrolContacts(flow.id, [1], ADMIN);
+  await flows.updateFlow(flow.id, { graph: graph(9) }, ADMIN);
+
+  const rolledBack = await flows.rollbackFlow(flow.id, { to: 1, expected: 2 }, ADMIN);
+  assert.equal(rolledBack.publishedVersion, 3);
+  assert.equal(rolledBack.hasUnpublishedChanges, true);
+  assert.deepEqual(rolledBack.graph, graph(9));
+  assert.deepEqual((await flows.getVersion(flow.id, 3)).graph, graph(3));
+  assert.deepEqual((await flows.getVersion(flow.id, 2)).graph, graph(6));
+  await assert.rejects(flows.rollbackFlow(flow.id, { to: 1, expected: 2 }, ADMIN), { status: 409 });
+  const event = await emitEvent({ type: 'contact.tagged', contactId: 3, properties: { tags: ['rollback-fixture'] } });
+  assert.ok(event);
+  assert.equal((await enrol({ flowId: flow.id, contactId: 3, triggerType: event.type, event, matchedVersion: 2 })).id, null);
+
+  await flows.enrolContacts(flow.id, [2], ADMIN);
+  assert.deepEqual((await enrolmentsOf(flow.id)).map(item => item.version), [2, 3]);
+  await flows.setFlowStatus(flow.id, 'pause', ADMIN);
+  const paused = await flows.rollbackFlow(flow.id, { to: 2, expected: 3 }, ADMIN);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.publishedVersion, 4);
+  assert.match((await flows.enrolContacts(flow.id, [3], ADMIN)).skipped[0].reason, /paused/);
+  await flows.setFlowStatus(flow.id, 'archive', ADMIN);
 });
 
 test('JRN-07 deal triggers move the triggering deal without re-triggering, and campaign launch emits once', async () => {

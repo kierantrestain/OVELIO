@@ -90,6 +90,7 @@ export type EnrolInput = {
   triggerType: string;
   event?: PlatformEvent | null;
   actorId?: string | null;
+  matchedVersion?: number;
 };
 
 /** Enrols one contact (or a contactless trigger) in a published flow. Never enrols twice for the same event or, for once-only flows, at all. */
@@ -101,6 +102,10 @@ export async function enrol(input: EnrolInput): Promise<{ id: string | null; rea
   }
   const version = await loadVersion(flow.id, flow.published_version);
   if (!version) throw new AppError(409, 'The published version of this workflow is missing.');
+  const event = input.event ?? null;
+  if (event && input.matchedVersion !== flow.published_version && !await matchingTrigger(version.triggers, event)) {
+    return { id: null, reason: 'The event no longer matches the active version.' };
+  }
   const contactId = input.contactId && input.contactId > 0 ? input.contactId : null;
   if (contactId && !(await getContact(contactId))) return { id: null, reason: 'That contact was not found.' };
   if (contactId) {
@@ -110,7 +115,6 @@ export async function enrol(input: EnrolInput): Promise<{ id: string | null; rea
     if (last && version.reentry === 'once') return { id: null, reason: 'Already went through this workflow (it runs once per contact).' };
     if (last && (last.status === 'active' || last.status === 'waiting')) return { id: null, reason: 'Already in this workflow.' };
   }
-  const event = input.event ?? null;
   const entryKey = version.reentry === 'once' && contactId
     ? `once:${flow.id}:${contactId}`
     : event ? `event:${flow.id}:${event.id}:${contactId ?? 0}` : `manual:${flow.id}:${contactId ?? 0}:${randomUUID()}`;
@@ -167,6 +171,12 @@ async function triggerMatches(trigger: FlowTrigger, event: PlatformEvent): Promi
   }
 }
 
+async function matchingTrigger(triggers: FlowTrigger[], event: PlatformEvent) {
+  for (const trigger of triggers) {
+    if (trigger.type === event.type && await triggerMatches(trigger, event)) return trigger;
+  }
+}
+
 /**
  * True when the event came, directly or through other flows, from this flow's own actions. A flow never triggers
  * itself in a loop: its tag, deal and task events carry source 'flow:<id>', and the chain is followed up to six hops.
@@ -192,23 +202,20 @@ async function causedByFlow(event: PlatformEvent, flowId: string): Promise<boole
 /** The lane's onPlatformEvent: enrol the event's contact in every published flow whose triggers match. Idempotent. */
 export async function handlePlatformEvent(event: PlatformEvent): Promise<void> {
   if (!(triggerSpecTypes as readonly string[]).includes(event.type)) return;
-  const flows = await db.query<{ id: string; triggers: FlowTrigger[] }>(
-    `SELECT f.id, v.triggers FROM journey_flows f
+  const flows = await db.query<{ id: string; version: number; triggers: FlowTrigger[] }>(
+    `SELECT f.id, v.version, v.triggers FROM journey_flows f
      JOIN journey_flow_versions v ON v.flow_id = f.id AND v.version = f.published_version
      WHERE f.status = 'published' AND v.triggers @> $1::jsonb`,
     [JSON.stringify([{ type: event.type }])],
   );
   for (const flow of flows.rows) {
     if (event.source === `flow:${flow.id}`) continue;
-    let matched: FlowTrigger | undefined;
-    for (const trigger of flow.triggers.filter(item => item.type === event.type)) {
-      if (await triggerMatches(trigger, event)) { matched = trigger; break; }
-    }
+    const matched = await matchingTrigger(flow.triggers, event);
     if (!matched) continue;
     const contactless = triggerSpec(matched.type).contactless;
     if (!contactless && !event.contactId) continue;
     if (await causedByFlow(event, flow.id)) continue;
-    await enrol({ flowId: flow.id, contactId: contactless ? null : event.contactId, triggerType: event.type, event });
+    await enrol({ flowId: flow.id, contactId: contactless ? null : event.contactId, triggerType: event.type, event, matchedVersion: flow.version });
   }
 }
 

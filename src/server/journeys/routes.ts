@@ -9,7 +9,7 @@ import type { Context, Entry } from '../routes/shared';
 import { dryRun, exitEnrolment, retryEnrolment } from './engine';
 import {
   createFlow, deleteFlow, duplicateFlow, enrolContacts, getEnrolment, getFlow, getVersion, listEnrolments, listFlows, publishFlow,
-  restoreVersion, setFlowStatus, updateFlow,
+  restoreVersion, rollbackFlow, setFlowStatus, updateFlow,
 } from './flows';
 import { campaignEndpoints } from './campaign-routes';
 import { flowExperiments } from './experiments';
@@ -75,6 +75,11 @@ export const journeyEndpoints: Entry[] = [
   route('POST', pattern('flows/:id/duplicate'), async context => json(await duplicateFlow(flowId(context), context.user.id), 201), 'marketer'),
   route('GET', pattern('flows/:id/versions/(\\d+)'), async context => getVersion(context.params[0], Number(context.params[1]))),
   route('POST', pattern('flows/:id/versions/(\\d+)/restore'), async context => restoreVersion(context.params[0], Number(context.params[1]), context.user.id), 'marketer'),
+  route('POST', pattern('flows/:id/versions/(\\d+)/rollback'), async ({ request, params, user }) => {
+    const version = z.number().int().positive().max(2_147_483_647);
+    const { expected } = await body(request, z.object({ expected: version }));
+    return rollbackFlow(params[0], { to: version.parse(Number(params[1])), expected }, user.id);
+  }, 'marketer'),
   route('POST', pattern('flows/:id/test'), async context => {
     const input = await body(context.request, z.object({ contactId: z.number().int().positive().nullable(), version: z.enum(['draft', 'published']).default('draft') }));
     const flow = await getFlow(flowId(context));

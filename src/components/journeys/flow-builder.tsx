@@ -344,7 +344,7 @@ function Builder({ initial }: { initial: FlowDetail }) {
 
       {tab === 'enrolments' ? <FlowEnrolments flowId={detail.id} /> : null}
       {tab === 'results' ? <FlowExperiments flowId={detail.id} /> : null}
-      {tab === 'versions' ? <FlowVersions detail={detail} onRestored={next => {
+      {tab === 'versions' ? <FlowVersions detail={detail} onRolledBack={setDetail} onRestored={next => {
         setDetail(next);
         setNodes(toRfNodes(next.graph));
         setEdges(toRfEdges(next.graph));
@@ -401,10 +401,14 @@ function FlowEnrolments({ flowId }: { flowId: string }) {
   </Panel>;
 }
 
-function FlowVersions({ detail, onRestored }: { detail: FlowDetail; onRestored: (detail: FlowDetail) => void }) {
+function FlowVersions({ detail, onRestored, onRolledBack }: {
+  detail: FlowDetail; onRestored: (detail: FlowDetail) => void; onRolledBack: (detail: FlowDetail) => void;
+}) {
   const [viewing, setViewing] = useState<number>();
+  const [confirmRollback, setConfirmRollback] = useState(false);
   const version = useResource<FlowVersion>(viewing ? `/journeys/flows/${detail.id}/versions/${viewing}` : null);
   const action = useAction();
+  const active = detail.status === 'published' || detail.status === 'paused' ? detail.publishedVersion : null;
   return <Panel title="Version history" description="Each publish saves an immutable version. Contacts finish the version they entered, even after you publish changes.">
     {detail.versions.length ? <Table data={detail.versions} idKey="version" columns={[
       { key: 'version', header: 'Version', renderCell: item => <span className="ov-actions">Version {item.version}{item.version === detail.publishedVersion ? <StatusBadge label="Live" tone="success" /> : null}</span> },
@@ -420,11 +424,22 @@ function FlowVersions({ detail, onRestored }: { detail: FlowDetail; onRestored: 
         {action.error ? <Banner status="error" title={action.error} /> : null}
         <FormActions>
           <Button label="Close" onClick={() => setViewing(undefined)} />
-          {detail.status !== 'archived' ? <Button variant="primary" label="Copy into the draft" isLoading={action.busy}
+          {detail.status !== 'archived' ? <Button label="Copy into the draft" isDisabled={action.busy}
             onClick={() => void action.run(async () => { onRestored(await api<FlowDetail>(`/journeys/flows/${detail.id}/versions/${viewing}/restore`, 'POST')); setViewing(undefined); }, `Version ${viewing} copied into the draft. Publish to make it live.`)} /> : null}
+          {active && viewing !== active ? <Button variant="primary" label="Roll back to this version" isDisabled={action.busy}
+            onClick={() => setConfirmRollback(true)} /> : null}
         </FormActions>
       </div>}
     </Modal> : null}
+    {confirmRollback && viewing && active ? <ConfirmDialog title={`Roll back to version ${viewing}?`}
+      description="New enrolments will use this version when the workflow is active. Current enrolments keep their assigned versions. You can keep editing your draft."
+      actionLabel="Roll back workflow" destructive={false} onClose={() => setConfirmRollback(false)} onConfirm={() => {
+        setConfirmRollback(false);
+        void action.run(async () => {
+          onRolledBack(await api<FlowDetail>(`/journeys/flows/${detail.id}/versions/${viewing}/rollback`, 'POST', { expected: active }));
+          setViewing(undefined);
+        }, 'Workflow version rolled back.');
+      }} /> : null}
   </Panel>;
 }
 

@@ -5,6 +5,7 @@ import type {
 import { blankGraph, describeNode, flowTemplates, nodeSpec, validateFlow } from '@/contracts/journeys';
 import { AppError } from '../config';
 import { db, transaction } from '../db';
+import type { Sql } from '../db';
 import { getContacts } from '../directory';
 import { audit } from '../events';
 import type { EnrolmentRow, FlowRow } from './engine';
@@ -98,8 +99,8 @@ export async function getFlow(id: string): Promise<FlowDetail> {
   };
 }
 
-export async function getVersion(id: string, version: number): Promise<FlowVersion> {
-  const result = await db.query<{ version: number; graph: FlowGraph; triggers: FlowTrigger[]; reentry: ReentryRule; published_at: Date; name: string | null }>(
+export async function getVersion(id: string, version: number, client: Sql = db): Promise<FlowVersion> {
+  const result = await client.query<{ version: number; graph: FlowGraph; triggers: FlowTrigger[]; reentry: ReentryRule; published_at: Date; name: string | null }>(
     `SELECT v.*, u.name FROM journey_flow_versions v LEFT JOIN users u ON u.id = v.published_by WHERE v.flow_id = $1 AND v.version = $2`, [id, version],
   );
   const row = result.rows[0];
@@ -147,32 +148,47 @@ export async function updateFlow(id: string, input: FlowInput, actorId: string |
   return getFlow(id);
 }
 
-export async function publishFlow(id: string, actorId: string | null): Promise<FlowDetail> {
-  const current = await flowRow(id);
-  if (current.status === 'archived') throw new AppError(409, 'Restore this workflow before publishing it.');
-  const errors = validateFlow(current.graph, current.triggers).filter(issue => issue.level === 'error');
-  if (errors.length) {
-    const first = errors[0];
-    const node = first.nodeId ? current.graph.nodes.find(item => item.id === first.nodeId) : undefined;
-    throw new AppError(422, `Fix ${errors.length} problem${errors.length === 1 ? '' : 's'} before publishing. ${node ? `${nodeSpec(node.type).label}: ` : ''}${first.message}`);
-  }
-  const wasPaused = current.status === 'paused';
-  await transaction(async client => {
+type Rollback = { to: number; expected: number };
+
+async function publishSnapshot(id: string, actorId: string | null, rollback?: Rollback): Promise<FlowDetail> {
+  const resume = await transaction(async client => {
+    const { rows: [current] } = await client.query<FlowRow>('SELECT * FROM journey_flows WHERE id = $1 FOR UPDATE', [id]);
+    if (!current) throw new AppError(404, 'That workflow was not found.');
+    if (current.status === 'archived') throw new AppError(409, 'Restore this workflow before publishing it.');
+    if (rollback && (current.status === 'draft' || current.published_version !== rollback.expected)) {
+      throw new AppError(409, 'The active version changed. Reload this workflow before rolling it back.');
+    }
+    if (rollback?.to === current.published_version) throw new AppError(409, 'This version is already active.');
+    const snapshot = rollback ? await getVersion(id, rollback.to, client) : current;
+    const errors = validateFlow(snapshot.graph, snapshot.triggers).filter(issue => issue.level === 'error');
+    if (errors.length) {
+      const first = errors[0];
+      const node = first.nodeId ? snapshot.graph.nodes.find(item => item.id === first.nodeId) : undefined;
+      throw new AppError(422, `Fix ${errors.length} problem${errors.length === 1 ? '' : 's'} before publishing. ${node ? `${nodeSpec(node.type).label}: ` : ''}${first.message}`);
+    }
     const next = await client.query<{ version: number }>('SELECT coalesce(max(version), 0) + 1 AS version FROM journey_flow_versions WHERE flow_id = $1', [id]);
     const version = Number(next.rows[0].version);
+    const keepPaused = Boolean(rollback && current.status === 'paused');
     await client.query(
       `INSERT INTO journey_flow_versions (flow_id, version, graph, triggers, reentry, published_by) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [id, version, JSON.stringify(current.graph), JSON.stringify(current.triggers), current.reentry, actorId],
+      [id, version, JSON.stringify(snapshot.graph), JSON.stringify(snapshot.triggers), snapshot.reentry, actorId],
     );
     await client.query(
-      `UPDATE journey_flows SET status = 'published', published_version = $2, published_at = now(), paused_at = NULL, updated_at = now() WHERE id = $1`,
-      [id, version],
+      `UPDATE journey_flows SET status = $3, published_version = $2, published_at = now(),
+       paused_at = CASE WHEN $3 = 'paused' THEN paused_at END, updated_at = now() WHERE id = $1`,
+      [id, version, keepPaused ? 'paused' : 'published'],
     );
-    await audit(actorId, 'publish', 'flow', id, `${current.name} · version ${version}`, client);
+    await audit(actorId, rollback ? 'rollback' : 'publish', 'flow', id,
+      rollback ? `${current.name} · version ${version} from version ${rollback.to}` : `${current.name} · version ${version}`, client);
+    return !keepPaused && current.status === 'paused';
   });
-  if (wasPaused) await resumeHeld(id);
+  if (resume) await resumeHeld(id);
   return getFlow(id);
 }
+
+export const publishFlow = (id: string, actorId: string | null) => publishSnapshot(id, actorId);
+
+export const rollbackFlow = (id: string, rollback: Rollback, actorId: string | null) => publishSnapshot(id, actorId, rollback);
 
 export async function setFlowStatus(id: string, action: 'pause' | 'resume' | 'archive' | 'restore', actorId: string | null): Promise<FlowDetail> {
   const current = await flowRow(id);
