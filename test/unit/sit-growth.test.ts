@@ -59,7 +59,7 @@ test('SIT-12 the server enforces rules: hidden fields are never required or stor
 
 test('SIT-13 multi-step forms render steps with progress, and progressive profiling skips what a recognised visitor already gave', async () => {
   const created = await forms.createForm({ name: 'SIT multi-step', fields: qualifying, settings: { steps: [{ title: 'About you' }, { title: 'Your team' }] } }, user);
-  const row = (await db.query('SELECT * FROM forms WHERE id = $1', [created.id])).rows[0];
+  const row = (await db.query<import('../../src/server/sites/data').FormRow>('SELECT * FROM forms WHERE id = $1', [created.id])).rows[0];
   const html = renderFormHtml(row, { action: '/submit' });
   assert.match(html, /data-steps="2"/);
   assert.equal((html.match(/<fieldset class="ovf-step"/g) ?? []).length, 2);
@@ -85,4 +85,37 @@ test('SIT-13 multi-step forms render steps with progress, and progressive profil
   assert.doesNotMatch(served, /name="company"/);
   const stranger = await (await pub.servePage(new Request('http://localhost/s/sit-multi'), 'sit-multi')).text();
   assert.match(stranger, /name="company"/);
+});
+
+test('SIT-14 rollback republishes a past snapshot; a changed slug redirects with 301; sitemap and robots list live pages', async () => {
+  const created = await pages.createPage({ name: 'SIT rollback', templateKey: 'blank', slug: 'sit-rollback' }, user);
+  const design = await pages.loadDesign((await pages.getPage(created.id)).designId);
+  await pages.saveDesign(design.designId, { version: design.version, document: {}, html: '<section><h1>First launch</h1></section>', css: design.css }, user);
+  await pages.publishPage(created.id, user);
+  const second = await pages.loadDesign(design.designId);
+  await pages.saveDesign(design.designId, { version: second.version, document: {}, html: '<section><h1>Second launch</h1></section>', css: design.css }, user);
+  await pages.publishPage(created.id, user);
+  const history = await pages.listPublications(created.id);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].live, true);
+  assert.match(await (await pub.servePage(new Request('http://localhost/s/sit-rollback'), 'sit-rollback')).text(), /Second launch/);
+  await pages.restorePublication(created.id, history[1].id, user);
+  assert.match(await (await pub.servePage(new Request('http://localhost/s/sit-rollback'), 'sit-rollback')).text(), /First launch/, 'the old snapshot is live again');
+  assert.equal((await pages.listPublications(created.id))[0].label.startsWith('Restored'), true);
+
+  const moved = await pages.updatePageSettings(created.id, { slug: 'sit-rollback-new' }, user);
+  assert.equal(moved.redirects[0].from, '/s/sit-rollback');
+  const redirect = await pub.servePage(new Request('http://localhost/s/sit-rollback?utm_source=mail'), 'sit-rollback');
+  assert.equal(redirect.status, 301);
+  assert.equal(redirect.headers.get('location'), '/s/sit-rollback-new?utm_source=mail');
+  assert.equal((await pages.getPage(created.id)).redirects[0].hits, 1);
+  await pages.updatePageSettings(created.id, { slug: 'sit-rollback' }, user);
+  assert.equal((await pub.servePage(new Request('http://localhost/s/sit-rollback'), 'sit-rollback')).status, 200, 'moving back removes the loop');
+
+  const sitemap = await pub.sitemapXml('https://pages.example');
+  assert.match(sitemap!, /<loc>https:\/\/pages\.example\/s\/sit-rollback<\/loc>/);
+  await pages.updatePageSettings(created.id, { noindex: true }, user);
+  assert.doesNotMatch((await pub.sitemapXml('https://pages.example'))!, /sit-rollback</, 'noindex pages stay out of the sitemap');
+  assert.match(pub.robotsTxt('https://pages.example'), /Allow: \/s\/\nDisallow: \/\n\nSitemap: https:\/\/pages\.example\/sitemap\.xml/);
+  assert.match(pub.robotsTxt('', 'go.example.com'), /Sitemap: https:\/\/go\.example\.com\/sitemap\.xml/);
 });

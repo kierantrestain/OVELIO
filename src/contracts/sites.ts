@@ -81,7 +81,14 @@ export type PageSettings = {
   controlWeight: number;
 };
 
-export type LandingPageDetail = LandingPageSummary & PageSettings & { variants: PageVariant[]; funnels: { id: string; name: string; stepIndex: number }[] };
+export type LandingPageDetail = LandingPageSummary & PageSettings & {
+  variants: PageVariant[];
+  funnels: { id: string; name: string; stepIndex: number }[];
+  /** Old addresses that permanently redirect here. */
+  redirects: { id: string; from: string; hits: number }[];
+};
+
+export type PagePublication = { id: string; variantKey: string; designVersion: number | null; label: string; publishedAt: string; publishedBy: string | null; live: boolean };
 
 /** What the builder loads and saves. `version` is the optimistic-lock counter of the design row. */
 export type PageDesign = {

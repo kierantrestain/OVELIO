@@ -1,7 +1,7 @@
 // Landing pages (Lane 3): create from a template (a designs row of kind 'page'), autosave with an optimistic version,
 // version history, publish a sanitised snapshot, A/B variants and the signed-in draft preview.
 import type { User } from '@/contracts';
-import type { DesignVersion, LandingPageDetail, LandingPageSummary, PageDesign, PageSettings, PageVariant } from '@/contracts/sites';
+import type { DesignVersion, LandingPageDetail, LandingPageSummary, PageDesign, PagePublication, PageSettings, PageVariant } from '@/contracts/sites';
 import { pageTemplate } from '@/templates/pages';
 import { AppError } from '../config';
 import { db, transaction } from '../db';
@@ -140,15 +140,18 @@ export async function getPage(id: string): Promise<LandingPageDetail> {
   const row = (await db.query<ListRow>(
     'SELECT p.*, d.version AS design_version, d.updated_at AS design_updated_at FROM landing_pages p JOIN designs d ON d.id = p.design_id WHERE p.id = $1', [id],
   )).rows[0];
-  const [domains, metrics, variants, funnels] = await Promise.all([
+  const [domains, metrics, variants, funnels, redirects] = await Promise.all([
     domainsById([page.domain_id]), pageMetrics([id]),
     db.query<VariantRow>('SELECT * FROM page_variants WHERE page_id = $1 ORDER BY key', [id]),
     db.query<{ id: string; name: string; position: number }>('SELECT f.id, f.name, s.position FROM funnel_steps s JOIN funnels f ON f.id = s.funnel_id WHERE s.page_id = $1 AND f.status <> \'archived\'', [id]),
+    db.query<{ id: string; from_slug: string; hostname: string | null; hits: number }>(
+      'SELECT r.id, r.from_slug, d.hostname, r.hits FROM page_redirects r LEFT JOIN site_domains d ON d.id = r.domain_id WHERE r.page_id = $1 ORDER BY r.created_at DESC', [id]),
   ]);
   return {
     ...toSummary(row, domains, metrics),
     seoTitle: page.seo_title, seoDescription: page.seo_description, ogImageUrl: page.og_image_url, canonicalUrl: page.canonical_url,
     faviconUrl: page.favicon_url, noindex: page.noindex, utmDefaults: page.utm_defaults ?? {}, abEnabled: page.ab_enabled, controlWeight: page.control_weight,
+    redirects: redirects.rows.map(row => ({ id: row.id, from: row.hostname ? `https://${row.hostname}/${row.from_slug}` : `/s/${row.from_slug}`, hits: row.hits })),
     variants: variants.rows.map(toVariant), funnels: funnels.rows.map(item => ({ id: item.id, name: item.name, stepIndex: item.position })),
   };
 }
@@ -161,7 +164,17 @@ export async function updatePageSettings(id: string, input: Partial<PageSettings
     domainId: input.domainId !== undefined ? input.domainId : page.domain_id,
   };
   if (next.domainId) await requireDomain(next.domainId, db);
-  if (next.slug !== page.slug || next.domainId !== page.domain_id) await assertSlugFree(next.slug, next.domainId, id, db);
+  if (next.slug !== page.slug || next.domainId !== page.domain_id) {
+    await assertSlugFree(next.slug, next.domainId, id, db);
+    // A page that has been live keeps its old address working with a permanent redirect.
+    if (page.published_at) {
+      await db.query(
+        `INSERT INTO page_redirects (domain_id, from_slug, page_id) VALUES ($1, $2, $3)
+         ON CONFLICT ((coalesce(domain_id::text, '')), from_slug) DO UPDATE SET page_id = EXCLUDED.page_id, hits = 0, created_at = now()`,
+        [page.domain_id, page.slug, id]);
+    }
+    await db.query(`DELETE FROM page_redirects WHERE coalesce(domain_id::text, '') = coalesce($1::text, '') AND from_slug = $2`, [next.domainId, next.slug]);
+  }
   await db.query(
     `UPDATE landing_pages SET name = $2, slug = $3, domain_id = $4, seo_title = coalesce($5, seo_title), seo_description = coalesce($6, seo_description),
        og_image_url = coalesce($7, og_image_url), canonical_url = coalesce($8, canonical_url), favicon_url = coalesce($9, favicon_url),
@@ -254,6 +267,12 @@ async function publishableSnapshot(designId: string, client: Sql) {
   const html = sanitizePageHtml(design.source || design.html);
   if (!html.replace(/<[^>]+>/g, '').trim() && !/<(img|svg|iframe)/.test(html)) throw new AppError(409, 'Add some content to the page before publishing it.');
   if (unboundFormBlocks(design.source || design.html)) throw new AppError(409, 'A form block is not linked to a form. Select it in the builder and choose a form, then publish again.');
+  await assertFormsLive(html, client);
+  return { html, css: sanitizePageCss(design.css), version: design.version };
+}
+
+/** Every form a snapshot shows must still exist and be published. */
+async function assertFormsLive(html: string, client: Sql) {
   const formIds = boundFormIds(html);
   if (formIds.length) {
     const live = await client.query<{ id: string; status: string; name: string }>('SELECT id, status, name FROM forms WHERE id = ANY($1::uuid[])', [formIds]);
@@ -262,7 +281,51 @@ async function publishableSnapshot(designId: string, client: Sql) {
     const off = live.rows.find(row => row.status !== 'published');
     if (off) throw new AppError(409, `The form “${off.name}” is not published. Publish it in Sites › Forms, or choose another form.`);
   }
-  return { html, css: sanitizePageCss(design.css), version: design.version };
+}
+
+const recordPublication = (client: Sql, pageId: string, variantKey: string, snap: { html: string; css: string; version: number | null }, label: string, userId: string | null) => client.query(
+  'INSERT INTO page_publications (page_id, variant_key, design_version, html, css, label, published_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+  [pageId, variantKey, snap.version, snap.html, snap.css, label, userId],
+);
+
+export async function listPublications(pageId: string): Promise<PagePublication[]> {
+  const page = await requirePage(pageId);
+  const rows = await db.query<{ id: string; variant_key: string; design_version: number | null; label: string; published_at: Date; name: string | null }>(
+    `SELECT p.id, p.variant_key, p.design_version, p.label, p.published_at, u.name FROM page_publications p LEFT JOIN users u ON u.id = p.published_by
+     WHERE p.page_id = $1 ORDER BY p.published_at DESC, p.id DESC LIMIT 60`, [pageId],
+  );
+  const seen = new Set<string>();
+  return rows.rows.map(row => {
+    const live = page.status === 'published' && !seen.has(row.variant_key);
+    seen.add(row.variant_key);
+    return { id: row.id, variantKey: row.variant_key, designVersion: row.design_version, label: row.label, publishedAt: iso(row.published_at)!, publishedBy: row.name, live };
+  });
+}
+
+/** Rollback: republishes a past snapshot exactly as it was. The design being edited is left alone. */
+export async function restorePublication(pageId: string, publicationId: string, user: User) {
+  await transaction(async client => {
+    const page = await requirePage(pageId, client);
+    const row = uuidPattern.test(publicationId)
+      ? (await client.query<{ variant_key: string; design_version: number | null; html: string; css: string; label: string; published_at: Date }>(
+        'SELECT variant_key, design_version, html, css, label, published_at FROM page_publications WHERE id = $1 AND page_id = $2', [publicationId, pageId])).rows[0]
+      : undefined;
+    if (!row) throw new AppError(404, 'That published version was not found.');
+    await assertFormsLive(row.html, client);
+    if (row.variant_key === 'a') {
+      await client.query(
+        `UPDATE landing_pages SET status = 'published', published_html = $2, published_css = $3, published_version = $4, published_at = now(), updated_by = $5, updated_at = now() WHERE id = $1`,
+        [pageId, row.html, row.css, row.design_version, user.id]);
+    } else {
+      const updated = await client.query('UPDATE page_variants SET published_html = $3, published_css = $4, published_version = $5, published_at = now(), updated_at = now() WHERE page_id = $1 AND key = $2 RETURNING id',
+        [pageId, row.variant_key, row.html, row.css, row.design_version]);
+      if (!updated.rows.length) throw new AppError(409, 'That variant was removed, so its versions cannot be restored.');
+    }
+    const when = new Date(row.published_at).toISOString().slice(0, 16).replace('T', ' ');
+    await recordPublication(client, pageId, row.variant_key, { html: row.html, css: row.css, version: row.design_version }, `Restored the version published ${when} UTC`, user.id);
+    await audit(user.id, 'rollback', 'page', pageId, `${page.name}: ${row.label}`, client);
+  });
+  return getPage(pageId);
 }
 
 export async function publishPage(id: string, user: User) {
@@ -274,12 +337,14 @@ export async function publishPage(id: string, user: User) {
       [id, control.html, control.css, control.version, user.id],
     );
     await snapshot(client, page.design_id, `Published (version ${control.version})`, user.id);
+    await recordPublication(client, id, 'a', control, `Published version ${control.version}`, user.id);
     const variants = await client.query<VariantRow>('SELECT * FROM page_variants WHERE page_id = $1', [id]);
     for (const variant of variants.rows) {
       const snap = await publishableSnapshot(variant.design_id, client);
       await client.query('UPDATE page_variants SET published_html = $2, published_css = $3, published_version = $4, published_at = now(), updated_at = now() WHERE id = $1',
         [variant.id, snap.html, snap.css, snap.version]);
       await snapshot(client, variant.design_id, `Published (version ${snap.version})`, user.id);
+      await recordPublication(client, id, variant.key, snap, `${variant.name}: published version ${snap.version}`, user.id);
     }
     await audit(user.id, 'publish', 'page', id, page.name, client);
   });
@@ -379,4 +444,9 @@ export async function searchPages(q: string) {
     `SELECT id, name, slug, status FROM landing_pages WHERE status <> 'archived' AND (name ILIKE '%' || $1 || '%' OR slug ILIKE '%' || $1 || '%') ORDER BY updated_at DESC LIMIT 5`, [q],
   );
   return rows.rows;
+}
+
+export async function deleteRedirect(pageId: string, redirectId: string) {
+  if (!uuidPattern.test(redirectId)) throw new AppError(404, 'That redirect was not found.');
+  await db.query('DELETE FROM page_redirects WHERE id = $1 AND page_id = $2', [redirectId, pageId]);
 }

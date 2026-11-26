@@ -79,7 +79,7 @@ export function chooseVariant(page: Pick<PageRow, 'id' | 'ab_enabled' | 'control
 
 export async function servePage(request: Request, slug: string, hostname?: string | null): Promise<Response> {
   const found = await findPublishedPage(slug, hostname);
-  if (!found) return notFoundPage();
+  if (!found) return (await redirectFor(request, slug, hostname)) ?? notFoundPage();
   const { page, domain } = found;
   const url = new URL(request.url);
   const variants = (await db.query<VariantRow>('SELECT * FROM page_variants WHERE page_id = $1 ORDER BY key', [page.id])).rows;
@@ -411,4 +411,52 @@ export async function embedPayload(formId: string, origin: string) {
   const form = await getForm(formId);
   if (!form || form.status !== 'published') return null;
   return { html: renderFormHtml(form as FormRow, { action: `${origin}/api/public/forms/${form.id}/submit` }) };
+}
+
+// ── Redirects, sitemaps and robots ────────────────────────────────────────────────────────────────────────────
+
+/** 301 from an old page address to the page's current one, keeping the query string (UTM parameters). */
+export async function redirectFor(request: Request, slug: string, hostname?: string | null): Promise<Response | null> {
+  if (!/^[a-z0-9-]{1,80}$/.test(slug)) return null;
+  let domain: DomainRow | null = null;
+  if (hostname) {
+    domain = (await db.query<DomainRow>(`SELECT * FROM site_domains WHERE hostname = $1 AND status = 'verified'`, [hostname.toLowerCase()])).rows[0] ?? null;
+    if (!domain) return null;
+  }
+  const row = (await db.query<PageRow & { redirect_id: string }>(
+    `SELECT p.*, r.id AS redirect_id FROM page_redirects r JOIN landing_pages p ON p.id = r.page_id
+     WHERE coalesce(r.domain_id::text, '') = coalesce($1::text, '') AND r.from_slug = $2 AND p.status = 'published'`, [domain?.id ?? null, slug],
+  )).rows[0];
+  if (!row) return null;
+  await db.query('UPDATE page_redirects SET hits = hits + 1 WHERE id = $1', [row.redirect_id]);
+  const target = row.domain_id ? (row.domain_id === domain?.id ? domain : (await db.query<DomainRow>('SELECT * FROM site_domains WHERE id = $1', [row.domain_id])).rows[0] ?? null) : null;
+  let location = pageUrl(row, target);
+  if (domain && target?.id === domain.id) location = new URL(location).pathname;
+  return new Response(null, { status: 301, headers: { location: location + new URL(request.url).search, 'cache-control': 'public, max-age=300' } });
+}
+
+const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** sitemap.xml of the published, indexable pages on the workspace address or on one verified domain. */
+export async function sitemapXml(origin: string, hostname?: string | null): Promise<string | null> {
+  let rows: (PageRow & { home: boolean })[];
+  let base = origin;
+  if (hostname) {
+    const domain = (await db.query<DomainRow>(`SELECT * FROM site_domains WHERE hostname = $1 AND status = 'verified'`, [hostname.toLowerCase()])).rows[0];
+    if (!domain) return null;
+    base = `https://${domain.hostname}`;
+    rows = (await db.query<PageRow & { home: boolean }>(
+      `SELECT *, id = $2 AS home FROM landing_pages WHERE domain_id = $1 AND status = 'published' AND NOT noindex ORDER BY slug`, [domain.id, domain.home_page_id])).rows;
+  } else {
+    rows = (await db.query<PageRow & { home: boolean }>(`SELECT *, false AS home FROM landing_pages WHERE domain_id IS NULL AND status = 'published' AND NOT noindex ORDER BY slug`)).rows;
+  }
+  const urls = rows.map(row => `<url><loc>${xml(`${base}${hostname ? (row.home ? '/' : `/${row.slug}`) : `/s/${row.slug}`}`)}</loc>${row.published_at ? `<lastmod>${new Date(row.published_at).toISOString()}</lastmod>` : ''}</url>`);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.join('')}</urlset>\n`;
+}
+
+/** robots.txt: on the workspace address only published pages (/s/) may be crawled; a publishing domain is all pages. */
+export function robotsTxt(origin: string, hostname?: string | null) {
+  return hostname
+    ? `User-agent: *\nAllow: /\n\nSitemap: https://${hostname}/sitemap.xml\n`
+    : `User-agent: *\nAllow: /s/\nDisallow: /\n\nSitemap: ${origin}/sitemap.xml\n`;
 }

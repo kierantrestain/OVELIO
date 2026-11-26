@@ -16,7 +16,7 @@ import { addDomain, listDomains, removeDomain, updateDomain, verifyDomain } from
 import { createForm, deleteForm, duplicateForm, formInput, getFormDetail, listForms, listSubmissions, searchForms, submissionsCsv, updateForm } from './forms';
 import { deleteFunnel, funnelStats, getFunnel, listFunnels, pageStats, saveFunnel, searchFunnels } from './funnels';
 import {
-  addVariant, createPage, deletePage, deleteVariant, designFor, draftPreview, duplicatePage, getPage, listPages, listVersions, loadDesign,
+  addVariant, createPage, deletePage, deleteRedirect, deleteVariant, listPublications, restorePublication, designFor, draftPreview, duplicatePage, getPage, listPages, listVersions, loadDesign,
   publishPage, restoreVersion, saveDesign, saveNamedVersion, searchPages, setPageStatus, updatePageSettings, updateVariant,
 } from './pages';
 import { seedSites } from './seed';
@@ -143,6 +143,12 @@ export const sitesModule: LaneModule = {
     route('GET', path('pages/:id/preview'), async context => new Response(await draftPreview(pageId(context), variantKey(context.query)), {
       headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' },
     }), 'marketer'),
+    route('GET', path('pages/:id/publications'), async context => ({ items: await listPublications(pageId(context)) }), 'marketer'),
+    route('POST', path('pages/:id/publications/:id/restore'), async context => restorePublication(pageId(context), context.params[1], context.user), 'marketer'),
+    route('DELETE', path('pages/:id/redirects/:id'), async context => {
+      await deleteRedirect(pageId(context), context.params[1]);
+      return new Response(null, { status: 204 });
+    }, 'marketer'),
     route('GET', path('pages/:id/stats'), async context => pageStats(pageId(context), days(context.query))),
     route('POST', path('pages/:id/variants'), async context => addVariant(pageId(context), context.user), 'marketer'),
     route('PATCH', path('pages/:id/variants/([b-h])'), async context => updateVariant(pageId(context), context.params[1],
