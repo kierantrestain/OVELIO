@@ -82,7 +82,7 @@ CREATE TABLE rev_quotes (
   deposit_percent numeric(5, 2) NOT NULL DEFAULT 0 CHECK (deposit_percent >= 0 AND deposit_percent <= 100),
   valid_until date,
   status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent', 'accepted', 'declined', 'void')),
-  -- Unguessable public link token (32 random bytes): /q/<token>.
+  -- Unguessable public link token (24 random bytes, base64url): /proposal/<token>.
   token text UNIQUE,
   sent_at timestamptz,
   first_viewed_at timestamptz,
@@ -126,7 +126,7 @@ CREATE TABLE rev_invoices (
   issued_at timestamptz NOT NULL DEFAULT now(),
   due_date date,
   paid_at timestamptz,
-  -- Unguessable public link token: /i/<token>.
+  -- Unguessable public link token: /pay/<token>.
   token text UNIQUE,
   stripe_session_id text UNIQUE,
   stripe_payment_intent text,

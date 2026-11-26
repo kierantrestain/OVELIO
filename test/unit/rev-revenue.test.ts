@@ -41,7 +41,7 @@ async function call<T>(method: string, path: string, body?: unknown, query = '')
   return result as T;
 }
 
-const form = (values: Record<string, string>) => new Request('http://localhost/q/x', {
+const form = (values: Record<string, string>) => new Request('http://localhost/proposal/x', {
   method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'test-browser', 'x-forwarded-for': '203.0.113.9' },
   body: new URLSearchParams(values),
 });
@@ -107,9 +107,9 @@ test('REV-03 proposal journey: draft from a deal, send, view, sign, deal won, de
   assert.equal(delivery.status, 'not_sent', 'the preview stores the email instead of claiming delivery');
   assert.match(delivery.reason, /developer preview/);
   await assert.rejects(call('PATCH', `revenue/quotes/${draft.id}`, { title: 'Changed' }), /cannot change/);
-  const token = quote.publicUrl!.split('/q/')[1];
+  const token = quote.publicUrl!.split('/proposal/')[1];
 
-  const page = await (await serveQuote(token, new Request('http://localhost/q/' + token))).text();
+  const page = await (await serveQuote(token, new Request('http://localhost/proposal/' + token))).text();
   assert.ok(page.includes('Plan for &lt;b&gt;growth&lt;/b&gt;'), 'proposal text is escaped');
   assert.ok(page.includes('Accept proposal'));
   const refused = await (await postQuote(token, form({ action: 'accept', signerName: 'Claire', signerEmail: contact.email }))).text();
@@ -179,7 +179,7 @@ test('REV-05 webhook payment is recorded once, settles the deposit, starts onboa
   await receiveStripeWebhook(signed(refund(50000, 'evt_refund_2'), 'whsec_test_secret'));
   const refunded = await call<Invoice>('GET', `revenue/invoices/${invoice.id}`);
   assert.equal(refunded.amountRefunded, 500, '200 then a further 300; the repeated total adds nothing');
-  const page = await (await serveInvoice(paid.publicUrl!.split('/i/')[1], new Request('http://localhost/i/x'))).text();
+  const page = await (await serveInvoice(paid.publicUrl!.split('/pay/')[1], new Request('http://localhost/pay/x'))).text();
   assert.ok(page.includes('Paid'));
 });
 
@@ -212,7 +212,7 @@ test('REV-08 manual payments, balance invoices, declines and the void guard', as
   const deal = await createDeal({ name: 'Decline and balance', amount: 1000, source: 'test' });
   const draft = await call<Quote>('POST', 'revenue/quotes', { dealId: deal.id });
   const { quote } = await call<{ quote: Quote }>('POST', `revenue/quotes/${draft.id}/send`, { email: false });
-  const token = quote.publicUrl!.split('/q/')[1];
+  const token = quote.publicUrl!.split('/proposal/')[1];
   const declined = await (await postQuote(token, form({ action: 'decline', reason: 'Budget moved to Q3' }))).text();
   assert.ok(declined.includes('marked as declined'));
   assert.equal((await call<Quote>('GET', `revenue/quotes/${draft.id}`)).declineReason, 'Budget moved to Q3');
@@ -221,7 +221,7 @@ test('REV-08 manual payments, balance invoices, declines and the void guard', as
   assert.notEqual(revision.number, draft.number);
   await call('PATCH', `revenue/quotes/${revision.id}`, { depositPercent: 40 });
   const sent = (await call<{ quote: Quote }>('POST', `revenue/quotes/${revision.id}/send`, { email: false })).quote;
-  await postQuote(sent.publicUrl!.split('/q/')[1], form({ action: 'accept', signerName: 'Test Signer', signerEmail: 'signer@example.com', agree: 'true' }));
+  await postQuote(sent.publicUrl!.split('/proposal/')[1], form({ action: 'accept', signerName: 'Test Signer', signerEmail: 'signer@example.com', agree: 'true' }));
   const balance = await call<Invoice>('POST', 'revenue/invoices', { quoteId: revision.id, kind: 'balance' });
   assert.equal(balance.total, 600, '1000 minus the 40% deposit');
   await assert.rejects(call('POST', 'revenue/invoices', { quoteId: revision.id, kind: 'balance' }), /invoiced in full/);
@@ -249,7 +249,7 @@ test('REV-09 a workflow triggered by an accepted proposal enrols the signer and 
   const deal = await createDeal({ name: 'Harbourline retainer', amount: 900, contactId: contact.id, source: 'test' });
   const draft = await call<Quote>('POST', 'revenue/quotes', { dealId: deal.id });
   const { quote } = await call<{ quote: Quote }>('POST', `revenue/quotes/${draft.id}/send`, { email: false });
-  await postQuote(quote.publicUrl!.split('/q/')[1], form({ action: 'accept', signerName: 'Daniel Price', signerEmail: contact.email, agree: 'true' }));
+  await postQuote(quote.publicUrl!.split('/proposal/')[1], form({ action: 'accept', signerName: 'Daniel Price', signerEmail: contact.email, agree: 'true' }));
   for (let i = 0; i < 30 && await drainPlatformJobs({ maxJobs: 50, budgetMs: 10_000 }); i += 1) { /* drain */ }
   const enrolments = await db.query<{ status: string }>('SELECT status FROM journey_enrolments WHERE flow_id = $1 AND contact_id = $2', [flow.id, contact.id]);
   assert.equal(enrolments.rows.length, 1);

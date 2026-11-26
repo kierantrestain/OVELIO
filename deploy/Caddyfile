@@ -127,8 +127,10 @@ http://127.0.0.1:9900 {
 	}
 
 	# SIT: published pages, hosted forms and the public form/tracking endpoints never receive the console session.
+	# Wave two: proposals (/proposal/), invoices (/pay/), email click redirects (/r/) and booking pages (/book/).
+	# /q/ and /p/ belong to the analytics engine's tracked links above, so OVELIO's public pages never use them.
 	@ovelioPublic {
-		path /s/* /f/* /api/public/*
+		path /s/* /f/* /api/public/* /proposal/* /pay/* /r/* /book/*
 	}
 	handle @ovelioPublic {
 		request_body {

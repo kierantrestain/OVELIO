@@ -120,7 +120,7 @@ export function toQuote(row: QuoteRow, invoices: InvoiceSummary[]): Quote {
   const lines = readLines(row.lines);
   return {
     ...toQuoteSummary(row), intro: row.intro, terms: row.terms, lines, totals: totals(lines), depositPercent: num(row.deposit_percent),
-    publicUrl: row.token && row.status !== 'draft' ? `${origin()}/q/${row.token}` : null, declineReason: row.decline_reason,
+    publicUrl: row.token && row.status !== 'draft' ? `${origin()}/proposal/${row.token}` : null, declineReason: row.decline_reason,
     signerName: row.signer_name, signerEmail: row.signer_email, documentHash: row.document_hash, firstViewedAt: iso(row.first_viewed_at), invoices,
   };
 }
@@ -144,7 +144,7 @@ export function toInvoiceSummary(row: InvoiceRow, today = new Date().toISOString
     balance: row.status === 'void' ? 0 : Math.max(0, Math.round((total - paid) * 100) / 100), issuedAt: iso(row.issued_at)!, dueDate,
     paidAt: iso(row.paid_at), contactId: row.contact_id == null ? null : Number(row.contact_id), contactName: row.contact_name,
     contactEmail: row.contact_email, companyName: row.company_name, dealId: row.deal_id, quoteId: row.quote_id, quoteNumber: row.quote_number,
-    publicUrl: row.token ? `${origin()}/i/${row.token}` : null, paymentUrl: row.payment_url,
+    publicUrl: row.token ? `${origin()}/pay/${row.token}` : null, paymentUrl: row.payment_url,
   };
 }
 

@@ -70,7 +70,7 @@ export async function runRenewal(data: { subscriptionId: string }) {
     return { invoice, sub };
   });
   if (issued?.sub.contact_email) {
-    const link = `${origin()}/i/${issued.invoice.token}`;
+    const link = `${origin()}/pay/${issued.invoice.token}`;
     await sendEmail({
       to: issued.sub.contact_email, subject: `Invoice ${issued.invoice.number}`, category: 'transactional', source: `invoice:${issued.invoice.id}`,
       contactId: issued.sub.contact_id ? Number(issued.sub.contact_id) : null, idempotencyKey: `invoice.email:${issued.invoice.id}`,

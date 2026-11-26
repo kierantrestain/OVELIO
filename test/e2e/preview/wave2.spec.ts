@@ -36,7 +36,7 @@ test('IQ-20 revenue: line items → proposal → client signs on a phone → dep
   await page.getByRole('button', { name: 'Send proposal' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Create link' }).click();
   const link = await page.getByLabel('Client link').inputValue();
-  expect(link).toMatch(/\/q\/[A-Za-z0-9_-]{32}$/);
+  expect(link).toMatch(/\/proposal\/[A-Za-z0-9_-]{32}$/);
 
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const client = await phone.newPage();
@@ -76,7 +76,7 @@ test('IQ-20 revenue: line items → proposal → client signs on a phone → dep
 });
 
 anonymous('IQ-21 public proposal links: an unknown or malformed token shows a not-found page, never another proposal', async ({ page }) => {
-  for (const path of ['/q/' + 'A'.repeat(32), '/q/short', '/i/' + 'B'.repeat(32)]) {
+  for (const path of ['/proposal/' + 'A'.repeat(32), '/proposal/short', '/pay/' + 'B'.repeat(32)]) {
     const response = await page.goto(path);
     expect(response?.status(), path).toBe(404);
     await expect(page.getByRole('heading', { name: 'Page not found' })).toBeVisible();

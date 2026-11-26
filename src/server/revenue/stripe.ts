@@ -44,7 +44,7 @@ export async function createCheckout(invoice: InvoiceRow): Promise<string> {
   const balance = Math.round((Number(invoice.total) - Number(invoice.amount_paid)) * 100) / 100;
   if (invoice.status !== 'open' || balance <= 0) throw new AppError(409, `${invoice.number} has nothing left to pay.`);
   const minor = toMinorUnits(balance, invoice.currency);
-  const page = `${origin()}/i/${invoice.token}`;
+  const page = `${origin()}/pay/${invoice.token}`;
   // Same invoice, balance and hour → Stripe returns the same session instead of a duplicate.
   const key = `checkout:${invoice.id}:${minor}:${new Date().toISOString().slice(0, 13)}`;
   const session = await stripePost<{ id: string; url: string }>('checkout/sessions', {

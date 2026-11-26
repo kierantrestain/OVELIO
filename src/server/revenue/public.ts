@@ -1,4 +1,4 @@
-// Public proposal (/q/<token>) and invoice (/i/<token>) pages. Server-rendered, no script, branded with the
+// Public proposal (/proposal/<token>) and invoice (/pay/<token>) pages. Server-rendered, no script, branded with the
 // workspace name and accent. Every value is escaped; the token in the address is the only credential.
 import type { CompanySettings } from '@/contracts';
 import type { Line } from '@/contracts/revenue';
@@ -81,7 +81,7 @@ async function quotePage(row: QuoteRow, notice?: { text: string; error?: boolean
   } else if (row.status === 'accepted') {
     const invoice = (await db.query<{ token: string; number: string; status: string }>(`SELECT token, number, status FROM rev_invoices WHERE quote_id = $1 AND status <> 'void' ORDER BY issued_at LIMIT 1`, [row.id])).rows[0];
     action = `<section class="card"><h2>Signed</h2><p>Accepted by <strong>${e(row.signer_name)}</strong> (${e(row.signer_email)}) on ${e(new Date(row.accepted_at!).toUTCString())}.</p>
-${invoice ? `<p><a class="button" href="/i/${e(invoice.token)}">${invoice.status === 'paid' ? 'View receipt' : 'View and pay invoice'} ${e(invoice.number)}</a></p>` : ''}
+${invoice ? `<p><a class="button" href="/pay/${e(invoice.token)}">${invoice.status === 'paid' ? 'View receipt' : 'View and pay invoice'} ${e(invoice.number)}</a></p>` : ''}
 <p class="fine">Signature record: SHA-256 of the accepted content <code>${e(row.document_hash)}</code>. Print or save this page for your records.</p></section>`;
   } else if (expired) {
     action = `<section class="card"><p>This proposal expired on ${e(longDate(validUntil))}. Reply to the email you received to ask for an updated one.</p></section>`;
