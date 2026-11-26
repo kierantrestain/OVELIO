@@ -25,8 +25,11 @@ export async function dispatchEvent(data: { eventId: string }) {
 export async function deliverEvent(data: { eventId: string; lane: LaneModule['name'] }) {
   const lane = laneModules.find(item => item.name === data.lane);
   if (!lane) return;
-  const result = await db.query(`SELECT ${eventColumns} FROM events WHERE id = $1`, [data.eventId]);
+  const result = await db.query(`SELECT ${eventColumns}, mailbox_id FROM events WHERE id = $1`, [data.eventId]);
   const row = result.rows[0];
   if (!row) return;
+  // Mailbox-private events drive CRM reply handling. Workspace workflows and their
+  // outbound webhook steps must not receive private message fields.
+  if (row.mailbox_id && (lane.name !== 'crm' || row.type !== 'email.replied')) return;
   await lane.onPlatformEvent(toEvent(row as Parameters<typeof toEvent>[0]));
 }
