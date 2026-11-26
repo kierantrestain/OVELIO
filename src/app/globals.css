@@ -259,3 +259,9 @@ body { background: var(--color-background-body); color: var(--color-text-primary
 [data-ov-density="compact"] .ov-table > table :is(th, td) { padding: 4px 8px; }
 [data-ov-density="compact"] .ov-rows > li { padding-block: 6px; }
 [data-ov-density="compact"] .ov-skeleton-row { padding-block: 8px; }
+
+/* Configurable Overview */
+.ov-dash { display: grid; gap: var(--ov-gap); grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.ov-dash-item { min-width: 0; }
+.ov-dash-item--kpis { grid-column: 1 / -1; }
+@media (max-width: 1100px) { .ov-dash { grid-template-columns: minmax(0, 1fr); } }
