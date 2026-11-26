@@ -63,7 +63,9 @@ export function heading(content: string, size = 28, options: { align?: string; c
 }
 
 export function button(label: string, href = '[[brand.website]]', options: { align?: string; background?: string; color?: string; padding?: string; radius?: string } = {}) {
-  return `<mj-button href="${href}" ${font} background-color="${options.background ?? '[[brand.primary]]'}" color="${options.color ?? '#ffffff'}" font-size="15px" font-weight="600" border-radius="${options.radius ?? '6px'}" inner-padding="13px 28px" padding="${options.padding ?? '16px 32px'}" align="${options.align ?? 'left'}">${label}</mj-button>`;
+  // Default buttons follow the brand kit's global button style (filled or outline, corner radius).
+  const themed = !options.background;
+  return `<mj-button href="${href}" ${font} background-color="${options.background ?? '[[brand.button_bg]]'}" color="${options.color ?? (themed ? '[[brand.button_text]]' : '#ffffff')}" border="${themed ? '[[brand.button_border]]' : 'none'}" font-size="15px" font-weight="600" border-radius="${options.radius ?? '[[brand.button_radius]]'}" inner-padding="13px 28px" padding="${options.padding ?? '16px 32px'}" align="${options.align ?? 'left'}">${label}</mj-button>`;
 }
 
 export function image(src: string, alt: string, options: { width?: number; padding?: string; href?: string; radius?: string; align?: string } = {}) {

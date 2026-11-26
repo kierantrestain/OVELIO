@@ -15,6 +15,8 @@ export type DesignSummary = {
   preheader: string;
   category: string;
   templateKey: string | null;
+  /** The brand kit the design uses; null means the workspace default. */
+  brandId: string | null;
   version: number;
   createdAt: string;
   updatedBy: string | null;
@@ -65,8 +67,13 @@ export type BrandKit = {
   website: string;
   footerText: string;
   social: BrandSocial[];
+  /** Global button style: corner radius in px, and filled (brand colour) or outline. */
+  buttonRadius: number;
+  buttonStyle: 'filled' | 'outline';
   updatedAt: string | null;
 };
+
+export type BrandSummary = { id: string; name: string; isDefault: boolean; kit: BrandKit; updatedAt: string };
 
 /** Email-safe font stacks offered by the brand kit (no web font downloads, so nothing is hotlinked). */
 export const emailFonts: { value: string; label: string }[] = [

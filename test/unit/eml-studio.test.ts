@@ -194,3 +194,32 @@ test('EML-09 the template factory: every industry × use case compiles with zero
   assert.ok(list.data.items.some(item => item.source === 'factory' && item.industry === 'ecommerce'));
   assert.equal(list.data.items.filter(item => item.source === 'curated').length, 24);
 });
+
+test('EML-10 several brand kits, one default; switching a design re-themes colours, fonts and buttons', async () => {
+  const created = await call<{ id: string; isDefault: boolean; kit: Record<string, unknown> }>('POST', 'studio/brands', { name: 'EML-10 brand' });
+  assert.equal(created.status, 201);
+  const kit = { ...created.data.kit, name: 'EML-10 brand', primary: '#aa1100', accent: '#00aa11', headingFont: "Georgia, 'Times New Roman', serif", buttonStyle: 'outline', buttonRadius: 20 };
+  delete (kit as { updatedAt?: unknown }).updatedAt;
+  assert.equal((await call('PUT', `studio/brands/${created.data.id}`, kit)).status, 200);
+  const design = await call<{ id: string; version: number; source: string; brandId: string | null }>('POST', 'studio/designs', { templateKey: 'f-saas-launch' });
+  const before = (await call<{ primary: string }>('GET', 'studio/brand')).data;
+  assert.match(design.data.source, new RegExp(before.primary, 'i'));
+  const themed = await call<{ source: string; brandId: string; html: string }>('POST', `studio/designs/${design.data.id}/brand`, { brandId: created.data.id, version: design.data.version });
+  assert.equal(themed.status, 200);
+  assert.equal(themed.data.brandId, created.data.id);
+  assert.doesNotMatch(themed.data.source, new RegExp(before.primary, 'i'), 'old primary colour is gone');
+  assert.match(themed.data.source, /#aa1100/);
+  assert.match(themed.data.source, /%23aa1100/, 'illustrations re-coloured too');
+  const buttons = [...themed.data.source.matchAll(/<mj-button[^>]*>/g)].map(match => match[0]);
+  assert.ok(buttons.length > 0);
+  assert.ok(buttons.every(tag => tag.includes('border-radius="20px"')), 'every button takes the new radius');
+  assert.ok(buttons.some(tag => tag.includes('border="2px solid #aa1100"')), 'brand buttons become outline buttons');
+  const versions = await call<{ items: { label: string }[] }>('GET', `studio/designs/${design.data.id}/versions`);
+  assert.ok(versions.data.items.some(item => item.label === 'Before brand change'));
+  const brands = await call<{ items: { id: string; isDefault: boolean }[] }>('GET', 'studio/brands');
+  const original = brands.data.items.find(item => item.isDefault)!;
+  assert.equal((await call('DELETE', `studio/brands/${original.id}`)).status, 409, 'the default kit cannot be deleted');
+  await call('POST', `studio/brands/${created.data.id}/default`);
+  assert.equal((await call<{ primary: string }>('GET', 'studio/brand')).data.primary, '#aa1100');
+  await call('POST', `studio/brands/${original.id}/default`);
+});

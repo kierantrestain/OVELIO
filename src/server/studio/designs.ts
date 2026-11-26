@@ -8,12 +8,12 @@ import { audit } from '../events';
 import { compileMjml, wrapFragment } from './compile';
 
 type Row = {
-  id: string; kind: EmailDesignKind; name: string; subject: string; preheader: string; document: Record<string, unknown>; source: string;
+  id: string; kind: EmailDesignKind; brand_id: string | null; name: string; subject: string; preheader: string; document: Record<string, unknown>; source: string;
   html: string; template_key: string | null; category: string; status: DesignStatus; version: number; created_at: Date; updated_at: Date;
   updated_by_name: string | null;
 };
 
-const columns = `d.id, d.kind, d.name, d.subject, d.preheader, d.document, d.source, d.html, d.template_key, d.category, d.status, d.version,
+const columns = `d.id, d.kind, d.brand_id, d.name, d.subject, d.preheader, d.document, d.source, d.html, d.template_key, d.category, d.status, d.version,
   d.created_at, d.updated_at, u.name AS updated_by_name`;
 const from = `designs d LEFT JOIN users u ON u.id = d.updated_by`;
 export const AUTO_VERSION_MS = 10 * 60_000;
@@ -23,7 +23,7 @@ const iso = (value: Date | string) => new Date(value).toISOString();
 export function toSummary(row: Row): DesignSummary {
   return {
     id: row.id, name: row.name, subject: row.subject, kind: row.kind, status: row.status, updatedAt: iso(row.updated_at),
-    preheader: row.preheader, category: row.category, templateKey: row.template_key, version: Number(row.version),
+    preheader: row.preheader, category: row.category, templateKey: row.template_key, brandId: row.brand_id, version: Number(row.version),
     createdAt: iso(row.created_at), updatedBy: row.updated_by_name,
   };
 }
@@ -67,14 +67,14 @@ export async function compileDesign(kind: EmailDesignKind, source: string, head:
 
 export async function createDesign(input: {
   kind: EmailDesignKind; name: string; subject?: string; preheader?: string; source: string; document?: Record<string, unknown>;
-  templateKey?: string | null; category?: string; userId: string | null;
+  templateKey?: string | null; category?: string; userId: string | null; brandId?: string | null;
 }, client: Sql = db): Promise<Design & { errors: CompileIssue[] }> {
   const compiled = await compileDesign(input.kind, input.source, { preheader: input.preheader, title: input.subject });
   const created = (await client.query<{ id: string }>(
-    `INSERT INTO designs (kind, name, subject, preheader, document, source, html, template_key, category, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10) RETURNING id`,
+    `INSERT INTO designs (kind, name, subject, preheader, document, source, html, template_key, category, created_by, updated_by, brand_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11) RETURNING id`,
     [input.kind, input.name, input.subject ?? '', input.preheader ?? '', JSON.stringify(input.document ?? {}), input.source, compiled.html,
-      input.templateKey ?? null, input.category ?? '', input.userId],
+      input.templateKey ?? null, input.category ?? '', input.userId, input.brandId ?? null],
   )).rows[0];
   await client.query(
     `INSERT INTO design_versions (design_id, version, label, document, source, html, created_by) VALUES ($1, 1, 'Created', $2, $3, $4, $5)`,
@@ -169,7 +169,7 @@ export async function duplicateDesign(id: string, userId: string | null) {
   const source = await row(id);
   return createDesign({
     kind: source.kind, name: `${source.name} (copy)`.slice(0, 120), subject: source.subject, preheader: source.preheader, source: source.source,
-    document: source.document, templateKey: source.template_key, category: source.category, userId,
+    document: source.document, templateKey: source.template_key, category: source.category, userId, brandId: source.brand_id,
   });
 }
 

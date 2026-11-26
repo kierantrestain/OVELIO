@@ -5,6 +5,7 @@
 import { ImageIcon, Plus, Save, Trash2 } from 'lucide-react';
 import NextLink from 'next/link';
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
@@ -12,11 +13,11 @@ import { Selector } from '@astryxdesign/core/Selector';
 import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
-import type { BrandKit, SocialNetwork } from '@/contracts/studio';
+import type { BrandKit, BrandSummary, SocialNetwork } from '@/contracts/studio';
 import { emailFonts, socialNetworks } from '@/contracts/studio';
 import { api, useAction, useResource } from '../client';
 import { useUser } from '../shell';
-import { AsyncState, Feedback, FormActions, PageHeader, Panel } from '../ui';
+import { AsyncState, ConfirmDialog, Feedback, FormActions, Modal, PageHeader, Panel, StatusBadge } from '../ui';
 import { EmailFrame, MediaPicker } from './common';
 import '@/styles/studio.css';
 
@@ -27,29 +28,67 @@ const colourFields: { key: 'primary' | 'accent' | 'text' | 'muted' | 'background
 const networkLabel: Record<SocialNetwork, string> = { website: 'Website', linkedin: 'LinkedIn', instagram: 'Instagram', facebook: 'Facebook', x: 'X', youtube: 'YouTube', tiktok: 'TikTok' };
 
 export function BrandKitPage() {
-  const brand = useResource<BrandKit>('/studio/brand');
-  return brand.data ? <BrandForm key={brand.data.updatedAt ?? 'default'} initial={brand.data} onSaved={brand.refresh} />
-    : <div className="ov-stack"><PageHeader title="Brand kit" /><Panel><AsyncState loading={brand.loading} error={brand.error} retry={brand.refresh} /></Panel></div>;
+  const brands = useResource<{ items: BrandSummary[] }>('/studio/brands');
+  const fallback = useResource<BrandKit>('/studio/brand');
+  const [selected, setSelected] = useState<string>();
+  const [naming, setNaming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [name, setName] = useState('');
+  const action = useAction();
+  const items = brands.data?.items ?? [];
+  const current = items.find(item => item.id === selected) ?? items.find(item => item.isDefault) ?? items[0];
+  if (!brands.data || !fallback.data) return <div className="ov-stack"><PageHeader title="Brand kits" /><Panel><AsyncState loading={brands.loading || fallback.loading} error={brands.error || fallback.error} retry={() => { brands.refresh(); fallback.refresh(); }} /></Panel></div>;
+  const switcher = <div className="ov-actions">
+    {items.length ? <Selector label="Brand kit" isLabelHidden width={260} value={current?.id ?? ''} onChange={value => setSelected(value ?? undefined)}
+      options={items.map(item => ({ value: item.id, label: item.name + (item.isDefault ? ' (default)' : '') }))} /> : null}
+    {current && !current.isDefault ? <Button size="sm" label="Make default" isLoading={action.busy} onClick={() => void action.run(async () => { await api(`/studio/brands/${current.id}/default`, 'POST'); brands.refresh(); }, `${current.name} is now the default brand kit.`)} /> : null}
+    {current && !current.isDefault ? <Button size="sm" variant="ghost" icon={<Trash2 size={14} />} label="Delete" onClick={() => setDeleting(true)} /> : null}
+    <Button size="sm" icon={<Plus size={14} />} label="New brand kit" onClick={() => { setName(''); setNaming(true); }} />
+  </div>;
+  return <>
+    <BrandForm key={(current?.id ?? 'default') + (current?.updatedAt ?? '')} brandId={current?.id} isDefault={current?.isDefault ?? true}
+      initial={current?.kit ?? fallback.data} switcher={switcher} onSaved={() => { brands.refresh(); fallback.refresh(); }} />
+    <Feedback error={action.error} notice={action.notice} />
+    {naming ? <Modal title="New brand kit" onClose={() => setNaming(false)}>
+      <form className="ov-stack-sm" onSubmit={event => { event.preventDefault(); void action.run(async () => {
+        const created = await api<BrandSummary>('/studio/brands', 'POST', { name: name.trim() });
+        setNaming(false);
+        setSelected(created.id);
+        brands.refresh();
+      }); }}>
+        <TextInput label="Name" value={name} onChange={setName} placeholder="e.g. Client: Northbridge" isRequired description="Starts as a copy of the default kit." />
+        <FormActions><Button label="Cancel" onClick={() => setNaming(false)} /><Button type="submit" variant="primary" label="Create" isDisabled={!name.trim()} isLoading={action.busy} /></FormActions>
+      </form>
+    </Modal> : null}
+    {deleting && current ? <ConfirmDialog title={`Delete ${current.name}?`} description="Designs using it keep their current look and fall back to the default kit for new brand blocks." actionLabel="Delete brand kit"
+      busy={action.busy} onClose={() => setDeleting(false)} onConfirm={() => void action.run(async () => {
+        await api(`/studio/brands/${current.id}`, 'DELETE');
+        setDeleting(false);
+        setSelected(undefined);
+        brands.refresh();
+      }, 'Brand kit deleted.')} /> : null}
+  </>;
 }
 
-function BrandForm({ initial, onSaved }: { initial: BrandKit; onSaved: () => void }) {
+function BrandForm({ initial, brandId, isDefault, switcher, onSaved }: { initial: BrandKit; brandId?: string; isDefault: boolean; switcher: ReactNode; onSaved: () => void }) {
   const canEdit = useUser().role !== 'analyst';
   const [kit, setKit] = useState(initial);
   const [picking, setPicking] = useState(false);
   const [sample, setSample] = useState(0);
   const action = useAction();
-  const preview = useResource<{ html: string }>(`/studio/templates/newsletter-digest/html?v=${initial.updatedAt ?? ''}-${sample}`);
+  const preview = useResource<{ html: string }>(`/studio/templates/newsletter-digest/html?v=${initial.updatedAt ?? ''}-${sample}${brandId ? `&brandId=${brandId}` : ''}`);
   const set = <K extends keyof BrandKit>(key: K, value: BrandKit[K]) => setKit(current => ({ ...current, [key]: value }));
 
   return <div className="ov-stack">
-    <PageHeader title="Brand kit" description="Your logo, colours, fonts and footer. New emails from templates use them automatically."
+    <PageHeader title="Brand kits" description="Logo, colours, fonts, buttons and footer. New emails use the default kit; switch an email's kit in the studio to re-theme it."
       actions={canEdit ? <Button variant="primary" icon={<Save size={16} />} label="Save brand kit" isLoading={action.busy} onClick={() => void action.run(async () => {
         const { updatedAt: _updatedAt, ...input } = kit;
         void _updatedAt;
-        await api('/studio/brand', 'PUT', input);
+        await api(brandId ? `/studio/brands/${brandId}` : '/studio/brand', 'PUT', input);
         onSaved();
         setSample(value => value + 1);
       }, 'Brand kit saved. New emails from templates use it; existing designs keep their look.')} /> : undefined} />
+    <div className="ov-actions ov-actions--between">{switcher}{isDefault ? <StatusBadge label="Default kit" tone="success" /> : null}</div>
     <Feedback error={action.error} notice={action.notice} />
     <div className="ov-grid">
       <div className="ov-stack">
@@ -81,6 +120,13 @@ function BrandForm({ initial, onSaved }: { initial: BrandKit; onSaved: () => voi
           <div className="ov-form-grid">
             <Selector label="Headings" value={kit.headingFont} onChange={value => set('headingFont', value ?? emailFonts[0].value)} options={emailFonts} />
             <Selector label="Body text" value={kit.bodyFont} onChange={value => set('bodyFont', value ?? emailFonts[0].value)} options={emailFonts} />
+          </div>
+        </Panel>
+        <Panel title="Buttons" description="The global button style for templates and brand blocks.">
+          <div className="ov-form-grid">
+            <Selector label="Style" value={kit.buttonStyle} onChange={value => set('buttonStyle', value === 'outline' ? 'outline' : 'filled')}
+              options={[{ value: 'filled', label: 'Filled with the primary colour' }, { value: 'outline', label: 'Outline in the primary colour' }]} />
+            <NumberInput label="Corner radius (px)" value={kit.buttonRadius} onChange={value => set('buttonRadius', Math.min(30, Math.max(0, Number(value) || 0)))} min={0} max={30} />
           </div>
         </Panel>
         <Panel title="Footer and social links" description="Every marketing email also shows your postal address (Settings › Company) and an unsubscribe link.">

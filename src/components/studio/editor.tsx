@@ -19,10 +19,11 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import type { Campaign } from '@/contracts';
 import { mergeTags } from '@/contracts/merge-tags';
-import type { BrandKit, CompileIssue, Design, DesignSaveResult, DesignVersion, EngineExport } from '@/contracts/studio';
+import type { BrandKit, BrandSummary, CompileIssue, Design, DesignSaveResult, DesignVersion, EngineExport } from '@/contracts/studio';
 import { api, date, message, useAction, useResource } from '../client';
 import { usePreview } from '../shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, SlideDrawer } from '../ui';
+import { Selector } from '@astryxdesign/core/Selector';
 import { studioBlocks } from './blocks';
 import { EmailFrame, MediaPicker, PreviewDialog, SentTestsDrawer, TestSendDialog } from './common';
 
@@ -79,6 +80,9 @@ export function EmailStudio({ id }: { id: string }) {
   const [panel, setPanel] = useState<Panel>(null);
   const [assetRequest, setAssetRequest] = useState<AssetRequest>(null);
   const pushAction = useAction();
+  const brandAction = useAction();
+  const brands = useResource<{ items: BrandSummary[] }>('/studio/brands');
+  const [rebranding, setRebranding] = useState<BrandSummary>();
 
   async function persist() {
     const editor = editorRef.current;
@@ -312,6 +316,10 @@ export function EmailStudio({ id }: { id: string }) {
       <div className="ov-studio-meta">
         <label><span>Subject</span><input value={meta.subject} onChange={event => updateMeta('subject', event.target.value)} maxLength={200} placeholder="What the inbox shows first" /></label>
         <label><span>Preview text</span><input value={meta.preheader} onChange={event => updateMeta('preheader', event.target.value)} maxLength={200} placeholder="The line after the subject in most inboxes" /></label>
+        {brands.data?.items.length ? <Selector label="Brand kit" isLabelHidden width={230} size="sm"
+          value={design?.brandId ?? brands.data.items.find(item => item.isDefault)?.id ?? ''}
+          options={brands.data.items.map(item => ({ value: item.id, label: `Brand: ${item.name}` }))}
+          onChange={value => { const next = brands.data?.items.find(item => item.id === value); if (next) setRebranding(next); }} /> : null}
         {newsletter ? <span className="ov-studio-link">
           <Text type="supporting" color="secondary">Feeds newsletter “{newsletter.label || newsletter.engineId}”</Text>
           <Button size="sm" icon={<Send size={14} />} label="Update newsletter" isLoading={pushAction.busy}
@@ -366,6 +374,19 @@ export function EmailStudio({ id }: { id: string }) {
       </aside>
     </div>
 
+    {rebranding ? <ConfirmDialog title={`Switch to ${rebranding.name}?`} destructive={false} busy={brandAction.busy}
+      description="The email's colours, fonts and buttons change to this brand kit. The current design is kept as a version, so you can restore it."
+      actionLabel="Re-theme email" onClose={() => setRebranding(undefined)}
+      onConfirm={() => void brandAction.run(async () => {
+        await flush();
+        const themed = await api<Design>(`/studio/designs/${id}/brand`, 'POST', { brandId: rebranding.id, version: versionRef.current });
+        setRebranding(undefined);
+        setDesign(themed);
+        load(themed);
+        setSaveState('saved');
+        setSavedAt(Date.now());
+      }, `Re-themed with ${rebranding.name}.`)} /> : null}
+    {brandAction.error ? <div className="ov-studio-banner"><Feedback error={brandAction.error} /></div> : null}
     {panel === 'media' ? <MediaPicker onPick={pickImage} onClose={() => { assetRequest?.close(); setAssetRequest(null); setPanel(null); }} /> : null}
     {panel === 'preview' ? <PreviewDialog designId={id} onClose={() => setPanel(null)} /> : null}
     {panel === 'test' ? <TestSendDialog designId={id} prepare={flush} onClose={() => setPanel(null)} /> : null}
