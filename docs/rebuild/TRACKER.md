@@ -18,6 +18,7 @@ updates it at merge. Older parity work (Mautic/Listmonk/Umami engine parity) sta
 | D10 | **Native simple e-signature** on proposals (typed name + consent + evidence record with a SHA-256 of the accepted content). Documenso (AGPL-3.0) evaluated and not incorporated; a qualified-signature provider can be added behind the same acceptance step. | Licence, and the evidence a simple signature needs is small. |
 | D11 | **Experiments judge outcomes, never opens**: workflow A/B splits measure clicks (signed `/r/` redirects, scanners flagged), conversions, qualified leads or won revenue; two-proportion z-test or Welch, minimum 100 contacts and 5 outcomes per path, p < 0.05. | Apple Mail Privacy Protection and scanners make opens unreliable. |
 | D12 | **Public revenue paths are `/proposal/` and `/pay/`**, never `/q/` or `/p/` (Caddy sends those to Umami tracked links). Public OVELIO paths are listed in Caddy's `@ovelioPublic` so they never receive the console session. | Found as a production routing defect during wave two. |
+| D13 | **Developer previews may use an isolated embedded database.** Set `OVELIO_PREVIEW_DB=embedded` in the Vercel Preview environment to select PGlite when a shared `DATABASE_URL` is inherited. | Keeps preview changes in their own instance. Developer preview data can reset on restart and vary across instances. |
 
 Licences checked 2026-11-25: all of the above are MIT, BSD-3-Clause or Apache-2.0. Twenty (AGPL-3.0), Mautic (GPL-3.0) and Listmonk (AGPL-3.0) are references only: read behaviour, never copy code.
 
@@ -156,13 +157,14 @@ Rollback points: `fccb9d0` main before 2.0; `a29fb83` first CI-verified 2.0 buil
 
 ### Wave two: complete the customer lifecycle (status: in progress)
 
-Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resumed at `b361bee` after [CI 45847631358](https://github.com/kierantrestain/OVELIO/actions/runs/45847631358) passed. Migration ranges in use: 014 revenue, 015 inbox, 042 webhooks, 071 reserved for calendar. Assignment and release rules live in [AGENTS.md](../../AGENTS.md).
+Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resumed at `b361bee` after [CI 45847631358](https://github.com/kierantrestain/OVELIO/actions/runs/45847631358) passed. Migration ranges in use: 014 revenue, 015 inbox, 042–043 webhooks, 071 reserved for calendar. Assignment and release rules live in [AGENTS.md](../../AGENTS.md).
 
 #### Priority zero: recovery and mailbox privacy
 
 - No calendar or threaded-inbox specialist branch was found on the remote or in the accessible previous checkout. Keep `b361bee` and `e56d866` as rollback points.
 - INB-01–04 require the same current mailbox ownership or membership on inbox summaries, threads, search, CRM timelines and events, and CSV export. Migration 015 backfills mailbox provenance and keeps unassignable historical copies private. Administrators can disconnect mailboxes and inspect connection metadata. Owners grant and revoke read access and retain sending and manual sync.
-- The authenticated INB-01–04 suite passed on PostgreSQL 18 with a synthetic directory. INB-05 checks session-bound OAuth state and preserves mailbox ownership on reconnect using synthetic provider responses. The hosted public alias initially resolved to `fccb9d0`. Track the verified developer preview separately from the Compose release gate.
+- The authenticated INB-01–04 suite passed on PostgreSQL 18 with a synthetic directory. INB-05 checks session-bound OAuth state and preserves mailbox ownership on reconnect using synthetic provider responses. [CI 45866331774](https://github.com/kierantrestain/OVELIO/actions/runs/45866331774) passed for `b7707df`, including the Compose integration, persistence, isolation and backup restore steps. The local browser gate reported 159 passes and one existing skip.
+- The [protected developer preview](https://ovelio-p3nj15enf-kierantrestain-9646s-projects.vercel.app) returned HTTP 200 and `a503d64cc3080e6fb00eaf1830669ba17dc3e4b3` from `/api/health`. The earlier or inherited PostgreSQL configuration returned 503 in the new preview. Vercel has no connected Git repository, so the lead deployed the exact SHA manually and scoped the embedded override to Preview. The public alias resolved to `fccb9d0` at recovery.
 
 | Slice | Status | Evidence |
 |---|---|---|
@@ -172,7 +174,8 @@ Branch `claude/serene-brahmagupta-ekl58t` (from main `e56d866`). Recovery resume
 | Calendar: booking types, availability, round-robin, public booking, reminders, ICS feed | pending recovery implementation | |
 | Inbox: mailbox privacy, explicit sharing, threaded reads, search, scoped CSV | implemented | INB-01–05 synthetic-provider / real PostgreSQL checks |
 | Inbox: full bodies, attachments, unread, assignment, notes, saved replies, response times, incremental provider sync | pending | |
-| Connector infrastructure, advanced automation (webhooks in, sub-workflows, replay) | inbound webhook endpoint and trigger definition committed, picker, management and retry gate pending | `b361bee` |
+| Inbound webhooks: exact-byte HMAC, Bearer auth, mappings, retries, diagnostics, hook-specific workflow trigger | implemented | JRN-11 unit, IQ-23 browser, JRN-12 Compose gateway coverage |
+| Provider connectors, sub-workflows, schedules, replay and other advanced automation | pending | |
 
 Defects found and fixed in wave two: deal line editor overflowing its column (browser), Save draft disabled after typing a
 number (IQ-20), proposal links colliding with Umami's `/q/` route in production (Caddy review), CR-03 relying on a fixed
@@ -181,4 +184,4 @@ job budget.
 Pending external verification: Stripe test keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`), Google/Microsoft OAuth
 clients. `/api/health` reports `commit` on deployments built after the Wave Two health change.
 
-**Continuation point** — Verify the privacy checkpoint in CI and on the Vercel preview. Build missing calendar and inbox capabilities on the current contracts, finish inbound webhooks, then verify the Wave Two lifecycle (lead → CRM → appointment → proposal → contract → payment → onboarding → renewal).
+**Continuation point** — Build and verify the missing calendar and inbox capabilities on the current contracts, finish the connector and advanced automation work, then verify the Wave Two lifecycle (lead → CRM → appointment → proposal → contract → payment → onboarding → renewal).

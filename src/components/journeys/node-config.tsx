@@ -18,7 +18,7 @@ import {
   tagsOf, triggerSpec,
 } from '@/contracts/journeys';
 import type { DesignOption, Lookup, NamedOption, PipelineOption, TeamMember } from './shared';
-import { lookupHint, nodeIcons } from './shared';
+import { lookupHint, nodeIcons, useLookup } from './shared';
 
 export type BuilderLookups = {
   designs: Lookup<DesignOption>;
@@ -213,10 +213,24 @@ function TriggerFilterFields({ trigger, lookups, onChange }: { trigger: FlowTrig
         onChange={value => set({ stageId: !value || value === 'any' ? '' : value, stageName: stages.find(stage => stage.id === value)?.name ?? '' })} />;
     })() : null}
     {spec.filters.includes('tag') ? <TextInput label="Tag" isRequired value={f.tag ?? ''} onChange={value => set({ tag: value.trim() })} placeholder="e.g. customer" /> : null}
+    {spec.filters.includes('hook') ? <HookFilter fields={f} onChange={set} /> : null}
     {spec.filters.includes('campaign') ? <Selector label="Campaign" value={f.campaignId || 'any'} isLoading={lookups.campaigns.status === 'loading'}
       options={[{ value: 'any', label: 'Any campaign' }, ...lookups.campaigns.items.map(item => ({ value: item.id, label: item.name }))]}
       onChange={value => set({ campaignId: !value || value === 'any' ? '' : value, campaignName: lookups.campaigns.items.find(item => item.id === value)?.name ?? '' })} /> : null}
   </>;
+}
+
+function HookFilter({ fields, onChange }: { fields: TriggerFilters; onChange: (patch: Partial<TriggerFilters>) => void }) {
+  const hooks = useLookup<NamedOption>(['/journeys/lookups/hooks']);
+  const fallback = fields.hookId && !hooks.items.some(item => item.id === fields.hookId)
+    ? [{ value: fields.hookId, label: fields.hookName || 'Selected webhook', description: 'Unavailable' }] : [];
+  return <Selector label="Inbound webhook" value={fields.hookId || 'any'} isLoading={hooks.status === 'loading'}
+    description={lookupHint(hooks, 'Inbound webhooks', 'An administrator can create a webhook in Automations › Webhooks.')}
+    options={[{ value: 'any', label: 'Any inbound webhook' }, ...fallback,
+      ...hooks.items.map(item => ({ value: item.id, label: item.name, description: item.status === 'paused' ? 'Paused' : undefined }))]}
+    onChange={value => onChange({
+      hookId: !value || value === 'any' ? '' : value, hookName: hooks.items.find(item => item.id === value)?.name ?? '',
+    })} />;
 }
 
 export function TriggerPanel({ triggers, reentry, lookups, readOnly, onTriggers, onReentry }: {

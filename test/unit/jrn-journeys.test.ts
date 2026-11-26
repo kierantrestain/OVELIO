@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, test } from 'node:test';
@@ -367,4 +368,51 @@ test('JRN-08 the preview seed adds labelled campaigns, flows and runs, and searc
   const results = await journeysModule.search('webinar', { id: ADMIN, email: 'a@example.com', name: 'Admin', role: 'admin' });
   assert.ok(results.some(item => item.kind === 'campaign' && item.href === `/marketing/campaigns/${spring.id}`));
   assert.ok(results.some(item => item.kind === 'flow' && item.href === `/automations/flows/${followUp.id}`));
+});
+
+test('JRN-11 only signed inbound deliveries enrol the mapped contact and retries finish just once', async () => {
+  const { hookEndpoints, receiveHook } = await import('../../src/server/journeys/hooks');
+  const owner = { id: ADMIN, name: 'Preview admin', email: 'dev@ovelio.test', role: 'admin' as const };
+  const create = hookEndpoints.find(entry => entry.method === 'POST' && entry.path.test('journeys/hooks'));
+  const lookup = hookEndpoints.find(entry => entry.path.test('journeys/lookups/hooks'));
+  assert.equal(create?.role, 'admin');
+  assert.equal(lookup?.role, 'marketer');
+  const config = new Request('http://localhost:3206/api/console/journeys/hooks', { method: 'POST',
+    body: JSON.stringify({ name: 'JRN-11 Orders', emailPath: 'customer.email', firstNamePath: 'customer.firstName',
+      amountPath: 'amount', currencyPath: 'currency', tags: ['order-import'] }) });
+  const created = await create!.handler({ request: config, user: owner, params: [], query: new URLSearchParams() });
+  assert.ok(created instanceof Response && created.status === 201);
+  const { id, secret, url } = await created.json() as { id: string; secret: string; url: string };
+  assert.match(url, /\/api\/public\/hooks\//);
+  const picker = await lookup!.handler({ request: new Request(url), user: { ...owner, role: 'marketer' }, params: [], query: new URLSearchParams() });
+  assert.deepEqual((picker as { items: object[] }).items.find(item => 'id' in item && item.id === id), { id, name: 'JRN-11 Orders', status: 'active' });
+  assert.ok(!JSON.stringify(picker).includes(secret));
+  const flow = await flows.createFlow({
+    name: 'JRN-11 order follow-up', triggers: [{ id: 'order', type: 'webhook.received', filters: { hookId: id } }],
+    graph: graphOf([node('tag', 'add_tag', { tags: ['order-followed-up'] })], [['start', 'tag']]),
+  }, ADMIN);
+  await flows.publishFlow(flow.id, ADMIN);
+  const payload = JSON.stringify({ customer: { email: 'jrn11-orders@example.test', firstName: 'Zoë' }, amount: 175.5, currency: 'gbp' });
+  const signature = createHmac('sha256', secret).update(payload).digest('base64');
+  const deliver = (body: string, mac = signature, key = 'synthetic-order-1') => receiveHook(id, new Request(url, {
+    method: 'POST', body, headers: { 'x-shopify-hmac-sha256': mac, 'idempotency-key': key },
+  }));
+  assert.equal((await deliver(payload, 'missing-signature')).status, 401);
+  // A previous worker left its delivery pending. A retry must claim it instead of acknowledging a duplicate.
+  await db.query('INSERT INTO journey_hook_deliveries (hook_id, delivery_key) VALUES ($1, $2)', [id, 'synthetic-order-1']);
+  const results = await Promise.all([deliver(payload), deliver(payload)]);
+  assert.equal(results.filter(result => result.status === 202).length, 1);
+  assert.ok(results.every(result => [200, 202, 503].includes(result.status)));
+  const { contactId } = await results.find(result => result.status === 202)!.json() as { contactId: number };
+  assert.deepEqual(await (await deliver(payload)).json(), { received: true, duplicate: true });
+  await drainAll();
+  const events = await listEvents({ types: ['webhook.received'], entityId: id });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].amount, 175.5);
+  assert.equal(events[0].currency, 'GBP');
+  assert.equal((await enrolmentsOf(flow.id)).length, 1);
+  const contact = await getContact(contactId);
+  assert.equal(contact?.firstName, 'Zoë');
+  assert.ok(contact?.tags.includes('order-followed-up'));
+  assert.notEqual(contact?.consent, 'opted_in');
 });

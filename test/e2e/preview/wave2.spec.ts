@@ -1,3 +1,5 @@
+import { createHmac } from 'node:crypto';
+import type { FlowDetail, InboundHook } from '../../../src/contracts/journeys';
 import { anonymous, expect, horizontalOverflow, isPreviewRun, json, test, unique } from './fixtures';
 
 // Wave two independent acceptance (Intelligence & Quality): the connected revenue journey and outcome-based
@@ -5,6 +7,49 @@ import { anonymous, expect, horizontalOverflow, isPreviewRun, json, test, unique
 test.skip(!isPreviewRun, 'Preview harness only: npm run build && npm run test:e2e:preview');
 
 type Quote = { id: string; status: string; publicUrl: string | null; totals: { total: number }; invoices: { id: string; kind: string; total: number; status: string }[] };
+
+test('IQ-23 configure an inbound webhook, select it in a workflow and enrol a contact from a signed delivery', async ({ page, baseURL, guard }) => {
+  const origin = new URL(baseURL!).origin;
+  const id = unique();
+  const name = `Incoming order ${id}`;
+  await page.goto('/automations/webhooks');
+  await page.getByRole('button', { name: 'New inbound webhook' }).click();
+  await page.getByLabel('Webhook name').fill(name);
+  await page.getByLabel('Email path').fill('buyer.email');
+  const created = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/api/console/journeys/hooks');
+  await page.getByRole('button', { name: 'Save webhook' }).click();
+  const response = await created;
+  expect(response.status()).toBe(201);
+  const hook = await response.json() as InboundHook;
+  await expect(page.getByRole('dialog', { name })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reveal secret' })).toBeVisible();
+
+  const flow = await json<FlowDetail>(await page.request.post('/api/console/journeys/flows', { headers: { origin }, data: {
+    name: `Order workflow ${id}`,
+    triggers: [{ id: 'order', type: 'webhook.received', filters: {} }],
+    graph: {
+      nodes: [{ id: 'start', type: 'start', config: {}, position: { x: 0, y: 0 } },
+        { id: 'finish', type: 'exit', config: {}, position: { x: 0, y: 160 } }],
+      edges: [{ id: 'next', source: 'start', target: 'finish', sourceHandle: 'next' }],
+    },
+  } }));
+  await page.goto(`/automations/flows/${flow.id}`);
+  await page.locator('.ov-journeys-node').filter({ hasText: 'Any inbound webhook' }).click();
+  const picker = page.getByRole('combobox', { name: 'Inbound webhook' }).or(page.getByRole('button', { name: /Inbound webhook.*Any inbound webhook/i }));
+  await picker.click();
+  await page.getByRole('option', { name, exact: true }).click();
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect.poll(async () => (await json<FlowDetail>(await page.request.get(`/api/console/journeys/flows/${flow.id}`))).triggers[0]?.filters.hookId)
+    .toBe(hook.id);
+  await json(await page.request.post(`/api/console/journeys/flows/${flow.id}/publish`, { headers: { origin } }));
+  const payload = JSON.stringify({ buyer: { email: `order.${id}@example.test` } });
+  const signature = createHmac('sha256', hook.secret).update(payload).digest('hex');
+  const delivery = await page.request.post(new URL(hook.url).pathname, { headers: { 'x-ovelio-signature': `sha256=${signature}` }, data: payload });
+  expect(delivery.status()).toBe(202);
+  await expect.poll(async () => (await json<FlowDetail>(await page.request.get(`/api/console/journeys/flows/${flow.id}`))).counts.enrolled).toBe(1);
+  expect(guard.problems()).toEqual([]);
+});
 
 test('IQ-20 revenue: line items → proposal → client signs on a phone → deposit invoice → payment → revenue states', async ({ page, browser, baseURL, guard }) => {
   const origin = new URL(baseURL!).origin;

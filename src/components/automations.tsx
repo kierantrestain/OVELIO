@@ -27,6 +27,7 @@ import type {
 } from '@/contracts';
 import { formActionSpecs, formFieldSpecs } from '@/contracts';
 import { api, date, number, useAction, useFields, useResource } from './client';
+import { InboundWebhooks } from './journeys/inbound-webhooks';
 import { useUser } from './shell';
 import { describeSources, useWorkflowLookups, WorkflowCanvasEditor, WorkflowOutline, workflowGraphOf } from './workflow-canvas';
 import { WorkflowRunModal } from './workflow-run-log';
@@ -1928,6 +1929,7 @@ export function Automations({ initialTab }: { initialTab?: string }) {
       />
     ) : null}
 
+    {tab === 'Webhooks' && isAdmin ? <InboundWebhooks /> : null}
     {tab === 'Webhooks' && isAdmin ? <Panel title="Outbound webhooks" description="Send real-time HTTP notifications to external tools when audience events occur.">
       {!webhooks.data ? <AsyncState loading={webhooks.loading} error={webhooks.error} retry={webhooks.refresh} />
         : <Table data={webhooks.data} idKey="id" hasHover emptyState={<Empty title="No webhooks configured" description="Create a webhook to notify your CRM, Slack or internal services." />}

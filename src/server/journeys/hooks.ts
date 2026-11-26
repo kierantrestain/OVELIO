@@ -3,20 +3,17 @@
 // body as hex (`X-OVELIO-Signature: sha256=…`, `X-Hub-Signature-256: sha256=…`) or base64 (`X-Shopify-Hmac-Sha256`,
 // `X-WC-Webhook-Signature`). Each delivery is recorded once per delivery id, maps fields to a contact (never consent),
 // and emits `webhook.received`, which workflows can start on.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import type { InboundHook } from '@/contracts/journeys';
 import { AppError } from '../config';
-import { db } from '../db';
+import { db, transaction } from '../db';
+import { requestOrigin } from '../dev-preview';
 import { upsertContact } from '../directory';
 import { audit, emitEvent } from '../events';
-import { json, readBody } from '../http';
+import { json, readBody, readBodyBytes } from '../http';
 import { route } from '../routes/shared';
 import type { Entry } from '../routes/shared';
-
-export type InboundHook = {
-  id: string; name: string; secret: string; emailPath: string; firstNamePath: string; lastNamePath: string; amountPath: string; currencyPath: string;
-  tags: string[]; active: boolean; receivedCount: number; rejectedCount: number; lastReceivedAt: string | null; lastError: string; lastErrorAt: string | null; url: string;
-};
 
 type HookRow = {
   id: string; name: string; secret: string; email_path: string; first_name_path: string; last_name_path: string; amount_path: string; currency_path: string;
@@ -24,20 +21,19 @@ type HookRow = {
 };
 
 const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
-const publicBase = () => {
+const publicBase = (request: Request) => {
   const configured = process.env.APP_ORIGIN;
   try { if (configured) return new URL(configured).origin; } catch { /* fall through */ }
-  const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
-  return vercel ? `https://${vercel}` : 'http://localhost:3000';
+  return requestOrigin(request);
 };
-const toHook = (row: HookRow): InboundHook => ({
+const toHook = (row: HookRow, request: Request): InboundHook => ({
   id: row.id, name: row.name, secret: row.secret, emailPath: row.email_path, firstNamePath: row.first_name_path, lastNamePath: row.last_name_path,
   amountPath: row.amount_path, currencyPath: row.currency_path, tags: row.tags ?? [], active: row.active, receivedCount: row.received_count,
   rejectedCount: row.rejected_count, lastReceivedAt: iso(row.last_received_at), lastError: row.last_error, lastErrorAt: iso(row.last_error_at),
-  url: `${publicBase()}/api/public/hooks/${row.id}`,
+  url: `${publicBase(request)}/api/public/hooks/${row.id}`,
 });
 
-const path = z.string().trim().max(200).regex(/^[A-Za-z0-9_.-]*$/, 'Use a dot path such as customer.email.');
+const path = z.string().trim().max(200).regex(/^(?:[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)?$/, 'Use a dot path such as customer.email.');
 const hookInput = z.object({
   name: z.string().trim().min(1).max(120),
   emailPath: path.min(1, 'Say where the email address is.').default('email'),
@@ -53,8 +49,8 @@ export function readPath(data: unknown, dotted: string): unknown {
   if (!dotted) return undefined;
   let current: unknown = data;
   for (const part of dotted.split('.')) {
-    if (current == null || typeof current !== 'object') return undefined;
-    current = Array.isArray(current) ? current[Number(part)] : (current as Record<string, unknown>)[part];
+    if (current == null || typeof current !== 'object' || !Object.hasOwn(current, part)) return undefined;
+    current = (current as Record<string, unknown>)[part];
   }
   return current;
 }
@@ -66,7 +62,7 @@ const equal = (a: string, b: string) => {
 };
 
 /** True when the request proves knowledge of the secret by token or by an HMAC of the exact body. */
-export function verifyHookRequest(raw: string, headers: Headers, secret: string) {
+export function verifyHookRequest(raw: string | Buffer, headers: Headers, secret: string) {
   const bearer = /^Bearer\s+(.+)$/i.exec(headers.get('authorization') ?? '')?.[1]?.trim();
   if (bearer && equal(bearer, secret)) return true;
   const mac = createHmac('sha256', secret).update(raw);
@@ -88,61 +84,99 @@ async function reject(hookId: string, message: string) {
 }
 
 export async function receiveHook(hookId: string, request: Request): Promise<Response> {
-  if (!/^[0-9a-f-]{36}$/.test(hookId)) return Response.json({ error: 'Unknown webhook.' }, { status: 404 });
+  if (!z.uuid().safeParse(hookId).success) return json({ error: 'Unknown webhook.' }, 404);
   const row = (await db.query<HookRow>('SELECT * FROM journey_inbound_hooks WHERE id = $1', [hookId])).rows[0];
-  if (!row) return Response.json({ error: 'Unknown webhook.' }, { status: 404 });
-  if (!row.active) return Response.json({ error: 'This webhook is paused.' }, { status: 410 });
-  const raw = await request.text();
-  if (raw.length > 256 * 1024) return Response.json({ error: 'Payload too large (256 KB maximum).' }, { status: 413 });
+  if (!row) return json({ error: 'Unknown webhook.' }, 404);
+  if (!row.active) return json({ error: 'This webhook is paused.' }, 410);
+  const raw = await readBodyBytes(request, 256 * 1024);
   if (!verifyHookRequest(raw, request.headers, row.secret)) {
     await reject(row.id, 'A delivery was refused: missing or wrong signature.');
-    return Response.json({ error: 'Missing or invalid signature.' }, { status: 401 });
+    return json({ error: 'Missing or invalid signature.' }, 401);
   }
-  let body: unknown;
-  try { body = JSON.parse(raw); } catch {
-    await reject(row.id, 'A delivery was refused: the body was not JSON.');
-    return Response.json({ error: 'Send a JSON body.' }, { status: 400 });
+  const body = parseDelivery(raw);
+  if (!body) {
+    await reject(row.id, 'A delivery was refused: the body was not a JSON object.');
+    return json({ error: 'Send a UTF-8 JSON object.' }, 400);
   }
   const deliveryKey = (request.headers.get('idempotency-key') || request.headers.get('x-shopify-webhook-id') || request.headers.get('x-wc-webhook-delivery-id')
     || 'sha256:' + createHash('sha256').update(raw).digest('hex')).slice(0, 200);
-  const fresh = await db.query('INSERT INTO journey_hook_deliveries (hook_id, delivery_key) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING hook_id', [row.id, deliveryKey]);
-  if (!fresh.rows[0]) return Response.json({ received: true, duplicate: true });
-
-  const text = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
   const email = text(readPath(body, row.email_path)).toLowerCase();
-  let contactId: number | null = null;
-  let outcome = 'accepted without a contact (no email at ' + row.email_path + ')';
-  if (email) {
-    if (!z.email().safeParse(email).success) {
-      outcome = `accepted without a contact (“${email.slice(0, 80)}” is not an email address)`;
-    } else {
-      const { contact } = await upsertContact({
-        email, firstName: text(readPath(body, row.first_name_path)) || undefined, lastName: text(readPath(body, row.last_name_path)) || undefined,
-        tags: row.tags.length ? row.tags : undefined, source: `Webhook: ${row.name}`,
-      });
-      contactId = contact.id;
-      outcome = 'accepted';
-    }
+  if (email && !z.email().max(254).safeParse(email).success) {
+    await reject(row.id, 'A delivery was refused: the mapped email was invalid.');
+    return json({ error: 'The mapped email is invalid.' }, 422);
   }
-  const amount = Number(text(readPath(body, row.amount_path)));
-  const currency = text(readPath(body, row.currency_path)).toUpperCase();
-  // Top-level scalar fields travel with the event so workflow conditions and merge tags can use them.
-  const fields = Object.fromEntries(Object.entries(body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {})
-    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 30).map(([key, value]) => [key.slice(0, 60), String(value).slice(0, 200)]));
-  await emitEvent({
-    type: 'webhook.received', contactId, entityType: 'hook', entityId: row.id, source: `hook:${row.id}`,
-    amount: row.amount_path && Number.isFinite(amount) ? amount : null, currency: /^[A-Z]{3}$/.test(currency) ? currency : null,
-    properties: { hookName: row.name, fields }, idempotencyKey: `webhook.received:${row.id}:${deliveryKey}`,
-  });
-  await db.query('UPDATE journey_hook_deliveries SET contact_id = $3, outcome = $4 WHERE hook_id = $1 AND delivery_key = $2', [row.id, deliveryKey, contactId, outcome]);
-  await db.query('UPDATE journey_inbound_hooks SET received_count = received_count + 1, last_received_at = now() WHERE id = $1', [row.id]);
-  return Response.json({ received: true, contactId, outcome }, { status: 202 });
+
+  const lease = randomUUID();
+  const claimed = await db.query(
+    `INSERT INTO journey_hook_deliveries (hook_id, delivery_key, lease_id, lease_expires_at)
+     SELECT id, $2, $3, now() + interval '90 seconds' FROM journey_inbound_hooks WHERE id = $1 AND active AND secret = $4
+     ON CONFLICT (hook_id, delivery_key) DO UPDATE SET lease_id = EXCLUDED.lease_id, lease_expires_at = EXCLUDED.lease_expires_at
+     WHERE journey_hook_deliveries.outcome = '' AND coalesce(journey_hook_deliveries.lease_expires_at, '-infinity') <= now()
+     RETURNING hook_id`, [row.id, deliveryKey, lease, row.secret],
+  );
+  if (!claimed.rowCount) {
+    const completed = await db.query(`SELECT 1 FROM journey_hook_deliveries WHERE hook_id = $1 AND delivery_key = $2 AND outcome <> ''`, [row.id, deliveryKey]);
+    return completed.rowCount ? json({ received: true, duplicate: true }) : retryDelivery();
+  }
+
+  try {
+    const mapped = email ? await upsertContact({
+      email, firstName: text(readPath(body, row.first_name_path)).slice(0, 120) || undefined,
+      lastName: text(readPath(body, row.last_name_path)).slice(0, 120) || undefined,
+      tags: row.tags, source: `Webhook: ${row.name}`,
+    }) : null;
+    const contactId = mapped?.contact.id ?? null;
+    const outcome = email ? 'accepted' : `accepted without a contact (no email at ${row.email_path})`;
+    const committed = await transaction(async client => {
+      const updated = await client.query(
+        `UPDATE journey_hook_deliveries SET contact_id = $4, outcome = $5, lease_id = NULL, lease_expires_at = NULL
+         WHERE hook_id = $1 AND delivery_key = $2 AND lease_id = $3 RETURNING hook_id`, [row.id, deliveryKey, lease, contactId, outcome]);
+      if (!updated.rowCount) return false;
+      const amountText = text(readPath(body, row.amount_path));
+      const amount = amountText ? Number(amountText) : NaN;
+      const currency = text(readPath(body, row.currency_path)).toUpperCase();
+      const fields = Object.fromEntries(Object.entries(body)
+        .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+        .slice(0, 30).map(([key, value]) => [key.slice(0, 60), String(value).slice(0, 200)]));
+      await emitEvent({
+        type: 'webhook.received', contactId, entityType: 'hook', entityId: row.id, source: `hook:${row.id}`,
+        amount: Number.isFinite(amount) && Math.abs(amount) <= 1e12 ? amount : null,
+        currency: /^[A-Z]{3}$/.test(currency) ? currency : null,
+        properties: { hookName: row.name, fields }, idempotencyKey: `webhook.received:${row.id}:${deliveryKey}`,
+      }, client);
+      await client.query('UPDATE journey_inbound_hooks SET received_count = received_count + 1, last_received_at = now() WHERE id = $1', [row.id]);
+      return true;
+    });
+    return committed ? json({ received: true, contactId, outcome }, 202) : retryDelivery();
+  } catch (error) {
+    await db.query(`UPDATE journey_hook_deliveries SET lease_id = NULL, lease_expires_at = NULL
+      WHERE hook_id = $1 AND delivery_key = $2 AND lease_id = $3`, [row.id, deliveryKey, lease]);
+    throw error;
+  }
+}
+
+const text = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+
+function parseDelivery(raw: Buffer): Record<string, unknown> | null {
+  try {
+    const data: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+    return data && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function retryDelivery() {
+  return Response.json({ error: 'This delivery is still being processed. Retry shortly.' },
+    { status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '15' } });
 }
 
 const hookId = (value: string) => z.uuid().parse(value);
 
 export const hookEndpoints: Entry[] = [
-  route('GET', /^journeys\/hooks$/, async () => ({ items: (await db.query<HookRow>('SELECT * FROM journey_inbound_hooks ORDER BY lower(name)')).rows.map(toHook) }), 'admin'),
+  route('GET', /^journeys\/hooks$/, async ({ request }) => ({
+    items: (await db.query<HookRow>('SELECT * FROM journey_inbound_hooks ORDER BY lower(name)')).rows.map(row => toHook(row, request)),
+  }), 'admin'),
   route('POST', /^journeys\/hooks$/, async ({ request, user }) => {
     const input = await readBody(request, hookInput);
     const row = (await db.query<HookRow>(
@@ -150,7 +184,7 @@ export const hookEndpoints: Entry[] = [
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
       [input.name, newSecret(), input.emailPath, input.firstNamePath, input.lastNamePath, input.amountPath, input.currencyPath, input.tags, input.active, user.id])).rows[0];
     await audit(user.id, 'create', 'inbound_hook', row.id, input.name);
-    return json(toHook(row), 201);
+    return json(toHook(row, request), 201);
   }, 'admin'),
   route('PATCH', /^journeys\/hooks\/([0-9a-f-]{36})$/, async ({ request, params, user }) => {
     const input = await readBody(request, hookInput);
@@ -160,13 +194,13 @@ export const hookEndpoints: Entry[] = [
       [hookId(params[0]), input.name, input.emailPath, input.firstNamePath, input.lastNamePath, input.amountPath, input.currencyPath, input.tags, input.active])).rows[0];
     if (!row) throw new AppError(404, 'That webhook was not found.');
     await audit(user.id, 'update', 'inbound_hook', row.id, input.name);
-    return toHook(row);
+    return toHook(row, request);
   }, 'admin'),
-  route('POST', /^journeys\/hooks\/([0-9a-f-]{36})\/rotate$/, async ({ params, user }) => {
+  route('POST', /^journeys\/hooks\/([0-9a-f-]{36})\/rotate$/, async ({ request, params, user }) => {
     const row = (await db.query<HookRow>('UPDATE journey_inbound_hooks SET secret = $2, updated_at = now() WHERE id = $1 RETURNING *', [hookId(params[0]), newSecret()])).rows[0];
     if (!row) throw new AppError(404, 'That webhook was not found.');
     await audit(user.id, 'rotate_secret', 'inbound_hook', row.id, row.name);
-    return toHook(row);
+    return toHook(row, request);
   }, 'admin'),
   route('DELETE', /^journeys\/hooks\/([0-9a-f-]{36})$/, async ({ params, user }) => {
     const id = hookId(params[0]);

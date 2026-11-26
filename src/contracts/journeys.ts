@@ -31,6 +31,16 @@ export type TriggerFilters = {
 };
 export type FlowTrigger = { id: string; type: FlowTriggerType; filters: TriggerFilters };
 
+export type InboundHookSettings = {
+  name: string; emailPath: string; firstNamePath: string; lastNamePath: string; amountPath: string; currencyPath: string;
+  tags: string[]; active: boolean;
+};
+
+export type InboundHook = InboundHookSettings & {
+  id: string; secret: string; url: string; receivedCount: number; rejectedCount: number;
+  lastReceivedAt: string | null; lastError: string; lastErrorAt: string | null;
+};
+
 type TriggerFilterKind = 'form' | 'page' | 'pipeline' | 'stage' | 'tag' | 'campaign' | 'hook';
 export type FlowTriggerSpec = {
   type: FlowTriggerType;
