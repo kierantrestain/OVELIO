@@ -5,6 +5,7 @@ import type { LaneModule } from '../platform/types';
 import { dealEndpoints } from './deals';
 import { forecastEndpoints } from './forecast';
 import { importEndpoints } from './imports';
+import { listEndpoints } from './lists';
 import { MAILBOX_SYNC_JOB, mailboxEndpoints, runMailboxSync } from './mailboxes';
 import { peopleEndpoints } from './people';
 import { pipelineEndpoints } from './pipelines';
@@ -39,7 +40,7 @@ export async function searchSales(query: string): Promise<SearchResult[]> {
 
 export const crmModule: LaneModule = {
   name: 'crm',
-  endpoints: [...pipelineEndpoints, ...dealEndpoints, ...taskEndpoints, ...peopleEndpoints, ...forecastEndpoints, ...sequenceEndpoints, ...mailboxEndpoints, ...importEndpoints],
+  endpoints: [...pipelineEndpoints, ...dealEndpoints, ...taskEndpoints, ...peopleEndpoints, ...forecastEndpoints, ...sequenceEndpoints, ...mailboxEndpoints, ...importEndpoints, ...listEndpoints],
   jobHandlers: {
     [REMINDER_JOB]: runTaskReminder,
     [SEQUENCE_JOB]: runSequenceStep,

@@ -265,7 +265,10 @@ export type CrmContact = DirectoryContact & {
   lastActivityAt: string | null;
 };
 
-export type CrmContactPage = { items: CrmContact[]; total: number; page: number; limit: number };
+/** `note` explains a filtered list that was computed from a capped scan of the audience engine. */
+export type CrmContactPage = { items: CrmContact[]; total: number; page: number; limit: number; note?: string };
+
+export type CrmContactSort = 'createdAt' | 'updatedAt' | 'lastName' | 'email' | 'points' | 'lastActivity' | 'openDealValue';
 
 export type ContactProfile = {
   contactId: number;
@@ -295,7 +298,10 @@ export type CrmCompany = {
   openValue: number;
   wonRevenue: number;
   currency: string;
+  lastActivityAt?: string | null;
 };
+
+export type CrmCompanyPage = { items: CrmCompany[]; total: number; page: number; limit: number };
 
 export type CompanyProfile = {
   company: CrmCompany;
