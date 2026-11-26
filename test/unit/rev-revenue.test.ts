@@ -232,3 +232,28 @@ test('REV-08 manual payments, balance invoices, declines and the void guard', as
   const settled = await call<Invoice>('POST', `revenue/invoices/${balance.id}/payments`, { amount: 350 });
   assert.equal(settled.status, 'paid');
 });
+
+test('REV-09 a workflow triggered by an accepted proposal enrols the signer and creates the onboarding task', async () => {
+  const flows = await import('../../src/server/journeys/flows');
+  const { drainPlatformJobs } = await import('../../src/server/platform/jobs');
+  const [contact] = await searchContacts('daniel');
+  const flow = await flows.createFlow({
+    name: 'REV welcome new client',
+    triggers: [{ id: 't1', type: 'quote.accepted', filters: {} }],
+    graph: { nodes: [
+      { id: 'start', type: 'start', position: { x: 0, y: 0 }, config: {} },
+      { id: 'task', type: 'create_task', position: { x: 0, y: 120 }, config: { title: 'Welcome pack for {{contact.first_name}}', dueInDays: 1, assignee: 'owner' } },
+    ], edges: [{ id: 'e1', source: 'start', target: 'task', sourceHandle: 'next' }] },
+  }, user.id);
+  await flows.publishFlow(flow.id, user.id);
+  const deal = await createDeal({ name: 'Harbourline retainer', amount: 900, contactId: contact.id, source: 'test' });
+  const draft = await call<Quote>('POST', 'revenue/quotes', { dealId: deal.id });
+  const { quote } = await call<{ quote: Quote }>('POST', `revenue/quotes/${draft.id}/send`, { email: false });
+  await postQuote(quote.publicUrl!.split('/q/')[1], form({ action: 'accept', signerName: 'Daniel Price', signerEmail: contact.email, agree: 'true' }));
+  for (let i = 0; i < 30 && await drainPlatformJobs({ maxJobs: 50, budgetMs: 10_000 }); i += 1) { /* drain */ }
+  const enrolments = await db.query<{ status: string }>('SELECT status FROM journey_enrolments WHERE flow_id = $1 AND contact_id = $2', [flow.id, contact.id]);
+  assert.equal(enrolments.rows.length, 1);
+  assert.equal(enrolments.rows[0].status, 'completed');
+  const task = await db.query(`SELECT 1 FROM tasks WHERE contact_id = $1 AND title LIKE 'Welcome pack for %'`, [contact.id]);
+  assert.equal(task.rows.length, 1);
+});

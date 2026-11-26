@@ -35,6 +35,7 @@ import {
   Timeline, companyOption, contactOption, followUpDefaults, money, relative, shortDate, statusLabel, statusTone, useTeam,
 } from './common';
 import type { TaskDefaults } from './common';
+import { DealRevenuePanel } from '../revenue/proposals';
 
 type Filters = { q: string; ownerId: string; status: string; closeFrom: string; closeTo: string; minAmount: string; maxAmount: string; campaignId: string };
 const emptyFilters: Filters = { q: '', ownerId: '', status: 'open', closeFrom: '', closeTo: '', minAmount: '', maxAmount: '', campaignId: '' };
@@ -514,6 +515,7 @@ export function DealView({ id }: { id: string }) {
     </Panel>
     <div className="ov-crm-detail">
       <div className="ov-stack">
+        <DealRevenuePanel dealId={deal.id} onChanged={detail.refresh} />
         <Panel title="Log activity">
           <ActivityLogger dealId={deal.id} contactId={deal.contactId} companyId={deal.companyId} onLogged={detail.refresh} />
         </Panel>

@@ -9,6 +9,11 @@ const { crmModule } = await import('../../src/server/crm/module');
 const { searchContacts } = await import('../../src/server/directory');
 type ContactPage = import('../../src/contracts/crm').CrmContactPage;
 
+// Runs every due job: each event fans out to one delivery per lane, so a fixed job budget stops short as lanes are added.
+async function drainAll(drain: (options: { maxJobs?: number; budgetMs?: number }) => Promise<number>) {
+  for (let round = 0; round < 50 && await drain({ maxJobs: 200, budgetMs: 10_000 }); round += 1) { /* keep draining */ }
+}
+
 after(async () => { await db.close(); });
 
 const user = { id: '00000000-0000-4000-8000-000000000001', email: 'dev@ovelio.test', name: 'Developer Test', role: 'admin' as const };
@@ -60,7 +65,7 @@ test('CR-03 a form lead goes to the next rep in rotation, once, and only when it
     const event = await emitEvent({ type: 'form.submitted', contactId: contact.id, entityType: 'form', entityId: 'f-demo', properties: { formName: 'Demo request' } });
     leads.push({ contact, event: event! });
   }
-  await drainPlatformJobs({ maxJobs: 200 });
+  await drainAll(drainPlatformJobs);
   assert.equal(await owner(leads[0].contact.id), MAYA);
   assert.equal(await owner(leads[1].contact.id), LIAM, 'the second lead goes to the next rep');
   const { routeLead } = await import('../../src/server/crm/routing');
@@ -68,7 +73,7 @@ test('CR-03 a form lead goes to the next rep in rotation, once, and only when it
   assert.equal(await owner(leads[0].contact.id), MAYA, 'a redelivered event changes nothing');
   const { contact: other } = await upsertContact({ email: 'lead.three@routing.example', source: 'test' });
   await emitEvent({ type: 'contact.created', contactId: other.id, source: 'import' });
-  await drainPlatformJobs({ maxJobs: 200 });
+  await drainAll(drainPlatformJobs);
   assert.equal(await owner(other.id), user.id, 'the catch-all rule takes leads no other rule matches');
   const changes = await listEvents({ contactId: leads[1].contact.id, types: ['contact.owner_changed'] });
   assert.equal(changes.length, 1);
@@ -114,7 +119,7 @@ test('CR-05 sequence steps wait for the recipient’s send window and the sender
   const [claire] = await searchContacts('claire');
   const [daniel] = await searchContacts('daniel');
   await call('POST', `sales/sequences/${sequence.id}/enrol`, { contactIds: [claire.id, daniel.id] });
-  await drainPlatformJobs({ maxJobs: 200 });
+  await drainAll(drainPlatformJobs);
   const enrolments = await call<{ runs: unknown[]; waitReason: string; nextRunAt: string }[]>('GET', `sales/sequences/${sequence.id}/enrolments`);
   assert.equal(enrolments.filter(item => item.runs.length === 1).length, 1, 'one email goes out today');
   const waiting = enrolments.find(item => item.runs.length === 0)!;

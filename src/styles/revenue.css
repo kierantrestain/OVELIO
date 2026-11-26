@@ -1,0 +1,22 @@
+/* Revenue screens (wave two). Classes are prefixed ov-revenue-. */
+.ov-revenue-lines { display: grid; gap: 10px; }
+.ov-revenue-line { display: grid; gap: 8px 10px; align-items: end; grid-template-columns: minmax(180px, 2.4fr) repeat(4, minmax(84px, 1fr)) minmax(120px, 1.1fr) minmax(90px, auto) auto;
+  padding: 10px 12px; border: 1px solid var(--color-border); border-radius: var(--radius-element); background: var(--color-background); }
+.ov-revenue-line-total { text-align: right; font-variant-numeric: tabular-nums; padding-bottom: 8px; white-space: nowrap; }
+.ov-revenue-totals { margin-left: auto; width: min(100%, 340px); display: grid; gap: 4px; font-variant-numeric: tabular-nums; }
+.ov-revenue-totals > div { display: flex; justify-content: space-between; gap: 16px; }
+.ov-revenue-totals > .ov-revenue-grand { font-weight: 700; font-size: var(--font-size-lg, 18px); border-top: 1px solid var(--color-border); padding-top: 8px; margin-top: 4px; }
+.ov-revenue-states { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.ov-revenue-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--color-text-secondary); font-size: var(--font-size-sm); }
+.ov-revenue-flow span[aria-hidden] { opacity: .6; }
+.ov-revenue-link { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+.ov-revenue-link > :first-child { flex: 1 1 260px; min-width: 0; }
+.ov-revenue-audit { display: grid; gap: 4px; font-size: var(--font-size-sm); }
+.ov-revenue-audit code { word-break: break-all; font-size: 12px; }
+@media (max-width: 900px) {
+  .ov-revenue-line { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-revenue-line > :first-child { grid-column: 1 / -1; }
+  .ov-revenue-line-total { text-align: left; }
+}
+.ov-revenue-row-link { font: inherit; font-weight: 600; color: var(--color-text-accent); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.ov-revenue-row-link:hover { text-decoration: underline; }
