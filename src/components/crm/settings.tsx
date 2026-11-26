@@ -34,6 +34,7 @@ import { useUser } from '../shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, SlideDrawer, StatusBadge, Toolbar } from '../ui';
 import { ContactPicker, relative, shortDate, dateTime } from './common';
 import type { Member, RecordOption } from './common';
+import { InboxTeamPanel, SavedReplyPicker } from './inbox-team';
 
 /* ── Pipelines ────────────────────────────────────────────────────────── */
 
@@ -590,13 +591,19 @@ function InboxMessage({ item, mailboxId, threadSubject }: { item: InboxThreadMes
 
 function InboxReply({ params, onSent }: { params: string; onSent: () => void }) {
   const [body, setBody] = useState('');
+  const attempt = useRef<{ body: string; id: string | undefined } | null>(null);
   const action = useAction();
   const reply = body.trim();
-  return <form className="ov-stack-sm ov-crm-inbox-reply" onSubmit={event => {
+  return <div className="ov-stack-sm ov-crm-inbox-reply">
+    <SavedReplyPicker onApply={text => setBody(current => current ? current + '\n\n' + text : text)} />
+    <form className="ov-stack-sm" onSubmit={event => {
     event.preventDefault();
     if (!reply) return;
+    if (attempt.current?.body !== reply) attempt.current = { body: reply, id: crypto.randomUUID?.() };
+    const requestId = attempt.current.id;
     void action.run(async () => {
-      const result = await api<SalesEmailResult>(`/sales/inbox/reply?${params}`, 'POST', { body: reply });
+      const result = await api<SalesEmailResult>(`/sales/inbox/reply?${params}`, 'POST', { body: reply, requestId });
+      attempt.current = null;
       if (result.status !== 'sent') throw new Error(result.reason || 'The reply could not be sent.');
       setBody('');
       onSent();
@@ -607,7 +614,8 @@ function InboxReply({ params, onSent }: { params: string; onSent: () => void }) 
     <div className="ov-actions ov-actions--end">
       <Button type="submit" variant="primary" label="Send reply" isDisabled={!reply} isLoading={action.busy} />
     </div>
-  </form>;
+    </form>
+  </div>;
 }
 
 function InboxThreadDrawer({ thread, onClose, onChanged }: { thread: InboxThreadSummary; onClose: () => void; onChanged: () => void }) {
@@ -643,6 +651,7 @@ function InboxThreadDrawer({ thread, onClose, onChanged }: { thread: InboxThread
         {messages.map(item => <InboxMessage key={item.id} item={item} mailboxId={thread.mailboxId} threadSubject={subject} />)}
       </ol>
       {snapshot.canReply ? <InboxReply params={params} onSent={() => { detail.refresh(); onChanged(); }} /> : null}
+      <InboxTeamPanel mailboxId={thread.mailboxId} threadId={thread.threadId} />
     </>}
   </SlideDrawer>;
 }

@@ -55,17 +55,18 @@ test('INB-01 mailbox ownership and sharing apply across authenticated console su
     INSERT INTO crm_mailboxes (id, user_id, provider, email, refresh_token_enc)
     VALUES (:'mailbox', :'owner', 'google', :'mailbox_email', 'fixture-unused'),
       (:'other_mailbox', :'outsider', 'microsoft', :'other_email', 'fixture-unused');
-    INSERT INTO messages (id, contact_id, category, status, to_email, from_email, subject, html, source, created_by, sent_at, created_at, mailbox_id)
+    INSERT INTO messages (id, contact_id, category, status, to_email, from_email, subject, html, text_body, provider_message_id, source, created_by, sent_at, created_at, mailbox_id)
     VALUES (:'message', :contact, 'sales', 'sent', :'contact_email', :'mailbox_email', :'private_subject', '<p>Fixture</p>',
-      'mailbox:' || :'mailbox', :'owner', now() - interval '2 minutes', now() - interval '2 minutes', :'mailbox'),
+      :'private_body', 'msg-1', 'mailbox:' || :'mailbox', :'owner', now() - interval '2 minutes', now() - interval '2 minutes', :'mailbox'),
       (gen_random_uuid(), :contact, 'sales', 'sent', :'contact_email', 'gateway@example.test', :'gateway_subject', '<p>Fixture</p>',
-       'sales:' || :'owner', :'owner', now() - interval '1 hour', now() - interval '1 hour', NULL);
+       '', NULL, 'sales:' || :'owner', :'owner', now() - interval '1 hour', now() - interval '1 hour', NULL);
     INSERT INTO activities (id, contact_id, company_id, deal_id, type, direction, subject, body, occurred_at, mailbox_id, message_id, author_id)
     VALUES (:'activity', :contact, :company, :'deal', 'email', 'outbound', :'private_subject', :'private_body',
       now() - interval '2 minutes', :'mailbox', :'message', :'owner');
     INSERT INTO crm_mailbox_messages
       (mailbox_id, provider_message_id, thread_id, contact_id, direction, subject, snippet, from_email, to_emails, activity_id)
     VALUES (:'mailbox', 'msg-1', :'thread', :contact, 'outbound', :'private_subject', :'private_body', :'mailbox_email', :'contact_email', :'activity'),
+      (:'mailbox', 'msg-2', :'thread', :contact, 'inbound', :'private_subject', :'private_body', :'contact_email', :'mailbox_email', NULL),
       (:'other_mailbox', 'msg-1', :'thread', :contact, 'inbound', :'other_subject', 'Second mailbox', :'contact_email', :'other_email', NULL);
     INSERT INTO events (type, contact_id, deal_id, entity_type, entity_id, mailbox_id, properties)
     VALUES ('activity.logged', :contact, :'deal', 'activity', :'activity', :'mailbox', jsonb_build_object('subject', :'private_subject')),
@@ -83,6 +84,9 @@ test('INB-01 mailbox ownership and sharing apply across authenticated console su
   const events = '/platform/events?contactId=' + contactId + '&types=email.replied,activity.logged';
   const membersPath = '/mailboxes/' + mailboxId + '/members';
   const thread = (mailbox: string) => '/sales/inbox/thread?' + new URLSearchParams({ mailboxId: mailbox, threadId });
+  const message = '/sales/inbox/message?' + new URLSearchParams({ mailboxId, messageId: 'msg-1' });
+  const attachment = '/sales/inbox/attachment?' + new URLSearchParams({ mailboxId, messageId: 'msg-1', attachmentId: '0' });
+  const team = '/sales/inbox/team?' + new URLSearchParams({ mailboxId, threadId });
   const contentPaths = ['/sales/inbox', '/sales/inbox' + findPrivate, '/sales/inbox/threads' + findPrivate, '/sales/inbox/export' + findPrivate,
     '/crm/activities?contactId=' + contactId, '/crm/contacts/' + contactId + '/profile', '/crm/companies/' + company.id + '/profile',
     '/sales/deals/' + dealId, events];
@@ -102,6 +106,14 @@ test('INB-01 mailbox ownership and sharing apply across authenticated console su
     const body = await detail.text();
     assert.equal(body.includes(privateBody), visible);
     assert.ok(!body.includes(otherSubject), 'identical provider thread IDs in other mailboxes cannot bleed into this thread');
+    const full = await api.response(message);
+    assert.equal(full.status, visible ? 200 : 404, 'the full-body endpoint enforces mailbox membership');
+    assert.equal((await full.text()).includes(privateBody), visible);
+    assert.equal((await api.response(team)).status, visible ? 200 : 404, 'team inbox metadata follows the same boundary');
+    if (!visible) {
+      assert.equal((await api.response(attachment)).status, 404, 'file downloads fail before loading provider credentials');
+      assert.equal((await api.response(thread(mailboxId), 'PATCH', { read: true })).status, 404);
+    }
   }
 
   await context.test('INB-02 record ownership and administrator privileges do not grant mailbox content', async () => {
@@ -137,6 +149,10 @@ test('INB-01 mailbox ownership and sharing apply across authenticated console su
     const updated = await owner.api.get<{ members: { userId: string }[] }>(membersPath, 'PATCH', { userIds: [member.id] });
     assert.deepEqual(updated.members.map(item => item.userId), [member.id]);
     await assertContents(member.api, true);
+    const snapshot = await member.api.get<{ unread: boolean; readVersion: string }>(thread(mailboxId));
+    assert.ok(snapshot.unread);
+    assert.deepEqual(await member.api.get(thread(mailboxId), 'PATCH', { read: true, through: snapshot.readVersion }), { unread: false });
+    assert.equal((await owner.api.get<{ unread: boolean }>(thread(mailboxId))).unread, true, 'read markers are per viewer');
 
     await admin.get('/settings/team/' + member.id, 'PATCH', { role: 'analyst' });
     assert.equal((await member.api.response('/sales/inbox')).status, 403);

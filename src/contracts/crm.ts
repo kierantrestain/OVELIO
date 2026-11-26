@@ -484,8 +484,20 @@ export type InboxThreadMessage = {
   at: string;
 };
 
-export type InboxThreadSummary = InboxThreadMessage & { mailboxId: string; mailboxEmail: string; threadId: string; count: number };
-export type InboxThread = { mailboxId: string; threadId: string; messages: InboxThreadMessage[] };
+export type InboxThreadSummary = InboxThreadMessage & { mailboxId: string; mailboxEmail: string; threadId: string; count: number; unread: boolean };
+export type InboxThread = {
+  mailboxId: string;
+  threadId: string;
+  messages: InboxThreadMessage[];
+  unread: boolean;
+  readVersion: string;
+  canReply: boolean;
+};
+
+export type InboxMessageContent = {
+  body: string;
+  attachments: { id: string; name: string; size: number; downloadable: boolean }[];
+};
 
 /* ── Filters and helpers ──────────────────────────────────────────────── */
 

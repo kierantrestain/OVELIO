@@ -325,7 +325,9 @@ export async function stopOnEvent(event: PlatformEvent) {
     for (const row of people.rows) contactIds.add(Number(row.contact_id));
   }
   if (!contactIds.size) return;
-  const active = await db.query<{ id: string }>(`SELECT id FROM crm_sequence_enrolments WHERE status = 'active' AND contact_id = ANY($1::bigint[])`, [[...contactIds]]);
+  const cutoff = event.type === 'email.replied' ? event.occurredAt : null;
+  const active = await db.query<{ id: string }>(`SELECT id FROM crm_sequence_enrolments WHERE status = 'active'
+    AND contact_id = ANY($1::bigint[]) AND ($2::timestamptz IS NULL OR enrolled_at <= $2)`, [[...contactIds], cutoff]);
   for (const row of active.rows) await finish(row.id, 'stopped', reason);
 }
 
