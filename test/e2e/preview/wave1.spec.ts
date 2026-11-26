@@ -25,8 +25,10 @@ function api(request: APIRequestContext, baseURL: string): Api {
   };
 }
 
+/** Opens an Astryx Selector by its label (a combobox, or a button when the selector has search) and picks an option. */
 async function choose(page: Page, label: string, option: string | RegExp, scope: Page | ReturnType<Page['locator']> = page) {
-  await scope.getByRole('combobox', { name: label, exact: true }).click();
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  await scope.getByRole('combobox', { name: label, exact: true }).or(scope.getByRole('button', { name: new RegExp(`^${escaped} `) })).first().click();
   await page.getByRole('option', { name: option }).first().click();
 }
 
@@ -35,7 +37,8 @@ type PageDetail = { id: string; slug: string; formId: string | null; url: string
 
 async function publishedPage(a: Api, templateKey: string, name: string): Promise<PageDetail> {
   const page = await a.send<PageDetail>('POST', 'sites/pages', { name, templateKey, slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-') });
-  return a.send<PageDetail>('POST', `sites/pages/${page.id}/publish`);
+  const published = await a.send<PageDetail>('POST', `sites/pages/${page.id}/publish`);
+  return { ...published, formId: published.formId ?? page.formId };
 }
 
 /** Opens a signed-out visitor browser, as a real lead would arrive. */
@@ -79,7 +82,7 @@ test('IQ-02 notifications: a form lead creates a notification that appears in th
   await visitor(browser, baseURL!, async lead => {
     await lead.goto(new URL(landing.url, baseURL).pathname);
     await fillSaasForm(lead, { firstName: 'Iq', email: `iq.lead.${id}@example.test`, company: 'IQ Labs', teamSize: '11–50' });
-    await expect(lead.locator('.ovf-status')).toContainText(/thank|received|sent/i);
+    await expect(lead.locator('.ovf-success')).toBeVisible();
   });
   await expect.poll(async () => (await a.get<{ items: { title: string }[] }>('platform/notifications')).items.filter(item => item.title === title).length, { timeout: 15_000 }).toBeGreaterThan(earlier);
   await page.goto('/overview');
@@ -157,7 +160,7 @@ test('IQ-06 CRM lists: filter contacts by owner and stage, then save the view', 
   const name = `IQ owner and stage ${unique()}`;
   await page.getByRole('textbox', { name: 'View name' }).fill(name);
   await page.getByRole('button', { name: 'Save view' }).click();
-  await expect(page.getByText('View saved for the team.')).toBeVisible();
+  await expect(page.getByText('View saved for the team.').first()).toBeVisible();
   type View = { id: string; name: string; filters: { field: string; value: string }[] };
   const view = (await a.get<View[]>('platform/views?object=contacts')).find(item => item.name === name);
   expect(view?.filters).toEqual(expect.arrayContaining([{ field: 'ownerId', operator: 'eq', value: DEV }, { field: 'stage', operator: 'eq', value: 'Marketing Qualified' }]));
@@ -185,9 +188,9 @@ test('IQ-07 duplicates: merging two contacts moves their deal to the survivor', 
   await group.getByRole('radio', { name: new RegExp(`iq\\.keep\\.${id}`) }).check();
   await group.getByRole('button', { name: 'Merge into the kept contact' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Merge contacts' }).click();
-  await expect(drawer.getByText(/Merged 1 contact into Quinn/)).toBeVisible();
-  const moved = await a.get<{ contactId: number | null }>(`sales/deals/${deal.id}`);
-  expect(moved.contactId).toBe(keep.id);
+  await expect(drawer.getByText(/Merged 1 contact into Quinn/).first()).toBeVisible();
+  const moved = await a.get<{ deal: { contactId: number | null } }>(`sales/deals/${deal.id}`);
+  expect(moved.deal.contactId).toBe(keep.id);
   const left = await page.request.get(`/api/console/crm/contacts/${dup.id}/profile`);
   expect(left.status(), 'the duplicate is gone').toBe(404);
   expect(guard.problems()).toEqual([]);
@@ -198,15 +201,15 @@ test('IQ-08 lead routing: each new form lead is assigned to the next rep in rota
   const id = unique();
   const landing = await publishedPage(a, 'saas-demo', `IQ routing page ${id}`);
   const form = await a.get<{ name: string }>(`sites/forms/${landing.formId}`);
-  const rule = await a.send<{ id: string }>('POST', 'crm/routing', { name: `IQ rotation ${id}`, matchField: 'form', matchValue: form.name, userIds: [MAYA, LIAM] });
-  const rules = (await a.get<{ rules: { id: string }[] }>('crm/routing')).rules;
+  const rules = await a.send<{ id: string; name: string }[]>('POST', 'crm/routing', { name: `IQ rotation ${id}`, matchField: 'form', matchValue: form.name, userIds: [MAYA, LIAM] });
+  const rule = rules.find(item => item.name === `IQ rotation ${id}`)!;
   await a.send('POST', 'crm/routing/order', { ids: [rule.id, ...rules.filter(item => item.id !== rule.id).map(item => item.id)] });
   const emails = [`iq.route1.${id}@example.test`, `iq.route2.${id}@example.test`];
   for (const email of emails) {
     await visitor(browser, baseURL!, async lead => {
       await lead.goto(new URL(landing.url, baseURL).pathname);
-      await fillSaasForm(lead, { firstName: 'Route', email, company: 'IQ Routing', teamSize: '2–10' });
-      await expect(lead.locator('.ovf-status')).toContainText(/thank|received|sent/i);
+      await fillSaasForm(lead, { firstName: 'Route', email, company: 'IQ Routing', teamSize: '1–10' });
+      await expect(lead.locator('.ovf-success')).toBeVisible();
     });
   }
   type Contacts = { items: { id: number; email: string; ownerId: string | null }[] };
@@ -215,7 +218,7 @@ test('IQ-08 lead routing: each new form lead is assigned to the next rep in rota
   await expect.poll(() => owner(emails[1]), { timeout: 15_000 }).toBe(LIAM);
   await page.goto('/sales/pipelines');
   await settle(page);
-  const panel = page.locator('section, div').filter({ has: page.getByRole('heading', { name: 'Lead routing' }) }).last();
+  const panel = page.locator('.ov-panel').filter({ has: page.getByRole('heading', { name: 'Lead routing' }) });
   await expect(panel).toContainText(`Maya Chen · IQ rotation ${id}`);
   await expect(panel).toContainText(`Liam Brooks · IQ rotation ${id}`);
   expect(guard.problems()).toEqual([]);
@@ -234,8 +237,10 @@ test('IQ-09 stage rules: moving a deal into a stage with a missing required fiel
     await settle(page);
     await page.getByRole('navigation', { name: 'Pipeline stage' }).getByRole('button', { name: 'Proposal' }).click();
     await expect(page.getByText(new RegExp(`Add an expected close date before moving “${name}” to Proposal`))).toBeVisible();
-    expect((await a.get<{ stageName: string }>(`sales/deals/${deal.id}`)).stageName).not.toBe('Proposal');
-    expect(guard.problems()).toEqual([]);
+    const after = await a.get<{ deal: { stageName: string } }>(`sales/deals/${deal.id}`);
+    expect(after.deal.stageName).toBe('Lead in');
+    // The refusal itself is a 409 response, which Chromium logs as a failed resource; anything else is a problem.
+    expect(guard.problems().filter(problem => !/status of 409 \(Conflict\).*\/move\)$/.test(problem))).toEqual([]);
   } finally {
     await a.send('PATCH', `sales/stages/${proposal.id}`, { requiredFields: [] });
   }
@@ -317,13 +322,14 @@ test('IQ-13 template factory: a generated email template opens in the studio and
   await expect(page).toHaveURL(/\/studio\/email\/[0-9a-f-]{36}/, { timeout: 30_000 });
   const designId = /\/studio\/email\/([0-9a-f-]{36})/.exec(page.url())![1];
   const nameBox = page.getByRole('textbox', { name: 'Email name' });
-  await expect(nameBox).toBeVisible({ timeout: 30_000 });
+  // The input shows the design's own name once it has loaded; typing earlier would be replaced by the load.
+  await expect(nameBox).toHaveValue(/\S/, { timeout: 30_000 });
   const name = `IQ factory ${unique()}`;
   await nameBox.fill(name);
+  await expect.poll(async () => (await a.get<{ name: string }>(`studio/designs/${designId}`)).name, { timeout: 20_000 }).toBe(name);
   await expect(page.locator('.ov-studio-status')).toHaveText(/^Saved/, { timeout: 20_000 });
   await expect(page.getByText(/MJML (warning|warnings)/)).toHaveCount(0);
   const saved = await a.get<{ name: string; html: string }>(`studio/designs/${designId}`);
-  expect(saved.name).toBe(name);
   expect(saved.html).toMatch(/<html/i);
   expect(guard.problems()).toEqual([]);
 });
@@ -430,7 +436,7 @@ test('IQ-18 media: an uploaded SVG with a script is served sanitised with a CSP 
   await settle(page);
   await page.locator('input[type="file"]').first().setInputFiles({ name: filename, mimeType: 'image/svg+xml', buffer: Buffer.from(svg) });
   await page.getByRole('button', { name: 'Upload file' }).click();
-  await expect(page.getByText('Media file uploaded.')).toBeVisible();
+  await expect(page.getByText('Media file uploaded.').first()).toBeVisible();
   const items = await a.get<{ filename: string; url: string; contentType: string }[]>('media');
   const item = items.find(entry => entry.filename.startsWith(filename.replace(/\.svg$/, '')));
   expect(item, 'the upload is listed').toBeTruthy();
