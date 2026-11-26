@@ -46,3 +46,31 @@ test('CR-01 contact list filters by owner and stage, shows open deals, and bulk 
   const [daniel] = await searchContacts('daniel');
   assert.ok(daniel);
 });
+
+test('CR-02 duplicates are detected by email or name and company, and a merge moves every OVELIO record to the survivor', async () => {
+  const { upsertContact, getContact } = await import('../../src/server/directory');
+  const { listEvents } = await import('../../src/server/events');
+  const { contact: dup } = await upsertContact({ email: 'claire.b@northbridge-old.example', firstName: 'Claire', lastName: 'Bennett', company: 'Northbridge Studio', tags: ['legacy-import'], source: 'test' });
+  const groups = await call<{ reason: string; contacts: { id: number }[] }[]>('GET', 'crm/duplicates');
+  const group = groups.find(item => item.contacts.some(contact => contact.id === dup.id));
+  assert.equal(group?.reason, 'Same name and company');
+  const survivor = group!.contacts.find(contact => contact.id !== dup.id)!.id;
+  const deal = await call<{ id: string }>('POST', 'sales/deals', { name: 'CR-02 deal', contactId: dup.id });
+  await call('POST', 'sales/tasks', { title: 'CR-02 task', contactId: dup.id });
+  await call('POST', 'crm/activities', { type: 'note', body: 'CR-02 note', contactId: dup.id });
+  const result = await call<{ merged: number }>('POST', 'crm/duplicates/merge', { survivorId: survivor, duplicateIds: [dup.id] });
+  assert.equal(result.merged, 1);
+  assert.equal(await getContact(dup.id), null, 'the duplicate is deleted from the directory');
+  const moved = await db.query<{ deals: string; tasks: string; acts: string; left: string }>(
+    `SELECT (SELECT count(*) FROM deals WHERE id = $1 AND contact_id = $2) AS deals, (SELECT count(*) FROM tasks WHERE title = 'CR-02 task' AND contact_id = $2) AS tasks,
+       (SELECT count(*) FROM activities WHERE body = 'CR-02 note' AND contact_id = $2) AS acts,
+       (SELECT count(*) FROM tasks WHERE contact_id = $3) + (SELECT count(*) FROM activities WHERE contact_id = $3) + (SELECT count(*) FROM events WHERE contact_id = $3) AS left`,
+    [deal.id, survivor, dup.id]);
+  assert.deepEqual(Object.values(moved.rows[0]).map(Number), [1, 1, 1, 0]);
+  const merged = await getContact(survivor);
+  assert.ok(merged?.tags.includes('legacy-import'), 'tags are combined');
+  const events = await listEvents({ contactId: survivor, types: ['contact.updated'] });
+  assert.equal(events[0]?.properties.mergedContactId, dup.id);
+  const audited = await db.query(`SELECT 1 FROM audit_log WHERE action = 'merge' AND entity_id = $1`, [String(survivor)]);
+  assert.equal(audited.rows.length, 1);
+});

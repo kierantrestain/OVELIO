@@ -4,7 +4,7 @@
 // inline owner and stage edits, bulk changes, saved views (platform views 'contacts' and 'companies'), CSV import
 // and export. Creating, importing and editing reuse the audience forms.
 import '@/styles/crm.css';
-import { Download, Plus, Upload } from 'lucide-react';
+import { Combine, Download, Plus, Upload } from 'lucide-react';
 import NextLink from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -12,6 +12,7 @@ import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
 import { DateInput } from '@astryxdesign/core/DateInput';
+import { RadioList, RadioListItem } from '@astryxdesign/core/RadioList';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Table, pixel } from '@astryxdesign/core/Table';
 import { Text } from '@astryxdesign/core/Text';
@@ -24,7 +25,7 @@ import type { SavedView } from '@/contracts/platform';
 import { api, saveFile, useAction, useResource } from '../client';
 import { CompanyForm, ContactForm, ImportForm } from '../audience';
 import { useUser } from '../shell';
-import { AsyncState, DataTable, Empty, Feedback, FilterBar, FilterRow, PageHeader, Pager, Panel, StatusBadge, Toolbar } from '../ui';
+import { AsyncState, ConfirmDialog, DataTable, Empty, Feedback, FilterBar, FilterRow, FormActions, PageHeader, Pager, Panel, SlideDrawer, StatusBadge, Toolbar } from '../ui';
 import type { Tone } from '../ui';
 import { OwnerSelect, money, relative, shortDate, useTeam } from './common';
 
@@ -61,6 +62,43 @@ function SavedViews<T extends Record<string, string>>({ object, filters, sort, o
   </>;
 }
 
+type DuplicateGroup = { key: string; reason: string; contacts: CrmContact[] };
+
+function DuplicatesDrawer({ onClose, onMerged }: { onClose: () => void; onMerged: () => void }) {
+  const groups = useResource<DuplicateGroup[]>('/crm/duplicates');
+  const action = useAction();
+  const [survivors, setSurvivors] = useState<Record<string, number>>({});
+  const [confirm, setConfirm] = useState<DuplicateGroup | null>(null);
+  return <SlideDrawer title="Duplicate contacts" subtitle="Contacts with the same email address, or the same name at the same company." onClose={onClose} width={720}>
+    <div className="ov-stack-sm">
+      <Feedback error={action.error} notice={action.notice} />
+      {!groups.data ? <AsyncState loading={groups.loading} error={groups.error} retry={groups.refresh} /> : groups.data.length ? groups.data.map(group => {
+        const survivor = survivors[group.key] ?? group.contacts.reduce((best, item) => (item.openDeals > best.openDeals || (item.openDeals === best.openDeals && item.id < best.id) ? item : best), group.contacts[0]).id;
+        return <div key={group.key} className="ov-crm-step">
+          <Text weight="semibold">{group.reason}</Text>
+          <RadioList label="Keep this contact" value={String(survivor)} onChange={value => setSurvivors(current => ({ ...current, [group.key]: Number(value) }))}>
+            {group.contacts.map(contact => <RadioListItem key={contact.id} value={String(contact.id)} label={`${contact.name} · ${contact.email}`}
+              description={[contact.company, contact.ownerName ? `Owner ${contact.ownerName}` : 'Unassigned', `${contact.openDeals} open deal${contact.openDeals === 1 ? '' : 's'}`, `created ${shortDate(contact.createdAt)}`].filter(Boolean).join(' · ')} />)}
+          </RadioList>
+          <FormActions><Button variant="primary" label="Merge into the kept contact" onClick={() => setConfirm({ ...group, contacts: group.contacts.map(contact => contact) })} /></FormActions>
+        </div>;
+      }) : <Empty title="No duplicates found" description="Contacts are compared by email address and by name with company." />}
+    </div>
+    {confirm ? (() => {
+      const survivorId = survivors[confirm.key] ?? confirm.contacts.reduce((best, item) => (item.openDeals > best.openDeals || (item.openDeals === best.openDeals && item.id < best.id) ? item : best), confirm.contacts[0]).id;
+      const kept = confirm.contacts.find(contact => contact.id === survivorId)!;
+      const others = confirm.contacts.filter(contact => contact.id !== survivorId);
+      return <ConfirmDialog title={`Merge into ${kept.name}?`} actionLabel="Merge contacts" busy={action.busy}
+        description={`${others.map(contact => contact.email).join(', ')} will be deleted after their deals, tasks, activities, owner, events and sequence enrolments move to ${kept.email}. Empty fields on ${kept.name} are filled in and tags are combined. This cannot be undone.`}
+        onClose={() => setConfirm(null)}
+        onConfirm={() => void action.run(async () => {
+          await api('/crm/duplicates/merge', 'POST', { survivorId, duplicateIds: others.map(contact => contact.id) });
+          setConfirm(null); groups.refresh(); onMerged();
+        }, `Merged ${others.length} contact${others.length === 1 ? '' : 's'} into ${kept.name}.`)} />;
+    })() : null}
+  </SlideDrawer>;
+}
+
 export function CrmContactsList({ initialCreate = false }: { initialCreate?: boolean }) {
   const user = useUser();
   const router = useRouter();
@@ -73,7 +111,7 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
   const [sort, setSort] = useState<{ field: string; direction: 'asc' | 'desc' }>({ field: 'createdAt', direction: 'desc' });
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<number[]>([]);
-  const [modal, setModal] = useState<'create' | 'import' | null>(initialCreate ? 'create' : null);
+  const [modal, setModal] = useState<'create' | 'import' | 'duplicates' | null>(initialCreate ? 'create' : null);
   const [bulkTag, setBulkTag] = useState('');
   const params = new URLSearchParams({ page: String(page), limit: '25', sort: sort.field, dir: sort.direction });
   for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
@@ -105,6 +143,7 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
       actions={<>
         {user.role === 'admin' ? <Button label="Export CSV" icon={<Download size={15} />} isLoading={action.busy}
           onClick={() => void action.run(async () => saveFile(await api<string>('/contacts/export'), 'ovelio-contacts.csv', 'text/csv'))} /> : null}
+        <Button label="Duplicates" icon={<Combine size={15} />} onClick={() => setModal('duplicates')} />
         <Button label="Import CSV" icon={<Upload size={15} />} onClick={() => setModal('import')} />
         <Button label="Add contact" variant="primary" icon={<Plus size={16} />} onClick={() => setModal('create')} />
       </>} />
@@ -188,6 +227,7 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
       </>}
     </Panel>
     {modal === 'create' ? <ContactForm onClose={() => { setModal(null); if (initialCreate) router.replace('/crm'); }} onDone={contact => router.push(`/crm/contacts/${contact.id}`)} /> : null}
+    {modal === 'duplicates' ? <DuplicatesDrawer onClose={() => setModal(null)} onMerged={contacts.refresh} /> : null}
     {modal === 'import' ? <ImportForm onClose={() => { setModal(null); contacts.refresh(); }} onImported={contacts.refresh} /> : null}
   </div>;
 }
