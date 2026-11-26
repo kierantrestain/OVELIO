@@ -18,6 +18,7 @@ import type { DealPage } from '@/contracts/crm';
 import { api, useAction, useResource } from '../client';
 import { useUser } from '../shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, Snippet, StatusBadge } from '../ui';
+import { CalendarConnections } from './connections';
 import { appointmentTimeLabel, TimeZoneSelector } from './time';
 
 const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -141,7 +142,7 @@ function CalendarFeed({ active, saved }: { active: boolean; saved: () => void })
   </Panel>;
 }
 
-export function CalendarWorkspace() {
+export function CalendarWorkspace({ connectionFailed }: { connectionFailed: boolean }) {
   const calendar = useResource<CalendarOverview>('/calendar');
   const [host, setHost] = useState('all');
   const [editing, setEditing] = useState<BookingType | 'new' | null>(null);
@@ -190,12 +191,13 @@ export function CalendarWorkspace() {
             <Text type="supporting">{item.durationMinutes} minutes · {item.bufferMinutes} min buffer · {item.hostIds.length} {item.hostIds.length === 1 ? 'host' : 'hosts'}</Text>
           </span>
           <span className="ov-actions">
-            {item.active ? <NextLink href={`/book/${item.slug}`}>Open booking page</NextLink> : null}
+            {item.active ? <NextLink href={`/book/${item.slug}`} prefetch={false}>Open booking page</NextLink> : null}
             {item.canEdit ? <Button label="Edit booking type" size="sm" variant="ghost" onClick={() => setEditing(item)} /> : null}
           </span>
         </li>)}</ul> : <Empty title="No booking types" description="Create a booking type to share a public link." />}
       </Panel>
       <WorkingHours initial={data.availability} saved={calendar.refresh} />
+      <CalendarConnections failed={connectionFailed} />
       <CalendarFeed active={data.hasFeed} saved={calendar.refresh} />
       {editing ? <TypeEditor initial={editing === 'new' ? undefined : editing} overview={data} close={() => setEditing(null)}
         saved={() => { setEditing(null); calendar.refresh(); }} /> : null}

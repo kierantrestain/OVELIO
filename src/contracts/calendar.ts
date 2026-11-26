@@ -50,3 +50,11 @@ export const appointmentStatusLabels: Record<AppointmentStatus, string> = {
   completed: 'Completed',
   no_show: 'No-show',
 };
+
+export type CalendarProvider = 'google' | 'microsoft';
+export type CalendarConnection = {
+  provider: CalendarProvider;
+  label: string;
+  configured: boolean;
+  status: 'disconnected' | 'connected' | 'unavailable';
+};

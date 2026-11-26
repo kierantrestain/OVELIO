@@ -7,6 +7,8 @@ import { upsertContact } from '../directory';
 import { emitEvent } from '../events';
 import { schedulePlatformJob } from '../platform/jobs';
 import { hostSchedule, minute, slotInterval, slotRange, timeZone } from './availability';
+import { checkCalendars, currentCalendarRevisions } from './connections';
+import type { CalendarAvailabilityCheck } from './connections';
 import type { Availability } from '@/contracts/calendar';
 
 export const bookingSlug = z.string().min(3).max(80).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Use lowercase words separated by hyphens.');
@@ -51,7 +53,7 @@ async function loadSchedules(client: Sql, type: BookingRow, options: { lock?: bo
   const hosts = await client.query<HostRow>(
     `SELECT h.* FROM calendar_hosts h JOIN calendar_type_hosts t ON t.host_id = h.user_id
      JOIN users u ON u.id = h.user_id
-     WHERE t.booking_type_id = $1 AND u.disabled_at IS NULL AND u.role IN ('marketer', 'admin')
+     WHERE t.booking_type_id = $1 AND u.disabled_at IS NULL AND u.role IN ('marketer', 'admin') AND h.weekly_windows <> '[]'::jsonb
      ORDER BY h.user_id ${options.lock ? 'FOR UPDATE OF h' : ''}`, [type.id],
   );
   if (!hosts.rows.length) return [];
@@ -78,17 +80,41 @@ async function openSlots(type: BookingRow, ignore?: string): Promise<string[]> {
   const schedules = await loadSchedules(db, type, { ignore });
   if (!schedules.length) return [];
   const { first, last } = slotRange(Date.now());
+  const blockedDuration = occupiedDuration(type);
+  const checked = await checkCalendars(schedules.map(host => host.id), first, last + blockedDuration);
   const slots: string[] = [];
   for (let at = first; at <= last; at += slotInterval) {
-    if (schedules.some(host => host.fits(at))) slots.push(new Date(at).toISOString());
+    if (schedules.some(host => checked.isFree(host.id, at, at + blockedDuration) && host.fits(at))) {
+      slots.push(new Date(at).toISOString());
+    }
   }
   return slots;
 }
 
-async function selectHost(client: Sql, type: BookingRow, startsAt: number, ignore?: string) {
+function occupiedDuration(type: BookingRow) {
+  return (type.duration_minutes + type.buffer_minutes) * minute;
+}
+
+function requireSlotTime(startsAt: number) {
   const { first, last } = slotRange(Date.now());
   if (startsAt < first || startsAt > last || startsAt % slotInterval !== 0) unavailable();
-  const host = (await loadSchedules(client, type, { lock: true, ignore })).find(host => host.fits(startsAt));
+}
+
+async function checkSlot(type: BookingRow, startsAt: number, ignore?: string) {
+  requireSlotTime(startsAt);
+  const hostIds = (await loadSchedules(db, type, { ignore })).filter(host => host.fits(startsAt)).map(host => host.id);
+  if (!hostIds.length) unavailable();
+  const end = startsAt + occupiedDuration(type);
+  const checked = await checkCalendars(hostIds, startsAt, end);
+  if (!hostIds.some(host => checked.isFree(host, startsAt, end))) unavailable();
+  return checked;
+}
+
+async function selectHost(client: Sql, type: BookingRow, startsAt: number, checked: CalendarAvailabilityCheck, ignore?: string) {
+  requireSlotTime(startsAt);
+  const schedules = await loadSchedules(client, type, { lock: true, ignore });
+  const revisions = await currentCalendarRevisions(client, schedules.map(host => host.id));
+  const host = schedules.find(host => host.fits(startsAt) && checked.isFree(host.id, startsAt, startsAt + occupiedDuration(type), revisions));
   if (!host) unavailable();
   return host.id;
 }
@@ -152,16 +178,14 @@ export async function book(slug: string, input: z.infer<typeof bookingInput>, or
   const existing = await alreadyBooked(db, type.id, input);
   if (existing) return confirmation(existing);
   const startsAt = new Date(input.startsAt);
-  const now = slotRange(Date.now());
-  if (startsAt.getTime() < now.first || startsAt.getTime() > now.last || startsAt.getTime() % slotInterval !== 0
-      || !(await loadSchedules(db, type)).some(host => host.fits(startsAt.getTime()))) unavailable();
+  const checked = await checkSlot(type, startsAt.getTime());
   const { contact } = await upsertContact({ email: input.email, firstName: input.firstName, lastName: input.lastName, source: 'Calendar booking' });
   return transaction(async client => {
     const { rows: [locked] } = await client.query<BookingRow>('SELECT * FROM calendar_booking_types WHERE id = $1 AND active FOR UPDATE', [type.id]);
     if (!locked) notFound();
     const duplicate = await alreadyBooked(client, type.id, input);
     if (duplicate) return confirmation(duplicate);
-    const host = await selectHost(client, locked, startsAt.getTime());
+    const host = await selectHost(client, locked, startsAt.getTime(), checked);
     const endsAt = new Date(startsAt.getTime() + locked.duration_minutes * minute);
     const { rows: [row] } = await client.query<AppointmentRow>(
       `INSERT INTO calendar_appointments (booking_type_id, request_id, contact_id, title, host_id, guest_name, guest_email,
@@ -187,7 +211,18 @@ export async function manageBooking(token: string): Promise<ManagedBooking> {
 }
 
 export async function changeBooking(token: string, input: z.infer<typeof manageInput>) {
-  const { id, booking_type_id } = await byToken(token);
+  const saved = await byToken(token);
+  const { id, booking_type_id } = saved;
+  let checked: CalendarAvailabilityCheck | undefined;
+  if (input.action === 'reschedule') {
+    if (saved.status !== 'booked' || saved.starts_at.getTime() <= Date.now()) throw new AppError(409, 'This appointment can no longer be changed online.');
+    const at = Date.parse(input.startsAt);
+    if (at !== saved.starts_at.getTime() || input.timeZone !== saved.time_zone) {
+      const { rows: [type] } = await db.query<BookingRow>('SELECT * FROM calendar_booking_types WHERE id = $1', [booking_type_id]);
+      if (!type?.active) throw new AppError(409, 'This booking link is paused. Contact the organiser to reschedule.');
+      checked = await checkSlot(type, at, id);
+    }
+  }
   return transaction(async client => {
     const { rows: [type] } = await client.query<BookingRow>('SELECT * FROM calendar_booking_types WHERE id = $1 FOR UPDATE', [booking_type_id]);
     const { rows: [current] } = await client.query<AppointmentRow>('SELECT * FROM calendar_appointments WHERE id = $1 FOR UPDATE', [id]);
@@ -198,7 +233,8 @@ export async function changeBooking(token: string, input: z.infer<typeof manageI
     if (!type.active) throw new AppError(409, 'This booking link is paused. Contact the organiser to reschedule.');
     const at = Date.parse(input.startsAt);
     if (at === current.starts_at.getTime() && input.timeZone === current.time_zone) return toAppointment(current);
-    const host = await selectHost(client, type, at, id);
+    if (!checked) unavailable();
+    const host = await selectHost(client, type, at, checked, id);
     const endsAt = new Date(at + type.duration_minutes * minute);
     const { rows: [row] } = await client.query<AppointmentRow>(
       `UPDATE calendar_appointments SET starts_at = $2, ends_at = $3, blocked_until = $4, time_zone = $5,

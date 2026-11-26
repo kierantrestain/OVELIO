@@ -8,8 +8,11 @@ import { book, bookingInput, publicBooking } from '@/server/calendar/booking';
 
 type Context = { params: Promise<{ slug: string }> };
 
-export async function GET(_: Request, context: Context) {
-  try { return json(await publicBooking((await context.params).slug)); }
+export async function GET(request: Request, context: Context) {
+  try {
+    await rateLimit('booking-availability:' + hashIp(clientIp(request)), 60, 60);
+    return json(await publicBooking((await context.params).slug));
+  }
   catch (error) { return respondError('public-booking', error); }
 }
 
