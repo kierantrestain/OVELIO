@@ -16,7 +16,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('console navigation and an interactive CSV import', async ({ page }) => {
-  await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
+  // The Overview home greets the signed-in user, so check the route and its page heading.
+  await expect(page).toHaveURL(/\/overview$/);
+  await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
   // OVELIO 2.0 workspaces: each side-navigation entry opens its workspace with a page heading. CRM last, for the import.
   for (const [section, path] of [['Sales', '/sales'], ['Marketing', '/marketing'], ['Automations', '/automations'], ['Analytics', '/analytics'], ['Settings', '/settings'], ['CRM', '/crm']]) {
     await page.getByRole('link', { name: section, exact: true }).click();
