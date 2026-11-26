@@ -471,9 +471,10 @@ export function MailboxSettings({ connected, error }: { connected?: string; erro
                     tone={item.status === 'connected' ? 'success' : 'error'} />
                 </span>
                 <Text type="supporting" color="secondary">
-                  {item.provider === 'google' ? 'Gmail' : 'Outlook'} · {owns ? 'You' : item.userName} · {item.lastSyncedAt
-                    ? <>Synced <time dateTime={item.lastSyncedAt}>{relative(item.lastSyncedAt)}</time></>
-                    : 'Awaiting first sync'}
+                  {item.provider === 'google' ? 'Gmail' : 'Outlook'} · {owns ? 'You' : item.userName}
+                  {owns ? item.lastSyncedAt
+                    ? <> · Synced <time dateTime={item.lastSyncedAt}>{relative(item.lastSyncedAt)}</time></>
+                    : ' · Awaiting first sync' : null}
                 </Text>
                 {owns && item.lastError ? <Text type="supporting" color="secondary">{item.lastError}</Text> : null}
               </span>
