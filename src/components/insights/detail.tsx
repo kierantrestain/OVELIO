@@ -163,6 +163,8 @@ export function MarketingAnalytics() {
 
 /* ── Attribution ────────────────────────────────────────────────────────────── */
 
+const shortModel: Record<AttributionModel, string> = { first_touch: 'First', last_touch: 'Last', linear: 'Linear', position_based: '40/20/40' };
+
 const modelColor: Record<AttributionModel, string> = {
   first_touch: 'var(--ov-insights-s1)', last_touch: 'var(--ov-insights-s2)', linear: 'var(--ov-insights-s3)', position_based: 'var(--ov-insights-s4)',
 };
@@ -185,7 +187,7 @@ export function AttributionAnalytics() {
     actions={<ExportLink report="attribution" state={state} extra={`&lookbackDays=${lookback}`} />}>
     <Panel title="Attribution model" description="Every model splits the same measured won revenue; only the allocation differs.">
       <SegmentedControl label="Attribution model" value={model} onChange={value => setModel(value as AttributionModel)}>
-        {attributionModels.map(item => <SegmentedControlItem key={item.key} value={item.key} label={item.label} />)}
+        {attributionModels.map(item => <SegmentedControlItem key={item.key} value={item.key} label={shortModel[item.key]} />)}
       </SegmentedControl>
       <div className="ov-insights-models">
         {attributionModels.map(item => <div key={item.key} className="ov-insights-model" data-active={item.key === model}>

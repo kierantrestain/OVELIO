@@ -176,25 +176,27 @@ export function KpiTile({ metric, currency, comparisonLabel, onDrill, hint }: {
   const ignored = metric.ignoredFilters.length ? ` Not filtered by ${metric.ignoredFilters.join(' or ')}.` : '';
   return <Card>
     <div className="ov-insights-kpi">
-      <div className="ov-insights-kpi-head">
-        <span className="ov-actions">
-          <Text type="label" color="secondary">{metric.label}</Text>
-          <InfoTip content={metric.definition + ignored} label={`How ${metric.label} is calculated`} size="sm" />
-        </span>
-        <ProvenanceBadge provenance={metric.provenance} />
-      </div>
+      <span className="ov-insights-kpi-label">
+        <Text type="label" color="secondary">{metric.label}</Text>
+        <InfoTip content={metric.definition + ignored} label={`How ${metric.label} is calculated`} size="sm" />
+      </span>
       <span className="ov-insights-kpi-value">{formatValue(metric.value, metric.unit, currency)}</span>
       {metric.value == null && metric.unavailable ? <Text type="supporting" color="secondary">{metric.unavailable}</Text>
         : metric.provenance === 'measured' ? <Delta value={metric.value} previous={metric.previous} unit={metric.unit} betterWhen={metric.betterWhen} currency={currency} comparisonLabel={comparisonLabel} />
           : <Text type="supporting" color="secondary">{hint ?? (metric.provenance === 'snapshot' ? 'As of now' : 'Projection, not a result')}</Text>}
-      {metric.drill && onDrill ? <button type="button" className="ov-insights-kpi-link" onClick={() => onDrill(metric.drill!)}>View records</button> : null}
+      <div className="ov-insights-kpi-foot">
+        {metric.drill && onDrill ? <button type="button" className="ov-insights-kpi-link" onClick={() => onDrill(metric.drill!)}>View records</button> : <span />}
+        <ProvenanceBadge provenance={metric.provenance} />
+      </div>
     </div>
   </Card>;
 }
 
+/** A plain download link (not a client-side route, so nothing prefetches the export). */
 export function ExportLink({ report, state, label = 'Export CSV', extra = '' }: { report: ReportKey | 'drill'; state: InsightsState; label?: string; extra?: string }) {
-  return <Button size="sm" icon={<Download size={15} aria-hidden="true" />} label={label}
-    href={`/api/console/insights/export/${report}?${state.apiQuery}${extra}`} />;
+  return <a className="ov-insights-export" href={`/api/console/insights/export/${report}?${state.apiQuery}${extra}`} download>
+    <Download size={15} aria-hidden="true" />{label}
+  </a>;
 }
 
 /** The drawer listing the records behind a number. */

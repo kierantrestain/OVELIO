@@ -203,8 +203,12 @@ export async function seedInsightsPreview(sql: Sql, now = Date.now()) {
       if (created > now - DAY) continue;
       const age = (now - created) / DAY;
       const roll = rand();
-      const outcome = age > 45 ? (roll < 0.5 ? 'won' : roll < 0.75 ? 'lost' : 'open') : age > 15 ? (roll < 0.3 ? 'won' : roll < 0.45 ? 'lost' : 'open') : 'open';
-      const closed = outcome === 'open' ? null : Math.min(created + Math.floor(6 + rand() * 40) * DAY, now - 3_600_000);
+      const planned = age > 30 ? (roll < 0.5 ? 'won' : roll < 0.72 ? 'lost' : 'open') : age > 10 ? (roll < 0.32 ? 'won' : roll < 0.45 ? 'lost' : 'open') : 'open';
+      // Sample close dates fall between five days after creation and yesterday, never in the future.
+      const earliest = created + 5 * DAY;
+      const span = Math.min(now - DAY - earliest, 60 * DAY);
+      const outcome = planned !== 'open' && span > 0 ? planned : 'open';
+      const closed = outcome === 'open' ? null : Math.floor(earliest + rand() * span);
       const furthest = outcome === 'won' ? open.length - 1 : Math.floor(rand() * open.length);
       const path = [...open.slice(0, furthest + 1), ...(outcome === 'won' ? [wonStage] : outcome === 'lost' ? [lostStage] : [])];
       const stage = path[path.length - 1];

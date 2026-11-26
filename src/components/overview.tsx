@@ -156,7 +156,7 @@ export function Overview() {
         setDismissed(true);
         try { localStorage.setItem('ov-onboarding-dismissed', '1'); } catch { /* storage unavailable */ }
       }} /> : null}
-      <div className="ov-insights-kpis">
+      <div className="ov-insights-kpis ov-insights-kpis--four">
         <Metric label="Leads today" value={data.today.leads} info="Distinct contacts with a form submission or new-contact event since midnight UTC."
           hint={`${formatCount(data.today.leadsYesterday)} yesterday`} />
         <Metric label="Deals created today" value={data.today.newDeals} hint={`${formatMoney(data.today.newDealValue, cur)} in value`} />
