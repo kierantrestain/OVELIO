@@ -195,7 +195,7 @@ export function CrmContactsList({ initialCreate = false }: { initialCreate?: boo
       {contacts.data?.note ? <Banner status="info" title={contacts.data.note} /> : null}
       {!contacts.data ? <AsyncState loading={contacts.loading} error={contacts.error} retry={contacts.refresh} /> : <>
         <DataTable label="Contacts" minWidth={1080}>
-          <Table data={items} idKey="id" hasHover density="compact"
+          <Table data={items} idKey="id" hasHover
             emptyState={<Empty title={active.length ? 'No contacts match these filters' : 'No contacts yet'} description={active.length ? undefined : 'Add a contact or import a CSV.'} />}
             columns={[
               { key: 'select', width: pixel(44), header: <CheckboxInput label="Select all contacts on this page" isLabelHidden size="sm"
@@ -284,7 +284,7 @@ export function CrmCompaniesList({ initialCreate = false }: { initialCreate?: bo
       </div> : null}
       {!companies.data ? <AsyncState loading={companies.loading} error={companies.error} retry={companies.refresh} /> : <>
         <DataTable label="Companies" minWidth={1000}>
-          <Table data={items} idKey="id" hasHover density="compact" emptyState={<Empty title="No companies match" description="Add a company or change the filters." />}
+          <Table data={items} idKey="id" hasHover emptyState={<Empty title="No companies match" description="Add a company or change the filters." />}
             columns={[
               { key: 'select', width: pixel(44), header: <CheckboxInput label="Select all companies on this page" isLabelHidden size="sm"
                 value={pageIds.length > 0 && pageIds.every(id => selected.includes(id)) ? true : selected.length ? 'indeterminate' : false} onChange={checked => setSelected(checked ? pageIds : [])} />,
