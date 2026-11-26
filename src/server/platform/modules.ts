@@ -1,5 +1,6 @@
 // The lane registry (lead-owned). Order matters for preview seeding: designs and pages exist before campaigns
 // and flows reference them, and CRM deals before analytics reads them.
+import { calendarModule } from '../calendar/module';
 import { crmModule } from '../crm/module';
 import { journeysModule } from '../journeys/module';
 import { insightsModule } from '../insights/module';
@@ -12,7 +13,7 @@ import { schedulePlatformJob } from './jobs';
 import { workspaceModule } from './workspace';
 import type { LaneModule } from './types';
 
-export const laneModules: LaneModule[] = [studioModule, sitesModule, journeysModule, crmModule, revenueModule, insightsModule, workspaceModule];
+export const laneModules: LaneModule[] = [studioModule, sitesModule, journeysModule, crmModule, revenueModule, calendarModule, insightsModule, workspaceModule];
 
 /** Fans one stored event out as a separate delivery job per lane, so a failing lane retries alone. */
 export async function dispatchEvent(data: { eventId: string }) {

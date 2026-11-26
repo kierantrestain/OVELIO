@@ -43,6 +43,7 @@ export const workspaces: Workspace[] = [
       { label: 'Tasks', href: '/sales/tasks', aliases: ['to-do', 'follow-ups', 'reminders', 'activities'] },
       { label: 'Sequences', href: '/sales/sequences', aliases: ['cadences', 'outreach', 'follow-up emails'] },
       { label: 'Inbox', href: '/sales/inbox', aliases: ['email', 'gmail', 'outlook', 'conversations'] },
+      { label: 'Calendar', href: '/sales/calendar', aliases: ['appointments', 'booking', 'meetings', 'availability'] },
       { label: 'Proposals', href: '/sales/proposals', aliases: ['quotes', 'quotations', 'estimates', 'contracts', 'e-signature'] },
       { label: 'Invoices', href: '/sales/invoices', aliases: ['billing', 'payments', 'stripe', 'refunds'] },
       { label: 'Revenue', href: '/sales/revenue', aliases: ['cash', 'collected', 'mrr', 'subscriptions', 'recurring revenue'] },

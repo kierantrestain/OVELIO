@@ -15,7 +15,7 @@ export const flowTriggerTypes = [
   'deal.created', 'deal.stage_changed', 'deal.won', 'deal.lost', 'task.completed',
   'contact.created', 'contact.tagged', 'email.unsubscribed', 'campaign.launched',
   'quote.viewed', 'quote.accepted', 'quote.declined', 'payment.succeeded', 'payment.failed', 'subscription.cancelled',
-  'appointment.booked', 'appointment.cancelled', 'appointment.completed', 'appointment.no_show',
+  'appointment.booked', 'appointment.rescheduled', 'appointment.cancelled', 'appointment.completed', 'appointment.no_show',
   'webhook.received',
 ] as const;
 export type FlowTriggerType = (typeof flowTriggerTypes)[number];
@@ -73,6 +73,7 @@ export const flowTriggerSpecs: FlowTriggerSpec[] = [
   { type: 'payment.failed', label: 'Payment failed', group: 'Revenue', description: 'A card payment does not complete.', filters: [] },
   { type: 'subscription.cancelled', label: 'Subscription cancelled', group: 'Revenue', description: 'A recurring subscription is cancelled.', filters: [] },
   { type: 'appointment.booked', label: 'Meeting booked', group: 'Meetings', description: 'Someone books a meeting through a booking link, or the team books one.', filters: [] },
+  { type: 'appointment.rescheduled', label: 'Meeting rescheduled', group: 'Meetings', description: 'An existing appointment moves to another time.', filters: [] },
   { type: 'appointment.cancelled', label: 'Meeting cancelled', group: 'Meetings', description: 'A meeting is cancelled by the invitee or the team.', filters: [] },
   { type: 'appointment.completed', label: 'Meeting held', group: 'Meetings', description: 'A meeting is marked as held.', filters: [] },
   { type: 'appointment.no_show', label: 'Meeting no-show', group: 'Meetings', description: 'The invitee did not attend.', filters: [] },
