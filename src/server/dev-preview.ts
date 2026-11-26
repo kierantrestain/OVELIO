@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ContactView, DeliverySettings,
   Annotation, Asset, BounceRecord, Campaign, Category, Company, CompanySettings, ContactDetail, ContactTimeline, TimelineEvent,
   ContactNote, CustomField, CustomFieldObject, Dashboard, DynamicContent, EntityChartSeries,
   EventPropertyStat, EventPropertyValue, ExpandedMetricRow, FocusItem, Goal, JourneyEmail,
@@ -87,6 +88,8 @@ type PreviewStore = {
   campaigns: Campaign[];
   templates: Template[];
   media: MediaItem[];
+  contactViews: ContactView[];
+  delivery: DeliverySettings;
   bounces: BounceRecord[];
   forms: LeadForm[];
   journeyEmails: JourneyEmail[];
@@ -286,8 +289,13 @@ function createInitialStore(): PreviewStore {
       { id: 2, name: 'Transactional Receipt', type: 'tx', subject: 'Your workspace notification', isDefault: false, body: '<!doctype html><html><body style="font-family:sans-serif;"><h2>{{ .Tx.Data.heading }}</h2><p>{{ .Tx.Data.message }}</p></body></html>' },
     ],
     media: [
-      { id: 1, uuid: '22222222-2222-4222-8222-222222222222', filename: 'spring-header.svg', contentType: 'image/svg+xml', url: '/uploads/spring-header.svg', thumbUrl: null, createdAt: daysAgo(4) },
+      { id: 1, uuid: '22222222-2222-4222-8222-222222222222', filename: 'spring-header.svg', contentType: 'image/svg+xml', url: "data:image/svg+xml;base64," + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400"><rect width="1200" height="400" fill="#dbe5fb"/><circle cx="980" cy="90" r="220" fill="#7ea2ff" opacity=".55"/><text x="80" y="220" font-family="sans-serif" font-size="64" font-weight="700" fill="#1f4fc4">Spring sale (sample)</text></svg>').toString('base64') + "", thumbUrl: null, createdAt: daysAgo(4) },
     ],
+    contactViews: [],
+    delivery: {
+      concurrency: 10, messageRate: 10, batchSize: 1000, maxSendErrors: 1000, slidingWindow: false,
+      slidingWindowDuration: '1h', slidingWindowRate: 10000, trackingMode: 'anonymous', recordOptinIp: false,
+    },
     bounces: [
       { id: 1, email: 'bounce.demo@retired-domain.example', subscriberId: 5, type: 'hard', source: 'smtp', campaignName: 'Spring Product Dispatch', createdAt: daysAgo(5) },
     ],
@@ -392,14 +400,15 @@ export function devPreviewMediaList(): MediaItem[] {
   return store().media;
 }
 
-export function devPreviewMediaUpload(filename: string, contentType: string): MediaItem {
+/** Stores an upload in the preview. Pass the file's bytes as a data URL to keep it viewable (the preview has no file store). */
+export function devPreviewMediaUpload(filename: string, contentType: string, dataUrl?: string): MediaItem {
   const s = store();
   const item: MediaItem = {
     id: s.nextId++,
     uuid: randomUUID(),
     filename,
     contentType,
-    url: '/uploads/' + encodeURIComponent(filename),
+    url: dataUrl || '/uploads/' + encodeURIComponent(filename),
     thumbUrl: null,
     createdAt: new Date().toISOString(),
   };
@@ -571,6 +580,38 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
     };
     s.contacts.unshift(created);
     return json(created, 201);
+  }
+  // Saved contact views
+  if (fullPath === 'contact-views') {
+    if (method === 'GET') return json(s.contactViews);
+    if (method === 'POST') {
+      const body = await readJson<Partial<ContactView>>(request);
+      const name = (body.name ?? '').trim();
+      if (!name) throw new AppError(400, 'Name the view.');
+      const view: ContactView = {
+        id: randomUUID(), name: name.slice(0, 80), search: body.search ?? '', sortBy: body.sortBy ?? 'createdAt',
+        sortDir: body.sortDir === 'asc' ? 'asc' : 'desc', createdBy: DEV_PREVIEW_USER.id, updatedAt: new Date().toISOString(),
+      };
+      s.contactViews.push(view);
+      return json(view, 201);
+    }
+  }
+  const viewMatch = /^contact-views\/([0-9a-f-]{36})$/.exec(fullPath);
+  if (viewMatch) {
+    const view = s.contactViews.find(item => item.id === viewMatch[1]);
+    if (!view) throw new AppError(404, 'That view no longer exists.');
+    if (method === 'DELETE') {
+      s.contactViews = s.contactViews.filter(item => item !== view);
+      return json({ ok: true });
+    }
+    if (method === 'PATCH') {
+      const body = await readJson<Partial<ContactView>>(request);
+      Object.assign(view, {
+        name: body.name?.trim() || view.name, search: body.search ?? view.search, sortBy: body.sortBy ?? view.sortBy,
+        sortDir: body.sortDir ?? view.sortDir, updatedAt: new Date().toISOString(),
+      });
+      return json(view);
+    }
   }
   if (method === 'POST' && fullPath === 'contacts/bulk') {
     const body = await readJson<{ ids?: number[]; action?: string; tag?: string; segmentId?: number; points?: number }>(request);
@@ -1492,6 +1533,13 @@ export async function handleDevPreviewConsole(request: Request, segmentsPath: st
       const body = await readJson<{ company?: CompanySettings }>(request);
       if (body.company) s.company = { ...s.company, ...body.company };
       return json(payload());
+    }
+  }
+  if (fullPath === 'settings/delivery') {
+    if (method === 'GET') return json({ ...s.delivery, needsRestart: false });
+    if (method === 'PATCH') {
+      s.delivery = { ...s.delivery, ...await readJson<Partial<DeliverySettings>>(request) };
+      return json({ ...s.delivery, needsRestart: false });
     }
   }
   if (fullPath === 'settings/sender-domain' && method === 'GET') {

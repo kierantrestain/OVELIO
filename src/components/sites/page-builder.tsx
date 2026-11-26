@@ -365,7 +365,7 @@ export function PageBuilder({ pageId, variant }: { pageId: string; variant: stri
           {leftTab === 'saved' ? <SavedSections editor={editor} /> : null}
         </div>
       </aside>
-      <main className="ov-sites-canvas">
+      <main className="ov-sites-canvas" aria-label="Page canvas">
         {!ready ? <div className="ov-sites-loading"><Spinner /><Text color="secondary">Opening the builder…</Text></div> : null}
         <div ref={canvasRef} className="ov-sites-gjs" />
       </main>
