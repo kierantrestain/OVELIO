@@ -8,9 +8,6 @@ import type { APIRequestContext, Page, TestInfo } from '@playwright/test';
 // Every workspace route in the navigation, at 1440×900 (desktop project) and 390×844 (mobile project).
 const routes = [...new Set(workspaces.flatMap(space => [space.href, ...space.items.map(item => item.href)]))];
 
-// Lane 5 (Analytics) is still building these; they are reported as pending, not tested.
-const stillBuilding = (route: string) => route === '/overview' || (route.startsWith('/analytics') && route !== '/analytics/website');
-
 type Items<T> = { items: T[] };
 type Id = { id: string };
 
@@ -44,10 +41,6 @@ async function audit(page: Page, guard: Guard, testInfo: TestInfo, route: string
 
 for (const route of routes) {
   test(`UX-01 ${route} renders without errors, overflow or unnamed controls`, async ({ page, guard }, testInfo) => {
-    if (stillBuilding(route)) {
-      testInfo.annotations.push({ type: 'pending', description: 'Analytics lane still building' });
-      return;
-    }
     await page.goto(route);
     await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
     await settle(page);

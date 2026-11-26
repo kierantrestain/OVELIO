@@ -148,6 +148,26 @@ test('UX-14 J11 an unsubscribe link from a sent message blocks later email', asy
   expect(after.status).toBe('blocked');
 });
 
+test('UX-16 J12 attribution credits plus unattributed revenue equal won revenue under every model', async ({ page, guard }) => {
+  const endAt = Date.now();
+  const startAt = endAt - 120 * 86_400_000;
+  type Report = {
+    totals: { wonRevenue: number; wonDeals: number };
+    unattributed: { revenue: number };
+    rows: { revenue: Record<string, number> }[];
+  };
+  const report = await json<Report>(await page.request.get(`/api/console/insights/attribution?startAt=${startAt}&endAt=${endAt}`));
+  expect(report.totals.wonRevenue).toBeGreaterThan(0);
+  for (const model of ['first_touch', 'last_touch', 'linear', 'position_based']) {
+    const credited = report.rows.reduce((sum, row) => sum + (row.revenue[model] ?? 0), 0);
+    expect(Math.abs(credited + report.unattributed.revenue - report.totals.wonRevenue), model).toBeLessThan(0.01 * Math.max(1, report.rows.length));
+  }
+  await page.goto('/analytics/attribution');
+  await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
+  await settle(page);
+  expect(guard.problems()).toEqual([]);
+});
+
 async function unsubscribeAs(browser: Browser, baseURL: string, path: string) {
   const visitor = await browser.newContext({ baseURL });
   try {
