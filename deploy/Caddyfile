@@ -144,7 +144,7 @@ http://127.0.0.1:9900 {
 	# AUD-10: contact CSV imports accept up to 25 MB (the app enforces the exact limit); everything else stays at 5 MB.
 	@contactImport {
 		method POST
-		path /api/console/contacts/imports
+		path /api/console/contacts/imports /api/console/crm/imports
 	}
 	handle @contactImport {
 		request_body {

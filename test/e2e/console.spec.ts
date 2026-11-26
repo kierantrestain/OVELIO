@@ -35,7 +35,7 @@ test('console navigation and an interactive CSV import', async ({ page }) => {
   });
   // AUD-10: upload, check the suggested mapping, then run the import in the background and wait for it to finish.
   await form.getByRole('button', { name: 'Continue', exact: true }).click();
-  const started = page.waitForResponse(response => /\/api\/console\/contacts\/imports\/[0-9a-f-]{36}\/start$/.test(response.url()));
+  const started = page.waitForResponse(response => /\/api\/console\/(contacts|crm)\/imports\/[0-9a-f-]{36}\/start$/.test(response.url()));
   await form.getByRole('button', { name: 'Import contacts', exact: true }).click();
   expect((await started).ok()).toBe(true);
   await expect(form.getByText('Import finished')).toBeVisible({ timeout: 60_000 });
