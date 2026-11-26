@@ -46,6 +46,9 @@ function StageRow({ stage, pipeline, onSaved, onDelete }: { stage: PipelineStage
     <StatusBadge label={stage.outcome === 'won' ? 'Won stage' : stage.outcome === 'lost' ? 'Lost stage' : 'Open'} tone={stage.outcome === 'won' ? 'success' : stage.outcome === 'lost' ? 'error' : 'neutral'} />
     {stage.outcome === 'open' ? <NumberInput label="Rotting after (days)" isLabelHidden placeholder="Rotting days" min={1} max={365} isIntegerOnly value={stage.rottingDays}
       onChange={value => { if (value !== stage.rottingDays) save({ rottingDays: value ?? null }); }} /> : <span />}
+    {stage.outcome !== 'lost' ? <MultiSelector label={`Required to enter ${stage.name}`} isLabelHidden placeholder="Required fields" width={190} value={stage.requiredFields ?? []}
+      options={[{ value: 'amount', label: 'Value' }, { value: 'expected_close_date', label: 'Close date' }, { value: 'contact', label: 'Contact' }, { value: 'company', label: 'Company' }]}
+      onChange={value => save({ requiredFields: value })} /> : <span />}
     <IconButton variant="ghost" label={`Delete ${stage.name}`} icon={<Trash2 size={15} />} onClick={() => onDelete(stage)}
       isDisabled={stage.outcome === 'open' && pipeline.stages.filter(item => item.outcome === 'open').length <= 1} />
     {action.error ? <Text type="supporting" color="secondary">{action.error}</Text> : null}
@@ -118,10 +121,10 @@ export function PipelineSettings() {
       </div>}>
       <PipelineFields key={pipeline.id + pipeline.name + pipeline.currency} pipeline={pipeline} onSaved={saved} />
       <div className="ov-stack-sm">
-        <Text type="supporting" color="secondary">Drag open stages to reorder them. Probability drives the weighted forecast; rotting days flag deals that sit too long in a stage.</Text>
+        <Text type="supporting" color="secondary">Drag open stages to reorder them. Probability drives the weighted forecast; rotting days flag deals that sit too long in a stage; required fields must be filled before a deal can enter the stage.</Text>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={event => void onDragEnd(event)}>
           <SortableContext items={pipeline.stages.filter(stage => stage.outcome === 'open').map(stage => stage.id)} strategy={verticalListSortingStrategy}>
-            {pipeline.stages.map(stage => <StageRow key={stage.id + stage.name + stage.probability + (stage.rottingDays ?? '')} stage={stage} pipeline={pipeline} onSaved={saved}
+            {pipeline.stages.map(stage => <StageRow key={stage.id + stage.name + stage.probability + (stage.rottingDays ?? '') + (stage.requiredFields ?? []).join()} stage={stage} pipeline={pipeline} onSaved={saved}
               onDelete={item => { setRemoving(item); setTarget(null); }} />)}
           </SortableContext>
         </DndContext>

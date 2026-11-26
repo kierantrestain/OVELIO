@@ -16,6 +16,8 @@ export type PipelineStage = {
   probability: number;
   outcome: StageOutcome;
   rottingDays: number | null;
+  /** Fields a deal needs before entering this stage: 'amount', 'expected_close_date', 'contact', 'company'. */
+  requiredFields?: StageRequirement[];
 };
 
 /** Cross-lane contract: GET /api/console/sales/pipelines → { items: Pipeline[] } (TRACKER §3). */
@@ -30,6 +32,11 @@ export type Pipeline = {
 };
 
 export type TeamMember = { id: string; name: string; email: string };
+
+export type StageRequirement = 'amount' | 'expected_close_date' | 'contact' | 'company';
+export const stageRequirementLabels: Record<StageRequirement, string> = {
+  amount: 'a deal value', expected_close_date: 'an expected close date', contact: 'a contact', company: 'a company',
+};
 
 export type Deal = {
   id: string;
@@ -70,6 +77,13 @@ export type Deal = {
   /** Open deal that has sat in its stage longer than the stage's rotting days. */
   rotting: boolean;
   openTasks: number;
+  /** Latest logged activity on the deal or with its primary contact. */
+  lastActivityAt: string | null;
+  /** Earliest open task on the deal. */
+  nextTask: { title: string; dueAt: string | null } | null;
+  /** 'at_risk' when the deal is stalled beyond its stage's rotting days, past its close date, or quiet for 14 days. */
+  health: 'healthy' | 'at_risk' | 'closed';
+  healthReasons: string[];
   custom: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;

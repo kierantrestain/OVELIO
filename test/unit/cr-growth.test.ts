@@ -74,6 +74,28 @@ test('CR-03 a form lead goes to the next rep in rotation, once, and only when it
   assert.equal(changes.length, 1);
 });
 
+test('CR-04 cards carry next action, last touch and health; a move into a stage with missing required fields is refused with the reason', async () => {
+  type Board = import('../../src/contracts/crm').DealBoard;
+  const board = await call<Board>('GET', 'sales/board');
+  const deals = board.columns.flatMap(column => column.deals);
+  const content = deals.find(deal => deal.name.includes('Content hub'))!;
+  assert.equal(content.health, 'at_risk');
+  assert.ok(content.healthReasons.includes('Expected close date has passed'));
+  const loyalty = deals.find(deal => deal.name.includes('Loyalty platform'))!;
+  assert.match(loyalty.nextTask?.title ?? '', /Call Daniel/);
+  assert.ok(loyalty.lastActivityAt);
+  const proposal = board.columns.find(column => column.stage.name === 'Proposal')!.stage;
+  await call('PATCH', `sales/stages/${proposal.id}`, { requiredFields: ['expected_close_date', 'contact'] });
+  const deal = await call<{ id: string }>('POST', 'sales/deals', { name: 'CR-04 bare deal', amount: 500 });
+  await assert.rejects(call('POST', `sales/deals/${deal.id}/move`, { stageId: proposal.id }),
+    (error: Error & { status?: number }) => error.status === 409 && /Add an expected close date and a contact before moving “CR-04 bare deal” to Proposal/.test(error.message));
+  const [hannah] = await searchContacts('hannah');
+  await call('PATCH', `sales/deals/${deal.id}`, { expectedCloseDate: '2027-03-01', contactId: hannah.id });
+  const moved = await call<{ stageName: string }>('POST', `sales/deals/${deal.id}/move`, { stageId: proposal.id });
+  assert.equal(moved.stageName, 'Proposal');
+  await call('PATCH', `sales/stages/${proposal.id}`, { requiredFields: [] });
+});
+
 test('CR-02 duplicates are detected by email or name and company, and a merge moves every OVELIO record to the survivor', async () => {
   const { upsertContact, getContact } = await import('../../src/server/directory');
   const { listEvents } = await import('../../src/server/events');

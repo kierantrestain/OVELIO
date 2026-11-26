@@ -30,10 +30,11 @@ export async function assertUser(id: string | null | undefined, client: Sql = db
 /* ── Pipelines ────────────────────────────────────────────────────────── */
 
 type PipelineRow = { id: string; name: string; currency: string; is_default: boolean; archived_at: Date | null; open_deals?: string };
-type StageRow = { id: string; pipeline_id: string; name: string; position: number; probability: number; outcome: PipelineStage['outcome']; rotting_days: number | null };
+type StageRow = { id: string; pipeline_id: string; name: string; position: number; probability: number; outcome: PipelineStage['outcome']; rotting_days: number | null; required_fields?: string[] | string };
 
 export const toStage = (row: StageRow): PipelineStage => ({
   id: row.id, name: row.name, position: row.position, probability: row.probability, outcome: row.outcome, rottingDays: row.rotting_days,
+  requiredFields: (Array.isArray(row.required_fields) ? row.required_fields : String(row.required_fields ?? '').replace(/[{}]/g, '').split(',').filter(Boolean)) as PipelineStage['requiredFields'],
 });
 
 export async function loadPipelines(options: { includeArchived?: boolean; ids?: string[] } = {}, client: Sql = db): Promise<Pipeline[]> {
@@ -52,7 +53,7 @@ export async function loadPipelines(options: { includeArchived?: boolean; ids?: 
   );
   if (!pipelines.rows.length) return [];
   const stages = await client.query<StageRow>(
-    'SELECT id, pipeline_id, name, position, probability, outcome, rotting_days FROM pipeline_stages WHERE pipeline_id = ANY($1::uuid[]) ORDER BY position, created_at',
+    'SELECT id, pipeline_id, name, position, probability, outcome, rotting_days, required_fields FROM pipeline_stages WHERE pipeline_id = ANY($1::uuid[]) ORDER BY position, created_at',
     [pipelines.rows.map(row => row.id)],
   );
   return pipelines.rows.map(row => ({
@@ -77,6 +78,7 @@ export type DealQueryRow = {
   contact_email: string; company_id: string | null; company_name: string; campaign_id: string | null; campaign_name: string | null;
   source: string; expected_close_date: string | null; closed_at: Date | null; lost_reason: string; board_position: number;
   custom: Record<string, unknown>; created_at: Date; updated_at: Date; archived_at: Date | null; stage_entered_at: Date; open_tasks: string;
+  last_activity_at: Date | null; next_task_title: string | null; next_task_due: Date | null;
 };
 
 export const dealSelect = `SELECT d.id, d.pipeline_id, p.name AS pipeline_name, d.stage_id, s.name AS stage_name, s.outcome AS stage_outcome,
@@ -84,7 +86,10 @@ export const dealSelect = `SELECT d.id, d.pipeline_id, p.name AS pipeline_name, 
   d.contact_id, d.contact_name, d.contact_email, d.company_id, d.company_name, d.campaign_id, mc.name AS campaign_name, d.source,
   d.expected_close_date, d.closed_at, d.lost_reason, d.board_position, d.custom, d.created_at, d.updated_at, d.archived_at,
   coalesce((SELECT max(h.changed_at) FROM deal_stage_history h WHERE h.deal_id = d.id AND h.to_stage_id = d.stage_id), d.created_at) AS stage_entered_at,
-  (SELECT count(*) FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open') AS open_tasks
+  (SELECT count(*) FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open') AS open_tasks,
+  (SELECT max(a.occurred_at) FROM activities a WHERE a.deal_id = d.id OR (d.contact_id IS NOT NULL AND a.contact_id = d.contact_id)) AS last_activity_at,
+  (SELECT t.title FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open' ORDER BY t.due_at NULLS LAST, t.created_at LIMIT 1) AS next_task_title,
+  (SELECT t.due_at FROM tasks t WHERE t.deal_id = d.id AND t.status = 'open' ORDER BY t.due_at NULLS LAST, t.created_at LIMIT 1) AS next_task_due
   FROM deals d
   JOIN pipelines p ON p.id = d.pipeline_id
   JOIN pipeline_stages s ON s.id = d.stage_id
@@ -93,6 +98,19 @@ export const dealSelect = `SELECT d.id, d.pipeline_id, p.name AS pipeline_name, 
 
 export function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** Last interaction, next action and health for a deal card. Closed deals are not scored. */
+export function dealHealth(row: Pick<DealQueryRow, 'status' | 'rotting_days' | 'expected_close_date' | 'last_activity_at' | 'next_task_title' | 'next_task_due' | 'created_at'>, daysInStage: number, now = Date.now()) {
+  const lastActivityAt = iso(row.last_activity_at);
+  const nextTask = row.next_task_title ? { title: row.next_task_title, dueAt: iso(row.next_task_due) } : null;
+  if (row.status !== 'open') return { lastActivityAt, nextTask, health: 'closed' as const, healthReasons: [] };
+  const reasons: string[] = [];
+  if (row.rotting_days != null && daysInStage > row.rotting_days) reasons.push(`${daysInStage} days in this stage (limit ${row.rotting_days})`);
+  if (row.expected_close_date && row.expected_close_date < new Date(now).toISOString().slice(0, 10)) reasons.push('Expected close date has passed');
+  const quietSince = lastActivityAt ? Date.parse(lastActivityAt) : new Date(row.created_at).getTime();
+  if (now - quietSince > 14 * 86_400_000) reasons.push(lastActivityAt ? 'No activity for 14 days' : 'No activity logged since it was created');
+  return { lastActivityAt, nextTask, health: reasons.length ? 'at_risk' as const : 'healthy' as const, healthReasons: reasons };
 }
 
 export function toDeal(row: DealQueryRow, now = Date.now()): Deal {
@@ -110,6 +128,7 @@ export function toDeal(row: DealQueryRow, now = Date.now()): Deal {
     lostReason: row.lost_reason, boardPosition: Number(row.board_position), daysInStage,
     overdue: row.status === 'open' && Boolean(row.expected_close_date) && (row.expected_close_date as string) < new Date(now).toISOString().slice(0, 10),
     rotting: row.status === 'open' && row.rotting_days != null && daysInStage > row.rotting_days,
+    ...dealHealth(row, daysInStage, now),
     openTasks: num(row.open_tasks), custom: row.custom ?? {}, createdAt: iso(row.created_at) as string, updatedAt: iso(row.updated_at) as string,
     archivedAt: iso(row.archived_at),
   };

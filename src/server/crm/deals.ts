@@ -3,7 +3,8 @@
 import { z } from 'zod';
 import type { User } from '@/contracts';
 import type { BoardColumn, Deal, DealBoard, DealDetail, DealFilters, DealPage, DealPerson, DealSortKey } from '@/contracts/crm';
-import { positionBetween } from '@/contracts/crm';
+import { positionBetween, stageRequirementLabels } from '@/contracts/crm';
+import type { StageRequirement } from '@/contracts/crm';
 import { AppError } from '../config';
 import { db, transaction } from '../db';
 import { getCompanies, getContact } from '../directory';
@@ -188,6 +189,25 @@ export async function updateDeal(id: string, input: z.infer<typeof dealPatch>, a
   return loadDeal(id);
 }
 
+const listing = (items: string[]) => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+
+/** What a deal still lacks before it may enter a stage, as labels; empty when it may move. */
+export function missingRequirements(deal: Pick<Deal, 'amount' | 'expectedCloseDate' | 'contactId' | 'companyId'>, required: StageRequirement[]) {
+  return required.filter(field => field === 'amount' ? !(deal.amount > 0) : field === 'expected_close_date' ? !deal.expectedCloseDate
+    : field === 'contact' ? !deal.contactId : !deal.companyId).map(field => stageRequirementLabels[field]);
+}
+
+/** Refuses a move into a stage whose required fields the deal does not have, saying what to add. */
+export async function assertStageRequirements(dealId: string, stageId: string) {
+  const deal = await loadDeal(dealId);
+  if (deal.stageId === stageId) return;
+  const stage = (await db.query<{ name: string; required_fields: string[] | string }>('SELECT name, required_fields FROM pipeline_stages WHERE id = $1', [stageId])).rows[0];
+  if (!stage) throw new AppError(404, 'That pipeline stage was not found.');
+  const required = (Array.isArray(stage.required_fields) ? stage.required_fields : String(stage.required_fields ?? '').replace(/[{}]/g, '').split(',').filter(Boolean)) as StageRequirement[];
+  const missing = missingRequirements(deal, required);
+  if (missing.length) throw new AppError(409, `Add ${listing(missing)} before moving “${deal.name}” to ${stage.name}.`);
+}
+
 /** Renumbers a column 0, 1, 2… when repeated drops leave no room between two cards. */
 async function renumberColumn(stageId: string) {
   await db.query(
@@ -215,6 +235,7 @@ export async function placeDeal(id: string, input: { stageId: string; previousId
     next = await neighbourPosition(input.nextId, input.stageId);
     position = positionBetween(previous, next) ?? 0;
   }
+  await assertStageRequirements(id, input.stageId);
   await moveDeal(id, { stageId: input.stageId, boardPosition: position, lostReason: input.lostReason, actorId });
   return loadDeal(id);
 }
@@ -228,7 +249,9 @@ async function outcomeStage(pipelineId: string, outcome: 'won' | 'lost' | 'open'
 
 export async function closeDeal(id: string, outcome: 'won' | 'lost', lostReason: string | undefined, actorId: string | null) {
   const deal = await loadDeal(id);
-  await moveDeal(id, { stageId: await outcomeStage(deal.pipelineId, outcome), lostReason: outcome === 'lost' ? lostReason ?? '' : undefined, actorId });
+  const stageId = await outcomeStage(deal.pipelineId, outcome);
+  await assertStageRequirements(id, stageId);
+  await moveDeal(id, { stageId, lostReason: outcome === 'lost' ? lostReason ?? '' : undefined, actorId });
   return loadDeal(id);
 }
 
@@ -306,7 +329,9 @@ export const dealEndpoints: Entry[] = [
     const id = uuid.parse(params[0]);
     const input = await readBody(request, z.object({ stageId: uuid.optional() }));
     const deal = await loadDeal(id);
-    await moveDeal(id, { stageId: input.stageId ?? await outcomeStage(deal.pipelineId, 'open'), actorId: user.id });
+    const stageId = input.stageId ?? await outcomeStage(deal.pipelineId, 'open');
+    await assertStageRequirements(id, stageId);
+    await moveDeal(id, { stageId, actorId: user.id });
     return loadDeal(id);
   }, 'marketer'),
   route('POST', /^sales\/deals\/([0-9a-f-]{36})\/archive$/, async ({ request, params, user }) => {
@@ -326,7 +351,10 @@ export const dealEndpoints: Entry[] = [
     for (const id of input.ids) {
       try {
         if (input.ownerId !== undefined) await updateDeal(id, { ownerId: input.ownerId }, user.id);
-        if (input.stageId) await moveDeal(id, { stageId: input.stageId, actorId: user.id });
+        if (input.stageId) {
+          await assertStageRequirements(id, input.stageId);
+          await moveDeal(id, { stageId: input.stageId, actorId: user.id });
+        }
         if (input.status === 'won' || input.status === 'lost') await closeDeal(id, input.status, input.lostReason, user.id);
         if (input.status === 'open') {
           const deal = await loadDeal(id);

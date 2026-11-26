@@ -32,7 +32,7 @@ import { api, message, saveFile, useAction, useResource } from '../client';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FilterBar, FormActions, Modal, PageHeader, Pager, Panel, StatusBadge } from '../ui';
 import {
   ActivityLogger, CompanyPicker, ContactPicker, DealDrawer, EmailDrawer, Estimate, Kv, OwnerChip, OwnerSelect, SourceBadge, TaskDrawer, TaskLine,
-  Timeline, companyOption, contactOption, followUpDefaults, money, shortDate, statusLabel, statusTone, useTeam,
+  Timeline, companyOption, contactOption, followUpDefaults, money, relative, shortDate, statusLabel, statusTone, useTeam,
 } from './common';
 import type { TaskDefaults } from './common';
 
@@ -69,8 +69,16 @@ function DealCard({ deal, overlay, onClose }: { deal: Deal; overlay?: boolean; o
         ]} />
       </div> : null}
     </div>
-    <span className="ov-crm-card-value">{money(deal.amount, deal.currency)}</span>
+    <span className="ov-actions" style={{ gap: 6, flexWrap: 'nowrap' }}>
+      {deal.health !== 'closed' ? <span className={`ov-crm-health ov-crm-health--${deal.health}`} role="img"
+        aria-label={deal.health === 'healthy' ? 'Healthy' : `Needs attention: ${deal.healthReasons.join('; ')}`} title={deal.health === 'healthy' ? 'Healthy' : deal.healthReasons.join('\n')} /> : null}
+      <span className="ov-crm-card-value">{money(deal.amount, deal.currency)}</span>
+    </span>
     {who ? <span className="ov-crm-card-sub" title={who}>{who}</span> : null}
+    {deal.status === 'open' ? <span className={`ov-crm-next ${deal.nextTask ? '' : 'ov-crm-next--none'}`}>
+      {deal.nextTask ? `Next: ${deal.nextTask.title}${deal.nextTask.dueAt ? ` · ${shortDate(deal.nextTask.dueAt)}` : ''}` : 'No next step planned'}
+      {deal.lastActivityAt ? ` · last touch ${relative(deal.lastActivityAt)}` : ''}
+    </span> : null}
     <div className="ov-crm-card-foot">
       <span>
         {deal.ownerName ? <Avatar name={deal.ownerName} size={20} tooltip={`Owner: ${deal.ownerName}`} /> : <Text type="supporting" color="secondary">Unassigned</Text>}
@@ -542,6 +550,10 @@ export function DealView({ id }: { id: string }) {
             <Kv label="Owner"><OwnerChip name={deal.ownerName} /></Kv>
             <Kv label="Created">{shortDate(deal.createdAt)}</Kv>
             <Kv label="In current stage">{deal.daysInStage} day{deal.daysInStage === 1 ? '' : 's'}</Kv>
+            <Kv label="Last interaction">{deal.lastActivityAt ? relative(deal.lastActivityAt) : 'None logged'}</Kv>
+            <Kv label="Next action">{deal.nextTask ? `${deal.nextTask.title}${deal.nextTask.dueAt ? ` · ${shortDate(deal.nextTask.dueAt)}` : ''}` : 'No open task'}</Kv>
+            {deal.health !== 'closed' ? <Kv label="Health">{deal.health === 'healthy' ? <StatusBadge label="Healthy" tone="success" />
+              : <span className="ov-stack-sm"><StatusBadge label="Needs attention" tone="warning" />{deal.healthReasons.map(reason => <Text key={reason} type="supporting" color="secondary">{reason}</Text>)}</span>}</Kv> : null}
             <Kv label="Source">{deal.sourceLabel}</Kv>
           </div>
         </Panel>

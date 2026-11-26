@@ -16,6 +16,7 @@ const stageName = z.string().trim().min(1).max(60);
 const probability = z.number().int().min(0).max(100);
 const outcome = z.enum(['open', 'won', 'lost']);
 const rottingDays = z.number().int().min(1).max(365).nullable();
+const requiredFields = z.array(z.enum(['amount', 'expected_close_date', 'contact', 'company'])).max(4);
 
 const defaultStages = [
   { name: 'Lead in', probability: 10, outcome: 'open' }, { name: 'Qualified', probability: 25, outcome: 'open' },
@@ -153,7 +154,7 @@ export const pipelineEndpoints: Entry[] = [
   }, 'marketer'),
   route('PATCH', /^sales\/stages\/([0-9a-f-]{36})$/, async ({ request, params, user }) => {
     const id = uuid.parse(params[0]);
-    const input = await readBody(request, z.object({ name: stageName.optional(), probability: probability.optional(), outcome: outcome.optional(), rottingDays: rottingDays.optional() }));
+    const input = await readBody(request, z.object({ name: stageName.optional(), probability: probability.optional(), outcome: outcome.optional(), rottingDays: rottingDays.optional(), requiredFields: requiredFields.optional() }));
     const stage = await stageRow(id);
     if (input.outcome && input.outcome !== stage.outcome) {
       if (stage.deals > 0) throw new AppError(409, 'Move this stage’s deals to another stage before changing whether it means won, lost or open.');
@@ -168,8 +169,8 @@ export const pipelineEndpoints: Entry[] = [
     await transaction(async client => {
       await client.query(
         `UPDATE pipeline_stages SET name = coalesce($2, name), probability = coalesce($3, probability), outcome = coalesce($4, outcome),
-           rotting_days = CASE WHEN $5 THEN $6 ELSE rotting_days END WHERE id = $1`,
-        [id, input.name ?? null, input.probability ?? null, input.outcome ?? null, input.rottingDays !== undefined, input.rottingDays ?? null],
+           rotting_days = CASE WHEN $5 THEN $6 ELSE rotting_days END, required_fields = coalesce($7::text[], required_fields) WHERE id = $1`,
+        [id, input.name ?? null, input.probability ?? null, input.outcome ?? null, input.rottingDays !== undefined, input.rottingDays ?? null, input.requiredFields ?? null],
       );
       if (input.outcome) await renumber(client, stage.pipeline_id);
       await audit(user.id, 'update', 'pipeline_stage', id, input.name ?? stage.name, client);
