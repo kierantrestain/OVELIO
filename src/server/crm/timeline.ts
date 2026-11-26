@@ -45,6 +45,22 @@ export function eventTitle(event: PlatformEvent): { title: string; detail?: stri
     case 'flow.enrolled': return { title: `Entered workflow ${text(p.flowName)}`.trim() };
     case 'flow.completed': return { title: `Completed workflow ${text(p.flowName)}`.trim() };
     case 'flow.failed': return { title: `Workflow step failed ${text(p.flowName)}`.trim(), detail: text(p.error) || undefined, tone: 'error' };
+    case 'quote.sent': return { title: `Proposal sent: ${text(p.title) || text(p.number)}`, detail: money(event.amount, event.currency) };
+    case 'quote.viewed': return { title: `Proposal viewed: ${text(p.title) || text(p.number)}`, tone: 'info' };
+    case 'quote.accepted': return { title: `Proposal accepted: ${text(p.title) || text(p.number)}`, detail: text(p.signerName) ? `Signed by ${text(p.signerName)}` : undefined, tone: 'success' };
+    case 'quote.declined': return { title: `Proposal declined: ${text(p.title) || text(p.number)}`, detail: text(p.reason) || undefined, tone: 'warning' };
+    case 'invoice.issued': return { title: `Invoice issued: ${text(p.number)}`, detail: money(event.amount, event.currency) };
+    case 'payment.succeeded': return { title: 'Payment received', detail: [money(event.amount, event.currency), text(p.number)].filter(Boolean).join(' · '), tone: 'success' };
+    case 'payment.failed': return { title: 'Payment failed', detail: text(p.reason) || undefined, tone: 'error' };
+    case 'payment.refunded': return { title: 'Payment refunded', detail: money(event.amount, event.currency), tone: 'warning' };
+    case 'subscription.started': return { title: `Subscription started: ${text(p.name)}`.trim(), detail: money(event.amount, event.currency), tone: 'success' };
+    case 'subscription.renewed': return { title: `Subscription renewed: ${text(p.name)}`.trim(), detail: money(event.amount, event.currency) };
+    case 'subscription.cancelled': return { title: `Subscription cancelled: ${text(p.name)}`.trim(), tone: 'warning' };
+    case 'appointment.booked': return { title: `Meeting booked: ${text(p.title)}`.trim(), detail: text(p.startsAtLabel) || undefined, tone: 'info' };
+    case 'appointment.rescheduled': return { title: `Meeting rescheduled: ${text(p.title)}`.trim(), detail: text(p.startsAtLabel) || undefined };
+    case 'appointment.cancelled': return { title: `Meeting cancelled: ${text(p.title)}`.trim(), detail: text(p.reason) || undefined, tone: 'warning' };
+    case 'appointment.completed': return { title: `Meeting held: ${text(p.title)}`.trim(), tone: 'success' };
+    case 'appointment.no_show': return { title: `No-show: ${text(p.title)}`.trim(), tone: 'error' };
     default: return { title: event.type };
   }
 }

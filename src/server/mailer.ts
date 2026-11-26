@@ -6,7 +6,7 @@
 // consent, and (5) records the exact rendered message in `messages`. Without a configured gateway (the developer
 // preview) nothing is delivered: the message is stored with status `not_sent` and the reason, never reported as sent.
 
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import type { CompanySettings } from '@/contracts';
@@ -109,6 +109,49 @@ export function readUnsubscribeToken(token: string): string | null {
   return /^[^\s@]+@[^\s@]+$/.test(email) ? email : null;
 }
 
+/* ── Click tracking ───────────────────────────────────────────────────────────────────────────────────────
+ * Links in marketing and sales email point at /r/<token>, which records one `email.clicked` event per link per
+ * message and redirects. The token carries the message id and the destination, signed with the workspace HMAC key,
+ * so the redirect can never be used to send someone to an address OVELIO did not put in the email. Set
+ * OVELIO_CLICK_TRACKING=false to send links unchanged. */
+
+export function clickTrackingEnabled() {
+  return process.env.OVELIO_CLICK_TRACKING !== 'false';
+}
+
+function clickSignature(payload: string) {
+  return createHmac('sha256', unsubscribeSecret()).update('click:' + payload).digest('base64url').slice(0, 22);
+}
+
+export function clickUrl(messageId: string, url: string) {
+  const payload = Buffer.from(`${messageId}\n${url}`).toString('base64url');
+  return `${origin()}/r/${payload}.${clickSignature(payload)}`;
+}
+
+/** The message and destination a click token was issued for, or null when it was not issued by this workspace. */
+export function readClickToken(token: string): { messageId: string; url: string } | null {
+  const dot = token.lastIndexOf('.');
+  if (dot < 1) return null;
+  const payload = token.slice(0, dot);
+  const signature = token.slice(dot + 1);
+  if (signature !== clickSignature(payload)) return null;
+  const [messageId, url] = Buffer.from(payload, 'base64url').toString('utf8').split('\n');
+  if (!/^[0-9a-f-]{36}$/.test(messageId ?? '') || !/^https?:\/\//i.test(url ?? '')) return null;
+  return { messageId, url };
+}
+
+/** Short stable id for a destination, so each link counts once per message. */
+export const linkKey = (url: string) => createHash('sha256').update(url).digest('hex').slice(0, 16);
+
+/** Rewrites http(s) links for click tracking, leaving unsubscribe links and very long URLs as they are. */
+export function trackLinks(html: string, messageId: string, keep: string[] = []) {
+  return html.replace(/(<a\b[^>]*?\bhref=)(["'])(https?:\/\/[^"']+)\2/gi, (match, start: string, quote: string, href: string) => {
+    const url = href.replace(/&amp;/g, '&');
+    if (url.length > 1500 || keep.some(item => url === item || url.startsWith(origin() + '/u/'))) return match;
+    return `${start}${quote}${clickUrl(messageId, url)}${quote}`;
+  });
+}
+
 export function mergeValues(contact: DirectoryContact | null, email: string, company: CompanySettings): Record<string, string> {
   return {
     'contact.first_name': contact?.firstName ?? '',
@@ -152,17 +195,17 @@ export function htmlToText(html: string) {
 
 type Stored = { id: string; status: MessageStatus; status_reason: string };
 
-async function record(input: SendInput, rendered: { subject: string; html: string; text: string }, from: { email: string; name: string },
+async function record(id: string, input: SendInput, rendered: { subject: string; html: string; text: string }, from: { email: string; name: string },
   status: MessageStatus, reason: string, providerId: string | null, contactId: number | null) {
   const result = await db.query<Stored>(
-    `INSERT INTO messages (category, status, status_reason, to_email, contact_id, from_email, from_name, reply_to, subject, html,
+    `INSERT INTO messages (id, category, status, status_reason, to_email, contact_id, from_email, from_name, reply_to, subject, html,
        text_body, campaign_id, design_id, source, provider_message_id, idempotency_key, created_by, sent_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, CASE WHEN $2 = 'sent' THEN now() END)
+     VALUES ($18, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, CASE WHEN $2 = 'sent' THEN now() END)
      ON CONFLICT (idempotency_key) DO NOTHING
      RETURNING id, status, status_reason`,
     [input.category, status, reason, input.to.trim().toLowerCase(), contactId, from.email, from.name, input.replyTo ?? '',
       rendered.subject, rendered.html, rendered.text, input.campaignId ?? null, input.designId ?? null, input.source,
-      providerId, input.idempotencyKey ?? null, input.createdBy ?? null],
+      providerId, input.idempotencyKey ?? null, input.createdBy ?? null, id],
   );
   return result.rows[0];
 }
@@ -180,13 +223,17 @@ export async function sendEmail(input: SendInput): Promise<SendResult> {
   const subject = renderMergeTags(input.subject, values, { html: false });
   // Conditional blocks from the email studio are kept or dropped for this recipient before merge tags are filled.
   let html = renderMergeTags(resolveConditionalBlocks(input.html, contact), values);
-  if (input.category === 'marketing' || input.category === 'sales') html = withComplianceFooter(html, company, values.unsubscribe_url);
+  const messageId = randomUUID();
+  if (input.category === 'marketing' || input.category === 'sales') {
+    html = withComplianceFooter(html, company, values.unsubscribe_url);
+    if (clickTrackingEnabled()) html = trackLinks(html, messageId, [values.unsubscribe_url]);
+  }
   const rendered = { subject, html, text: input.text ? renderMergeTags(input.text, values, { html: false }) : htmlToText(html) };
   const from = { email: (process.env.SMTP_FROM_EMAIL || 'hello@ovelio.test').toLowerCase(), name: input.fromName || process.env.MAIL_FROM_NAME || company.name || 'OVELIO' };
   const contactId = input.contactId ?? contact?.id ?? null;
 
   const finish = async (status: MessageStatus, reason: string, providerId: string | null = null) => {
-    const stored = await record(input, rendered, from, status, reason, providerId, contactId);
+    const stored = await record(messageId, input, rendered, from, status, reason, providerId, contactId);
     if (!stored) {
       const again = await db.query<Stored>('SELECT id, status, status_reason FROM messages WHERE idempotency_key = $1', [input.idempotencyKey]);
       return { messageId: again.rows[0].id, status: again.rows[0].status, reason: again.rows[0].status_reason, duplicate: true };

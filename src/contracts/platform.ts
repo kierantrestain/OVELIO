@@ -62,6 +62,12 @@ export const platformEventTypes = [
   'form.submitted', 'page.viewed', 'page.converted', 'funnel.step_viewed', 'funnel.completed',
   'campaign.launched',
   'flow.enrolled', 'flow.completed', 'flow.failed',
+  // Revenue (wave two): commercial documents, invoices and payments. Amounts are in the record's currency.
+  'quote.sent', 'quote.viewed', 'quote.accepted', 'quote.declined',
+  'invoice.issued', 'payment.succeeded', 'payment.failed', 'payment.refunded',
+  'subscription.started', 'subscription.renewed', 'subscription.cancelled',
+  // Calendar (wave two): appointments booked through booking links or by the team.
+  'appointment.booked', 'appointment.rescheduled', 'appointment.cancelled', 'appointment.completed', 'appointment.no_show',
 ] as const;
 export type PlatformEventType = (typeof platformEventTypes)[number];
 
