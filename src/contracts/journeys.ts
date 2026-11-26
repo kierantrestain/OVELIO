@@ -14,6 +14,8 @@ export const flowTriggerTypes = [
   'form.submitted', 'page.converted', 'page.viewed',
   'deal.created', 'deal.stage_changed', 'deal.won', 'deal.lost', 'task.completed',
   'contact.created', 'contact.tagged', 'email.unsubscribed', 'campaign.launched',
+  'quote.viewed', 'quote.accepted', 'quote.declined', 'payment.succeeded', 'payment.failed', 'subscription.cancelled',
+  'appointment.booked', 'appointment.cancelled', 'appointment.completed', 'appointment.no_show',
 ] as const;
 export type FlowTriggerType = (typeof flowTriggerTypes)[number];
 
@@ -31,7 +33,7 @@ type TriggerFilterKind = 'form' | 'page' | 'pipeline' | 'stage' | 'tag' | 'campa
 export type FlowTriggerSpec = {
   type: FlowTriggerType;
   label: string;
-  group: 'Forms & pages' | 'Sales' | 'Contacts' | 'Campaigns';
+  group: 'Forms & pages' | 'Sales' | 'Revenue' | 'Meetings' | 'Contacts' | 'Campaigns';
   description: string;
   filters: TriggerFilterKind[];
   /** Filters that must be set. */
@@ -52,6 +54,16 @@ export const flowTriggerSpecs: FlowTriggerSpec[] = [
   { type: 'contact.created', label: 'Contact created', group: 'Contacts', description: 'A new contact is added.', filters: [] },
   { type: 'contact.tagged', label: 'Tag added', group: 'Contacts', description: 'A contact receives a tag.', filters: ['tag'], required: ['tag'] },
   { type: 'email.unsubscribed', label: 'Unsubscribed', group: 'Contacts', description: 'A contact unsubscribes from email.', filters: [] },
+  { type: 'quote.viewed', label: 'Proposal viewed', group: 'Revenue', description: 'A client opens a sent proposal (at most once a day).', filters: [] },
+  { type: 'quote.accepted', label: 'Proposal accepted', group: 'Revenue', description: 'A client signs and accepts a proposal.', filters: [] },
+  { type: 'quote.declined', label: 'Proposal declined', group: 'Revenue', description: 'A client declines a proposal.', filters: [] },
+  { type: 'payment.succeeded', label: 'Payment received', group: 'Revenue', description: 'A card or recorded payment is received against an invoice.', filters: [] },
+  { type: 'payment.failed', label: 'Payment failed', group: 'Revenue', description: 'A card payment does not complete.', filters: [] },
+  { type: 'subscription.cancelled', label: 'Subscription cancelled', group: 'Revenue', description: 'A recurring subscription is cancelled.', filters: [] },
+  { type: 'appointment.booked', label: 'Meeting booked', group: 'Meetings', description: 'Someone books a meeting through a booking link, or the team books one.', filters: [] },
+  { type: 'appointment.cancelled', label: 'Meeting cancelled', group: 'Meetings', description: 'A meeting is cancelled by the invitee or the team.', filters: [] },
+  { type: 'appointment.completed', label: 'Meeting held', group: 'Meetings', description: 'A meeting is marked as held.', filters: [] },
+  { type: 'appointment.no_show', label: 'Meeting no-show', group: 'Meetings', description: 'The invitee did not attend.', filters: [] },
   { type: 'campaign.launched', label: 'Campaign launched', group: 'Campaigns', description: 'A marketing campaign is launched. Runs once, without a contact.', filters: ['campaign'], contactless: true },
 ];
 

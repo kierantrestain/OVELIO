@@ -11,7 +11,7 @@ import type {
   ConditionOperator, DryRunResult, DryRunStep, FlowGraph, FlowHandle, FlowNode, FlowTrigger, ReentryRule, StepStatus,
 } from '@/contracts/journeys';
 import {
-  clampPercent, conditionChecks, contactFieldChoices, describeNode, describeTrigger, nodeSpec, operatorLabels, tagsOf,
+  clampPercent, conditionChecks, contactFieldChoices, describeNode, describeTrigger, flowTriggerTypes, nodeSpec, operatorLabels, tagsOf,
   triggerSpec, waitMilliseconds,
 } from '@/contracts/journeys';
 import { renderMergeTags } from '@/contracts/merge-tags';
@@ -211,8 +211,8 @@ export async function handlePlatformEvent(event: PlatformEvent): Promise<void> {
   }
 }
 
-const triggerSpecTypes = ['form.submitted', 'page.converted', 'page.viewed', 'deal.created', 'deal.stage_changed', 'deal.won', 'deal.lost',
-  'task.completed', 'contact.created', 'contact.tagged', 'email.unsubscribed', 'campaign.launched'] as const;
+// Every event type a flow can start on (src/contracts/journeys.ts), so a new trigger needs no second list here.
+const triggerSpecTypes = flowTriggerTypes;
 
 /* ── Conditions ────────────────────────────────────────────────────────────────────────────────────────── */
 
