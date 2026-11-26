@@ -100,7 +100,7 @@ export function MediaPicker({ onPick, onClose }: { onPick: (url: string) => void
 export function ContactPicker({ value, onChange, label = 'Sample contact' }: { value: SampleContact | null; onChange: (contact: SampleContact | null) => void; label?: string }) {
   const contacts = useResource<{ items: SampleContact[] }>('/studio/sample-contacts');
   const items = contacts.data?.items ?? [];
-  return <Selector label={label} value={value ? String(value.id) : 'none'} isLoading={contacts.loading} width={300}
+  return <Selector label={label} hasSearch value={value ? String(value.id) : 'none'} isLoading={contacts.loading} width={300}
     onChange={next => onChange(items.find(item => String(item.id) === next) ?? null)}
     options={[{ value: 'none', label: 'No contact (fallbacks)' }, ...items.map(item => ({ value: String(item.id), label: item.name, description: item.email }))]} />;
 }

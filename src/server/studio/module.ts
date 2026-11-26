@@ -303,7 +303,7 @@ export const studioModule: LaneModule = {
     route('GET', new RegExp(`^studio/designs/${uuid}/render$`), async ({ params, query }) =>
       render(params[0], query.get('contactId') ? z.coerce.number().int().min(1).parse(query.get('contactId')) : null)),
     route('GET', /^studio\/sample-contacts$/, async ({ query }) => {
-      const found = await searchContacts(z.string().max(120).parse(query.get('q') ?? ''), 12);
+      const found = await searchContacts(z.string().max(120).parse(query.get('q') ?? ''), 50);
       return { items: found.map(toSample) };
     }, 'marketer'),
     route('POST', new RegExp(`^studio/designs/${uuid}/test$`), async ({ params, request, user }) => {

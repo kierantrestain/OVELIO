@@ -107,7 +107,7 @@ export async function reputationChecks(): Promise<DeliverabilityCheck[]> {
     const bounceRate = bounced / sent;
     const complaintRate = complaints / sent;
     checks.push({ id: 'bounce', group: 'Reputation', label: 'Bounce rate', status: bounceRate < 0.02 ? 'pass' : bounceRate < 0.05 ? 'warn' : 'fail', value: percent(bounceRate),
-      detail: `${bounced.toLocaleString('en-GB')} bounces from ${sent.toLocaleString('en-GB')} newsletter emails across ${sentCampaigns.length} sends. Keep it under 2%.` });
+      detail: `${bounced.toLocaleString('en-GB')} bounces from ${sent.toLocaleString('en-GB')} newsletter emails across ${sentCampaigns.length} ${sentCampaigns.length === 1 ? "send" : "sends"}. Keep it under 2%.` });
     checks.push({ id: 'complaint', group: 'Reputation', label: 'Complaint rate', status: complaintRate < 0.001 ? 'pass' : complaintRate < 0.003 ? 'warn' : 'fail', value: percent(complaintRate),
       detail: `${complaints} spam complaints reported back by mailbox providers. Gmail and Yahoo require under 0.3%; aim for under 0.1%. Providers that do not send complaint reports are not counted.` });
   }
