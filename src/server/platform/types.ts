@@ -12,7 +12,7 @@ export type JobHandler = (data: any, context: { attempt: number }) => Promise<vo
  */
 export type LaneModule = {
   /** Stable lane name, used in job keys. */
-  name: 'crm' | 'studio' | 'sites' | 'journeys' | 'insights';
+  name: 'crm' | 'studio' | 'sites' | 'journeys' | 'insights' | 'workspace';
   /** Console API endpoints under /api/console. They run on PostgreSQL in production and PGlite in the preview. */
   endpoints: Entry[];
   /** Background job handlers, keyed by a lane-prefixed name such as 'flows.step'. */
