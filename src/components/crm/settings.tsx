@@ -8,7 +8,7 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from '@dnd-kit/utilities';
 import { ArrowDown, ArrowUp, Download, GripVertical, Inbox, Plus, Trash2, Users } from 'lucide-react';
 import NextLink from 'next/link';
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Heading } from '@astryxdesign/core/Heading';
@@ -24,12 +24,12 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { useToast } from '@astryxdesign/core/Toast';
 import type {
-  InboxConversation, InboxThread, InboxThreadSummary, Mailbox, MailboxOverview, Pipeline, PipelineStage, Sequence, SequenceEnrolment,
-  SequenceInput, SequenceStep, TaskType,
+  InboxConversation, InboxMessageContent, InboxThread, InboxThreadMessage, InboxThreadSummary, Mailbox, MailboxOverview, Pipeline,
+  PipelineStage, SalesEmailResult, Sequence, SequenceEnrolment, SequenceInput, SequenceStep, TaskType,
 } from '@/contracts/crm';
 import { taskTypeLabels } from '@/contracts/crm';
 import { mergeTags } from '@/contracts/merge-tags';
-import { api, message, saveFile, useAction, useResource } from '../client';
+import { api, message, number, saveFile, useAction, useResource } from '../client';
 import { useUser } from '../shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, SlideDrawer, StatusBadge, Toolbar } from '../ui';
 import { ContactPicker, relative, shortDate, dateTime } from './common';
@@ -537,66 +537,152 @@ function ContactEmailActivity({ query }: { query: string }) {
   </>;
 }
 
-function InboxThreadDrawer({ thread, onClose }: { thread: InboxThreadSummary; onClose: () => void }) {
-  const params = new URLSearchParams({ mailboxId: thread.mailboxId, threadId: thread.threadId });
-  const detail = useResource<InboxThread>(`/sales/inbox/thread?${params}`);
-  const messages = detail.data?.messages;
+function InboxMessageBody({ mailboxId, messageId }: { mailboxId: string; messageId: string }) {
+  const params = new URLSearchParams({ mailboxId, messageId });
+  const content = useResource<InboxMessageContent>(`/sales/inbox/message?${params}`);
+  if (!content.data) return <AsyncState loading={content.loading} error={content.error} retry={content.refresh} />;
+  const { body, attachments } = content.data;
+  return <div className="ov-stack-sm">
+    {body ? <Text className="ov-crm-inbox-snippet">{body}</Text> : <Text type="supporting" color="secondary">This message has no text.</Text>}
+    {attachments.length ? <section aria-label="Attachments">
+      <Text weight="semibold">Attachments</Text>
+      <ul className="ov-rows ov-crm-inbox-attachments">
+        {attachments.map(attachment => <li key={attachment.id}>
+          <span>
+            <Text>{attachment.name}</Text>
+            <Text type="supporting" color="secondary">{number(attachment.size)} bytes</Text>
+          </span>
+          {attachment.downloadable
+            ? <Button size="sm" variant="ghost" label="Download" aria-label={`Download ${attachment.name}`} icon={<Download size={14} />}
+                href={`/api/console/sales/inbox/attachment?${new URLSearchParams({ mailboxId, messageId, attachmentId: attachment.id })}`} />
+            : <Text type="supporting" color="secondary">Download unavailable</Text>}
+        </li>)}
+      </ul>
+    </section> : null}
+  </div>;
+}
+
+function InboxMessage({ item, mailboxId, threadSubject }: { item: InboxThreadMessage; mailboxId: string; threadSubject?: string }) {
+  const bodyId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const sender = item.fromEmail || 'Sender unavailable';
+  return <li>
+    <div className="ov-crm-inbox-message">
+      <div className="ov-actions">
+        <Text weight="semibold">{sender}</Text>
+        <InboxDirection direction={item.direction} />
+      </div>
+      {item.toEmails ? <Text type="supporting" color="secondary">To {item.toEmails}</Text> : null}
+      {item.subject && item.subject !== threadSubject ? <Text weight="medium">{item.subject}</Text> : null}
+      {!expanded && item.snippet ? <Text className="ov-crm-inbox-snippet">{item.snippet}</Text> : null}
+      <div className="ov-actions">
+        <Button size="sm" variant="ghost" label={expanded ? 'Hide message' : 'View full message'}
+          aria-label={`${expanded ? 'Hide message' : 'View full message'} from ${sender}`}
+          aria-expanded={expanded} aria-controls={bodyId} onClick={() => setExpanded(value => !value)} />
+      </div>
+      <div id={bodyId} hidden={!expanded}>
+        {expanded ? <InboxMessageBody mailboxId={mailboxId} messageId={item.id} /> : null}
+      </div>
+    </div>
+    <time className="ov-crm-when" dateTime={item.at}>{dateTime(item.at)}</time>
+  </li>;
+}
+
+function InboxReply({ params, onSent }: { params: string; onSent: () => void }) {
+  const [body, setBody] = useState('');
+  const action = useAction();
+  const reply = body.trim();
+  return <form className="ov-stack-sm ov-crm-inbox-reply" onSubmit={event => {
+    event.preventDefault();
+    if (!reply) return;
+    void action.run(async () => {
+      const result = await api<SalesEmailResult>(`/sales/inbox/reply?${params}`, 'POST', { body: reply });
+      if (result.status !== 'sent') throw new Error(result.reason || 'The reply could not be sent.');
+      setBody('');
+      onSent();
+    }, 'Reply sent.');
+  }}>
+    <TextArea label="Reply" value={body} onChange={setBody} rows={4} width="100%" isDisabled={action.busy} />
+    <Feedback error={action.error} />
+    <div className="ov-actions ov-actions--end">
+      <Button type="submit" variant="primary" label="Send reply" isDisabled={!reply} isLoading={action.busy} />
+    </div>
+  </form>;
+}
+
+function InboxThreadDrawer({ thread, onClose, onChanged }: { thread: InboxThreadSummary; onClose: () => void; onChanged: () => void }) {
+  const params = new URLSearchParams({ mailboxId: thread.mailboxId, threadId: thread.threadId }).toString();
+  const path = `/sales/inbox/thread?${params}`;
+  const detail = useResource<InboxThread>(path);
+  const readAction = useAction();
+  const [readResult, setReadResult] = useState<{ snapshot: InboxThread; unread: boolean } | null>(null);
+  const snapshot = detail.data;
+  const unread = (readResult && readResult.snapshot === snapshot ? readResult.unread : snapshot?.unread) ?? false;
+  const messages = snapshot?.messages;
   const subject = messages?.at(-1)?.subject;
   const contactId = messages?.findLast(item => item.contactId != null)?.contactId;
   return <SlideDrawer title="Conversation" onClose={onClose}>
-    {!messages ? <AsyncState loading={detail.loading} error={detail.error} retry={detail.refresh} /> : <>
+    {!snapshot || !messages ? <AsyncState loading={detail.loading} error={detail.error} retry={detail.refresh} /> : <>
       <div className="ov-stack-sm ov-crm-inbox-copy">
         <Heading level={2}>{subject || '(no subject)'}</Heading>
         <Text type="supporting" color="secondary">Mailbox · {thread.mailboxEmail}</Text>
-        {contactId ? <div className="ov-actions"><Button size="sm" label="View CRM contact" href={`/crm/contacts/${contactId}`} /></div> : null}
+        <div className="ov-actions">
+          {contactId ? <Button size="sm" label="View CRM contact" href={`/crm/contacts/${contactId}`} /> : null}
+          <Button size="sm" label={unread ? 'Mark read' : 'Mark unread'} isLoading={readAction.busy} isDisabled={detail.loading}
+            onClick={() => void readAction.run(async () => {
+              const updated = await api<{ unread: boolean }>(path, 'PATCH', { read: unread, through: unread ? snapshot.readVersion : undefined });
+              setReadResult({ snapshot, unread: updated.unread });
+              if (unread && updated.unread) detail.refresh();
+              onChanged();
+            })} />
+        </div>
+        <Feedback error={readAction.error} />
       </div>
       {messages.length < thread.count ? <Text type="supporting" color="secondary">Showing the most recent {messages.length} messages.</Text> : null}
       <ol className="ov-rows" aria-label="Conversation messages, oldest first">
-        {messages.map(item => <li key={item.id}>
-          <span>
-            <span className="ov-actions">
-              <Text weight="semibold">{item.fromEmail || 'Sender unavailable'}</Text>
-              <InboxDirection direction={item.direction} />
-            </span>
-            {item.toEmails ? <Text type="supporting" color="secondary">To {item.toEmails}</Text> : null}
-            {item.subject && item.subject !== subject ? <Text weight="medium">{item.subject}</Text> : null}
-            {item.snippet ? <Text className="ov-crm-inbox-snippet">{item.snippet}</Text> : null}
-          </span>
-          <time className="ov-crm-when" dateTime={item.at}>{dateTime(item.at)}</time>
-        </li>)}
+        {messages.map(item => <InboxMessage key={item.id} item={item} mailboxId={thread.mailboxId} threadSubject={subject} />)}
       </ol>
+      {snapshot.canReply ? <InboxReply params={params} onSent={() => { detail.refresh(); onChanged(); }} /> : null}
     </>}
   </SlideDrawer>;
 }
 
-function MailboxThreads({ query }: { query: string }) {
-  const threads = useResource<InboxThreadSummary[]>(`/sales/inbox/threads${query ? `?q=${encodeURIComponent(query)}` : ''}`);
+function MailboxThreads({ query, unreadOnly, focusFilter }: { query: string; unreadOnly: boolean; focusFilter: () => void }) {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (unreadOnly) params.set('unread', 'true');
+  const threads = useResource<InboxThreadSummary[]>(`/sales/inbox/threads${params.size ? `?${params}` : ''}`);
   const [selected, setSelected] = useState<InboxThreadSummary | null>(null);
-  if (!threads.data) return <AsyncState loading={threads.loading} error={threads.error} retry={threads.refresh} />;
-  if (!threads.data.length) return query ? <Empty title="No matching conversations" />
-    : <Empty title="No mailbox conversations yet" description="Synced email with CRM contacts appears here when you connect a mailbox or a teammate shares one with you." />;
   return <>
-    <ul className="ov-rows" aria-label="Mailbox conversations">
-      {threads.data.map(thread => {
-        const subject = thread.subject || '(no subject)';
-        const counterpart = thread.direction === 'inbound' ? thread.fromEmail : thread.toEmails;
-        return <li key={`${thread.mailboxId}:${thread.threadId}`}>
-          <span>
-            <span className="ov-actions">
-              <Text weight="semibold">{subject}</Text>
-              <InboxDirection direction={thread.direction} />
+    {!threads.data ? <AsyncState loading={threads.loading} error={threads.error} retry={threads.refresh} /> : threads.data.length ? (
+      <ul className="ov-rows" aria-label="Mailbox conversations">
+        {threads.data.map(thread => {
+          const subject = thread.subject || '(no subject)';
+          const counterpart = thread.direction === 'inbound' ? thread.fromEmail : thread.toEmails;
+          return <li key={`${thread.mailboxId}:${thread.threadId}`}>
+            <span>
+              <span className="ov-actions">
+                <Text weight="semibold">{subject}</Text>
+                <InboxDirection direction={thread.direction} />
+                {thread.unread ? <StatusBadge label="Unread" tone="neutral" /> : null}
+              </span>
+              <Text type="supporting" color="secondary">{[counterpart, thread.mailboxEmail, thread.count === 1 ? '1 message' : `${thread.count} messages`].filter(Boolean).join(' · ')}</Text>
+              {thread.snippet ? <Text type="supporting" className="ov-crm-inbox-preview">{thread.snippet}</Text> : null}
             </span>
-            <Text type="supporting" color="secondary">{[counterpart, thread.mailboxEmail, thread.count === 1 ? '1 message' : `${thread.count} messages`].filter(Boolean).join(' · ')}</Text>
-            {thread.snippet ? <Text type="supporting" className="ov-crm-inbox-preview">{thread.snippet}</Text> : null}
-          </span>
-          <div className="ov-actions">
-            <time className="ov-crm-when" dateTime={thread.at}>{relative(thread.at)}</time>
-            <Button size="sm" label="Open" aria-label={`Open conversation ${subject} in ${thread.mailboxEmail}`} onClick={() => setSelected(thread)} />
-          </div>
-        </li>;
-      })}
-    </ul>
-    {selected ? <InboxThreadDrawer thread={selected} onClose={() => setSelected(null)} /> : null}
+            <div className="ov-actions">
+              <time className="ov-crm-when" dateTime={thread.at}>{relative(thread.at)}</time>
+              <Button size="sm" label="Open" aria-label={`Open conversation ${subject} in ${thread.mailboxEmail}`} onClick={() => setSelected(thread)} />
+            </div>
+          </li>;
+        })}
+      </ul>
+    ) : query ? <Empty title="No matching conversations" />
+      : unreadOnly ? <Empty title="No unread conversations" />
+      : <Empty title="No mailbox conversations yet" description="Synced email with CRM contacts appears here when you connect a mailbox or a teammate shares one with you." />}
+    {selected ? <InboxThreadDrawer thread={selected} onChanged={threads.refresh} onClose={() => {
+      setSelected(null);
+      if (unreadOnly) requestAnimationFrame(focusFilter);
+    }} /> : null}
   </>;
 }
 
@@ -604,6 +690,8 @@ export function SalesInbox() {
   const [view, setView] = useState('conversations');
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const unreadFilter = useRef<HTMLInputElement>(null);
   return <div className="ov-stack">
     <PageHeader title="Inbox" description="Review synced mailbox conversations and email activity recorded in CRM."
       actions={<Button label="Mailbox settings" href="/settings/mailboxes" icon={<Inbox size={15} />} />} />
@@ -617,8 +705,11 @@ export function SalesInbox() {
           <SegmentedControlItem value="conversations" label="Conversations" />
           <SegmentedControlItem value="activity" label="Contact activity" />
         </SegmentedControl>
+        {view === 'conversations' ? <Switch label="Unread only" value={unreadOnly} onChange={setUnreadOnly} ref={unreadFilter} /> : null}
       </Toolbar>
-      {view === 'conversations' ? <MailboxThreads key={query} query={query} /> : <ContactEmailActivity query={query} />}
+      {view === 'conversations'
+        ? <MailboxThreads key={`${unreadOnly}:${query}`} query={query} unreadOnly={unreadOnly} focusFilter={() => unreadFilter.current?.focus()} />
+        : <ContactEmailActivity query={query} />}
     </Panel>
   </div>;
 }
