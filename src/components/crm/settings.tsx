@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
+import { MultiSelector } from '@astryxdesign/core/MultiSelector';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
@@ -164,6 +165,81 @@ export function PipelineSettings() {
       </div>
     </Modal> : null}
   </div>;
+}
+
+/* ── Lead routing ─────────────────────────────────────────────────────── */
+
+type Rule = { id: string; name: string; active: boolean; matchField: 'any' | 'country' | 'source' | 'form'; matchValue: string; userIds: string[]; users: { id: string; name: string }[] };
+const matchLabel: Record<Rule['matchField'], string> = { any: 'Every new lead', country: 'Country is', source: 'Source is', form: 'Form is' };
+
+function RuleEditor({ rule, onClose, onSaved }: { rule?: Rule; onClose: () => void; onSaved: () => void }) {
+  const team = useResource<{ id: string; name: string }[]>('/platform/users');
+  const action = useAction();
+  const [name, setName] = useState(rule?.name ?? '');
+  const [field, setField] = useState<Rule['matchField']>(rule?.matchField ?? 'any');
+  const [value, setValue] = useState(rule?.matchValue ?? '');
+  const [users, setUsers] = useState<string[]>(rule?.userIds ?? []);
+  const [active, setActive] = useState(rule?.active ?? true);
+  return <Modal title={rule ? 'Edit routing rule' : 'New routing rule'} onClose={onClose}>
+    <form className="ov-stack-sm" onSubmit={event => {
+      event.preventDefault();
+      void action.run(async () => {
+        await api(rule ? `/crm/routing/${rule.id}` : '/crm/routing', rule ? 'PATCH' : 'POST', { name: name.trim(), matchField: field, matchValue: value.trim(), userIds: users, active });
+        onSaved();
+      }, 'Routing rule saved.');
+    }}>
+      <TextInput label="Rule name" isRequired value={name} onChange={setName} placeholder="UK inbound leads" />
+      <div className="ov-form-grid">
+        <Selector label="Applies to" value={field} onChange={next => setField((next as Rule['matchField']) || 'any')}
+          options={(Object.keys(matchLabel) as Rule['matchField'][]).map(key => ({ value: key, label: matchLabel[key] }))} />
+        {field !== 'any' ? <TextInput label={field === 'country' ? 'Country' : field === 'source' ? 'Source or UTM source' : 'Form id or name'} isRequired value={value} onChange={setValue}
+          placeholder={field === 'country' ? 'United Kingdom' : field === 'source' ? 'linkedin' : 'Demo request'} /> : null}
+      </div>
+      <MultiSelector label="Assign in turn to" value={users} onChange={setUsers} isLoading={team.loading}
+        options={(team.data ?? []).map(member => ({ value: member.id, label: member.name }))} description="Leads rotate through these people in order." />
+      <Switch label="Active" value={active} onChange={setActive} />
+      <Feedback error={action.error} />
+      <FormActions><Button label="Cancel" onClick={onClose} /><Button type="submit" variant="primary" label="Save rule" isLoading={action.busy} isDisabled={!name.trim() || !users.length} /></FormActions>
+    </form>
+  </Modal>;
+}
+
+export function LeadRouting() {
+  const routing = useResource<{ rules: Rule[]; recent: { contactId: number; owner: string; rule: string; at: string }[] }>('/crm/routing');
+  const action = useAction();
+  const [editing, setEditing] = useState<Rule | 'new' | null>(null);
+  const rules = routing.data?.rules ?? [];
+  const move = (index: number, by: number) => void action.run(async () => {
+    await api('/crm/routing/order', 'POST', { ids: arrayMove(rules, index, index + by).map(rule => rule.id) });
+    routing.refresh();
+  });
+  return <Panel title="Lead routing" description="New contacts without an owner (created, or from a form) go to the first matching rule, which assigns people in turn."
+    action={<Button size="sm" label="New rule" icon={<Plus size={14} />} onClick={() => setEditing('new')} />}>
+    <Feedback error={action.error} />
+    {!routing.data ? <AsyncState loading={routing.loading} error={routing.error} retry={routing.refresh} /> : rules.length ? <ul className="ov-rows">
+      {rules.map((rule, index) => <li key={rule.id}>
+        <span>
+          <span className="ov-actions"><Text weight="medium">{index + 1}. {rule.name}</Text>{rule.active ? null : <StatusBadge label="Paused" tone="neutral" />}</span>
+          <Text type="supporting" color="secondary">{matchLabel[rule.matchField]}{rule.matchField !== 'any' ? ` “${rule.matchValue}”` : ''} → {rule.users.map(user => user.name).join(', ') || 'nobody'}</Text>
+        </span>
+        <span className="ov-actions">
+          <IconButton size="sm" variant="ghost" label={`Move ${rule.name} up`} icon={<ArrowUp size={14} />} isDisabled={index === 0} onClick={() => move(index, -1)} />
+          <IconButton size="sm" variant="ghost" label={`Move ${rule.name} down`} icon={<ArrowDown size={14} />} isDisabled={index === rules.length - 1} onClick={() => move(index, 1)} />
+          <Button size="sm" label="Edit" onClick={() => setEditing(rule)} />
+          <IconButton size="sm" variant="ghost" label={`Delete ${rule.name}`} icon={<Trash2 size={14} />}
+            onClick={() => void action.run(async () => { await api(`/crm/routing/${rule.id}`, 'DELETE'); routing.refresh(); }, 'Rule deleted.')} />
+        </span>
+      </li>)}
+    </ul> : <Empty title="No routing rules" description="Without rules, new leads stay unassigned until someone takes them." />}
+    {routing.data?.recent.length ? <div className="ov-stack-sm">
+      <Text type="label" color="secondary">Recent assignments</Text>
+      <ul className="ov-rows">{routing.data.recent.map(item => <li key={`${item.contactId}-${item.at}`}>
+        <span><NextLink href={`/crm/contacts/${item.contactId}`}>Contact {item.contactId}</NextLink><Text type="supporting" color="secondary">{item.owner} · {item.rule}</Text></span>
+        <time className="ov-crm-when" dateTime={item.at}>{relative(item.at)}</time>
+      </li>)}</ul>
+    </div> : null}
+    {editing ? <RuleEditor rule={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); routing.refresh(); }} /> : null}
+  </Panel>;
 }
 
 /* ── Sequences ────────────────────────────────────────────────────────── */

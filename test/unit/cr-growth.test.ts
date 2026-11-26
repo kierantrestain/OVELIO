@@ -47,6 +47,33 @@ test('CR-01 contact list filters by owner and stage, shows open deals, and bulk 
   assert.ok(daniel);
 });
 
+test('CR-03 a form lead goes to the next rep in rotation, once, and only when it has no owner', async () => {
+  const { upsertContact } = await import('../../src/server/directory');
+  const { emitEvent, listEvents } = await import('../../src/server/events');
+  const { drainPlatformJobs } = await import('../../src/server/platform/jobs');
+  await call('POST', 'crm/routing', { name: 'Demo requests', matchField: 'form', matchValue: 'Demo request', userIds: [MAYA, LIAM] });
+  await call('POST', 'crm/routing', { name: 'Everyone else', matchField: 'any', userIds: [user.id] });
+  const owner = async (id: number) => (await db.query<{ owner_id: string }>(`SELECT owner_id FROM record_owners WHERE object = 'contact' AND record_id = $1`, [id])).rows[0]?.owner_id;
+  const leads = [];
+  for (const email of ['lead.one@routing.example', 'lead.two@routing.example']) {
+    const { contact } = await upsertContact({ email, source: 'test' });
+    const event = await emitEvent({ type: 'form.submitted', contactId: contact.id, entityType: 'form', entityId: 'f-demo', properties: { formName: 'Demo request' } });
+    leads.push({ contact, event: event! });
+  }
+  await drainPlatformJobs({ maxJobs: 200 });
+  assert.equal(await owner(leads[0].contact.id), MAYA);
+  assert.equal(await owner(leads[1].contact.id), LIAM, 'the second lead goes to the next rep');
+  const { routeLead } = await import('../../src/server/crm/routing');
+  await routeLead(leads[0].event);
+  assert.equal(await owner(leads[0].contact.id), MAYA, 'a redelivered event changes nothing');
+  const { contact: other } = await upsertContact({ email: 'lead.three@routing.example', source: 'test' });
+  await emitEvent({ type: 'contact.created', contactId: other.id, source: 'import' });
+  await drainPlatformJobs({ maxJobs: 200 });
+  assert.equal(await owner(other.id), user.id, 'the catch-all rule takes leads no other rule matches');
+  const changes = await listEvents({ contactId: leads[1].contact.id, types: ['contact.owner_changed'] });
+  assert.equal(changes.length, 1);
+});
+
 test('CR-02 duplicates are detected by email or name and company, and a merge moves every OVELIO record to the survivor', async () => {
   const { upsertContact, getContact } = await import('../../src/server/directory');
   const { listEvents } = await import('../../src/server/events');
