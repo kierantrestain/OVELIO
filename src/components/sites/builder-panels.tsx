@@ -15,7 +15,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import type { MediaItem } from '@/contracts';
-import type { DesignVersion, LandingPageDetail, PageDesign, SiteDomain } from '@/contracts/sites';
+import type { DesignVersion, LandingPageDetail, PageDesign, PagePublication, SiteDomain } from '@/contracts/sites';
 import { api, date, message, request, upload } from '../client';
 import { ConfirmDialog, Empty, Modal, SlideDrawer, StatusBadge } from '../ui';
 import { absoluteUrl, pageStatusTone } from './shared';
@@ -193,7 +193,18 @@ export function PublishDrawer({ page, onClose, onChange, beforePublish }: {
           options={[{ value: 'default', label: 'Workspace address (/s/…)' }, ...domains.map(item => ({ value: item.id, label: item.hostname, description: item.status === 'verified' ? 'Verified' : 'Not verified yet' }))]} />
         <TextInput label="Page address" description={draft.domainId ? `https://${domain?.hostname ?? 'your-domain'}/${draft.slug}` : `${typeof window === 'undefined' ? '' : window.location.origin}/s/${draft.slug}`}
           value={draft.slug} onChange={value => set('slug', value.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 80))} />
+        {page.publishedAt ? <Text type="supporting" color="secondary">Changing the address of a page that has been live keeps the old address working with a permanent (301) redirect.</Text> : null}
+        {page.redirects.length ? <ul className="ov-sites-versions">{page.redirects.map(item => <li key={item.id}>
+          <div><Text weight="medium">{item.from}</Text><Text type="supporting" color="secondary">Redirects here · {item.hits} visit{item.hits === 1 ? '' : 's'}</Text></div>
+          <Button size="sm" variant="ghost" label="Remove redirect" onClick={() => void run('redirect', async () => {
+            await api(`/sites/pages/${page.id}/redirects/${item.id}`, 'DELETE');
+            onChange(await api<LandingPageDetail>(`/sites/pages/${page.id}`));
+            return `${item.from} no longer redirects.`;
+          })} />
+        </li>)}</ul> : null}
       </section>
+
+      <PublishHistory page={page} onChange={onChange} />
 
       <section className="ov-stack-sm">
         <Text weight="bold">Search and social</Text>
@@ -255,4 +266,41 @@ function VariantRow({ pageId, variant, onChange }: { pageId: string; variant: La
     }} />
     {error ? <Banner status="error" title={error} /> : null}
   </div>;
+}
+
+function PublishHistory({ page, onChange }: { page: LandingPageDetail; onChange: (page: LandingPageDetail) => void }) {
+  const [items, setItems] = useState<PagePublication[]>();
+  const [error, setError] = useState<string>();
+  const [restore, setRestore] = useState<PagePublication | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => api<{ items: PagePublication[] }>(`/sites/pages/${page.id}/publications`).then(result => setItems(result.items), cause => setError(message(cause))), [page.id]);
+  useEffect(() => { void load(); }, [load, page.publishedAt, page.status]);
+  return <section className="ov-stack-sm">
+    <Text weight="bold">Publish history</Text>
+    <Text type="supporting" color="secondary">Restoring republishes that exact snapshot to visitors at once. The design you are editing is not changed.</Text>
+    {error ? <Banner status="error" title={error} /> : null}
+    {!items ? <div className="ov-actions"><Spinner size="sm" /><Text color="secondary">Loading history…</Text></div>
+      : !items.length ? <Text type="supporting" color="secondary">Not published yet.</Text>
+        : <ul className="ov-sites-versions">{items.map(item => <li key={item.id}>
+          <div>
+            <Text weight="medium">{item.label}{item.variantKey !== 'a' ? ` · variant ${item.variantKey.toUpperCase()}` : ''}</Text>
+            <Text type="supporting" color="secondary">{date(item.publishedAt)}{item.publishedBy ? ` · ${item.publishedBy}` : ''}</Text>
+          </div>
+          {item.live ? <StatusBadge label="Live" tone="success" /> : <Button size="sm" variant="ghost" label="Restore this version" onClick={() => setRestore(item)} />}
+        </li>)}</ul>}
+    {restore ? <ConfirmDialog title="Republish this version?" description={`Visitors will see “${restore.label}” from ${date(restore.publishedAt)} immediately.`} actionLabel="Republish" destructive={false} busy={busy}
+      onClose={() => setRestore(null)} onConfirm={async () => {
+        setBusy(true);
+        try {
+          onChange(await api<LandingPageDetail>(`/sites/pages/${page.id}/publications/${restore.id}/restore`, 'POST', {}));
+          setRestore(null);
+          await load();
+        } catch (cause) {
+          setError(message(cause));
+          setRestore(null);
+        } finally {
+          setBusy(false);
+        }
+      }} /> : null}
+  </section>;
 }

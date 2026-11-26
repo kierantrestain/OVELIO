@@ -1,14 +1,16 @@
 // Funnels (Lane 3): an ordered set of landing pages. Visitors move step to step; funnel.step_viewed is recorded once
 // per visitor and step, funnel.completed once per visitor when they reach the last step.
 import type { User } from '@/contracts';
-import type { FunnelDetail, FunnelStats, FunnelSummary, PageStats } from '@/contracts/sites';
+import type { FunnelDetail, FunnelRoute, FunnelStats, FunnelSummary, PageStats } from '@/contracts/sites';
+import { describeRule, ruleMatches } from '@/contracts/sites';
+import { boundFormIds } from './sanitize';
 import { AppError } from '../config';
 import { db, transaction } from '../db';
 import { isDevPreviewMode } from '../dev-preview';
 import { audit } from '../events';
 import type { DomainRow, PageRow } from './data';
 import { domainsById, iso, pageUrl, requirePage, uuidPattern } from './data';
-import { rate } from './pages';
+import { formsByIds, rate } from './pages';
 
 type FunnelRow = { id: string; name: string; description: string; status: FunnelSummary['status']; created_at: Date; updated_at: Date };
 
@@ -44,29 +46,39 @@ export async function listFunnels(): Promise<FunnelSummary[]> {
 
 export async function getFunnel(id: string): Promise<FunnelDetail> {
   const row = await requireFunnel(id);
-  const steps = await db.query<{ id: string; position: number; name: string; page_id: string } & Pick<PageRow, 'slug' | 'domain_id' | 'status'> & { page_name: string }>(
-    `SELECT s.id, s.position, s.name, s.page_id, p.name AS page_name, p.slug, p.domain_id, p.status FROM funnel_steps s JOIN landing_pages p ON p.id = s.page_id
+  const steps = await db.query<{ id: string; position: number; name: string; page_id: string; routes: FunnelRoute[]; markup: string } & Pick<PageRow, 'slug' | 'domain_id' | 'status'> & { page_name: string }>(
+    `SELECT s.id, s.position, s.name, s.page_id, s.routes, p.name AS page_name, p.slug, p.domain_id, p.status, coalesce(nullif(p.published_html, ''), d.source) AS markup
+     FROM funnel_steps s JOIN landing_pages p ON p.id = s.page_id JOIN designs d ON d.id = p.design_id
      WHERE s.funnel_id = $1 ORDER BY s.position`, [id],
   );
   const domains = await domainsById(steps.rows.map(step => step.domain_id));
+  const forms = await formsByIds([...new Set(steps.rows.flatMap(step => boundFormIds(step.markup)))]);
+  const fieldsFor = (markup: string) => boundFormIds(markup).flatMap(formId => (forms.get(formId)?.fields ?? [])
+    .filter(field => field.type !== 'hidden').map(field => ({ key: field.key, label: field.label, ...(field.options?.length ? { options: field.options } : {}) })));
   const count = (await funnelCounts([id])).get(id) ?? { entered: 0, completed: 0 };
   return {
     id: row.id, name: row.name, status: row.status, description: row.description, stepCount: steps.rows.length, updatedAt: iso(row.updated_at)!,
     visitors: count.entered, completions: count.completed, completionRate: rate(count.completed, count.entered),
     steps: steps.rows.map(step => ({
       id: step.id, position: step.position, name: step.name, pageId: step.page_id, pageName: step.page_name, pageStatus: step.status,
-      url: pageUrl({ id: step.page_id, slug: step.slug, domain_id: step.domain_id }, step.domain_id ? domains.get(step.domain_id) : null),
+      url: pageUrl({ id: step.page_id, slug: step.slug, domain_id: step.domain_id }, step.domain_id ? domains.get(step.domain_id) : null), routes: step.routes ?? [], fields: fieldsFor(step.markup),
     })),
   };
 }
 
-export type FunnelInput = { name?: string; description?: string; status?: FunnelSummary['status']; steps?: { name: string; pageId: string }[] };
+export type FunnelInput = { name?: string; description?: string; status?: FunnelSummary['status']; steps?: { name: string; pageId: string; routes?: FunnelRoute[] }[] };
 
 export async function saveFunnel(id: string | null, input: FunnelInput, user: User) {
   if (input.steps) {
     const pageIds = input.steps.map(step => step.pageId);
     if (new Set(pageIds).size !== pageIds.length) throw new AppError(400, 'Use each page once per funnel.');
     for (const pageId of pageIds) await requirePage(pageId);
+    for (const [position, step] of input.steps.entries()) {
+      for (const route of step.routes ?? []) {
+        if (route.toPosition === position || route.toPosition < 0 || route.toPosition >= input.steps.length) throw new AppError(400, `A branch on “${step.name || `step ${position + 1}`}” points to a step that does not exist.`);
+        if (['equals', 'not_equals', 'contains'].includes(route.operator) && !route.value?.trim()) throw new AppError(400, `Enter the answer a branch on “${step.name || `step ${position + 1}`}” matches.`);
+      }
+    }
   }
   const savedId = await transaction(async client => {
     let funnelId = id;
@@ -87,8 +99,8 @@ export async function saveFunnel(id: string | null, input: FunnelInput, user: Us
     if (input.steps) {
       await client.query('DELETE FROM funnel_steps WHERE funnel_id = $1', [funnelId]);
       for (const [position, step] of input.steps.entries()) {
-        await client.query('INSERT INTO funnel_steps (funnel_id, position, name, page_id) VALUES ($1, $2, $3, $4)',
-          [funnelId, position, step.name.trim().slice(0, 120) || `Step ${position + 1}`, step.pageId]);
+        await client.query('INSERT INTO funnel_steps (funnel_id, position, name, page_id, routes) VALUES ($1, $2, $3, $4, $5)',
+          [funnelId, position, step.name.trim().slice(0, 120) || `Step ${position + 1}`, step.pageId, JSON.stringify(step.routes ?? [])]);
       }
     }
     const steps = await client.query('SELECT 1 FROM funnel_steps WHERE funnel_id = $1', [funnelId]);
@@ -133,6 +145,15 @@ export async function funnelStats(id: string, days = 30): Promise<FunnelStats> {
     [id, days],
   );
   const byStep = new Map(rows.rows.map(row => [Number(row.step), Number(row.visitors)]));
+  // Per-branch conversion: visitors who took each route at a step (from form.submitted), and how many reached its target.
+  const branchRows = await db.query<{ step: string; branch: string; target: string; visitors: string; reached: string }>(
+    `SELECT s.properties->>'stepIndex' AS step, s.properties->>'branch' AS branch, s.properties->>'nextStep' AS target, count(DISTINCT s.visitor_id) AS visitors,
+       count(DISTINCT s.visitor_id) FILTER (WHERE EXISTS (SELECT 1 FROM events v WHERE v.type = 'funnel.step_viewed' AND v.entity_type = 'funnel' AND v.entity_id = $1
+         AND v.visitor_id = s.visitor_id AND v.properties->>'stepIndex' = s.properties->>'nextStep')) AS reached
+     FROM events s WHERE s.type = 'form.submitted' AND s.properties->>'funnelId' = $1 AND s.properties ? 'branch' AND s.visitor_id IS NOT NULL
+       AND s.occurred_at >= now() - make_interval(days => $2) GROUP BY 1, 2, 3`,
+    [id, days],
+  );
   const steps = funnel.steps.map((step, index) => {
     const visitors = byStep.get(step.position) ?? 0;
     const previous = index ? byStep.get(funnel.steps[index - 1].position) ?? 0 : null;
@@ -140,6 +161,13 @@ export async function funnelStats(id: string, days = 30): Promise<FunnelStats> {
       position: step.position, name: step.name, pageId: step.pageId, visitors,
       conversionFromPrevious: previous == null ? null : rate(visitors, previous),
       dropOff: previous == null ? null : Math.max(0, previous - visitors),
+      branches: step.routes.length ? [...step.routes.map((route, routeIndex) => ({ key: String(routeIndex), label: `If ${describeRule(route, step.fields.find(field => field.key === route.field)?.label)}`, toPosition: route.toPosition })),
+        ...(index < funnel.steps.length - 1 ? [{ key: 'next', label: 'Otherwise', toPosition: step.position + 1 }] : [])].map(branch => {
+        const row = branchRows.rows.find(item => Number(item.step) === step.position && item.branch === branch.key);
+        const taken = Number(row?.visitors ?? 0);
+        const reached = Number(row?.reached ?? 0);
+        return { label: branch.label, toPosition: branch.toPosition, toName: funnel.steps.find(other => other.position === branch.toPosition)?.name ?? `Step ${branch.toPosition + 1}`, visitors: taken, reached, conversion: rate(reached, taken) };
+      }) : [],
     };
   });
   const completed = (await funnelCounts([id], days)).get(id)?.completed ?? 0;
@@ -191,4 +219,17 @@ export async function searchFunnels(q: string) {
     `SELECT id, name, status FROM funnels WHERE status <> 'archived' AND name ILIKE '%' || $1 || '%' ORDER BY updated_at DESC LIMIT 5`, [q],
   );
   return rows.rows;
+}
+
+/** Where a funnel step's form sends the visitor: the first matching route, else the next step (null after the last). */
+export async function branchTarget(funnelId: string, stepIndex: number, values: Record<string, string | string[]>): Promise<{ branch: string; toPosition: number | null; page: (Pick<PageRow, 'id' | 'slug' | 'domain_id'> & { domain?: DomainRow | null }) | null }> {
+  const step = (await db.query<{ routes: FunnelRoute[] }>('SELECT routes FROM funnel_steps WHERE funnel_id = $1 AND position = $2', [funnelId, stepIndex])).rows[0];
+  const matched = (step?.routes ?? []).findIndex(route => ruleMatches(route, values));
+  const toPosition = matched >= 0 ? step!.routes[matched].toPosition : stepIndex + 1;
+  const page = (await db.query<Pick<PageRow, 'id' | 'slug' | 'domain_id'>>(
+    'SELECT p.id, p.slug, p.domain_id FROM funnel_steps s JOIN landing_pages p ON p.id = s.page_id WHERE s.funnel_id = $1 AND s.position = $2', [funnelId, toPosition],
+  )).rows[0];
+  if (!page) return { branch: matched >= 0 ? String(matched) : 'next', toPosition: null, page: null };
+  const domain = page.domain_id ? (await domainsById([page.domain_id])).get(page.domain_id) : null;
+  return { branch: matched >= 0 ? String(matched) : 'next', toPosition, page: { ...page, domain } };
 }

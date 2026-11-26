@@ -13,6 +13,10 @@ async function publish(sql: Sql, pageId: string) {
     `UPDATE landing_pages SET status = 'published', published_html = $2, published_css = $3, published_version = $4, published_at = now() - interval '20 days' WHERE id = $1`,
     [pageId, sanitizePageHtml(row.source), sanitizePageCss(row.css), row.version],
   );
+  await sql.query(
+    `INSERT INTO page_publications (page_id, design_version, html, css, label, published_at) VALUES ($1, $2, $3, $4, $5, now() - interval '20 days')`,
+    [pageId, row.version, sanitizePageHtml(row.source), sanitizePageCss(row.css), `Published version ${row.version}`],
+  );
 }
 
 const sources = `(ARRAY['google','linkedin','newsletter','','facebook','partner'])`;

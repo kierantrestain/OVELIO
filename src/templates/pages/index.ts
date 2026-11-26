@@ -6,6 +6,7 @@ import {
   pricing, speakers, split, stats, steps, testimonials, theme,
 } from './kit';
 import type { Theme } from './kit';
+import { buildFactoryTemplates } from './factory';
 
 const field = {
   email: (): FormField => ({ key: 'email', label: 'Work email', type: 'email', required: true, placeholder: 'you@company.com', mapsTo: 'email' }),
@@ -219,13 +220,16 @@ export const blankTemplate: PageTemplate = {
 export const pageTemplates: PageTemplate[] = definitions.map(item => ({
   key: item.key, name: item.name, category: item.category, description: item.description,
   palette: [item.theme.accent, item.theme.heroInk === '#ffffff' ? item.theme.ink : item.theme.alt, item.theme.bg],
-  hasForm: Boolean(item.form), form: item.form,
+  hasForm: Boolean(item.form), form: item.form, source: 'curated' as const,
   html: item.body(item.theme), css: kitCss(item.theme) + (item.extraCss ?? ''),
 }));
 
+/** Curated templates followed by the factory's generated ones (./factory). */
+export const allPageTemplates: PageTemplate[] = [...pageTemplates, ...buildFactoryTemplates()];
+
 export function pageTemplate(key: string): PageTemplate | null {
   if (key === 'blank') return blankTemplate;
-  return pageTemplates.find(item => item.key === key) ?? null;
+  return allPageTemplates.find(item => item.key === key) ?? null;
 }
 
 export function pageTemplateSummaries(): PageTemplateSummary[] {

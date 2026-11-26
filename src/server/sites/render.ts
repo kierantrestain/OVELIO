@@ -3,6 +3,7 @@
 import type { FormField, FormSettings } from '@/contracts/sites';
 import type { Utm } from '@/contracts/platform';
 import type { FormRow } from './data';
+import { formStepCount } from '@/contracts/sites';
 import { formSettings } from './data';
 import { formCss } from '@/templates/pages/form-css';
 
@@ -19,6 +20,8 @@ export type FormContext = {
   variant?: string | null;
   funnelId?: string | null;
   stepIndex?: number | null;
+  /** Progressive profiling: keys of skipIfKnown fields the recognised visitor's contact already has. */
+  known?: ReadonlySet<string>;
 };
 
 function inputType(field: FormField) {
@@ -58,59 +61,95 @@ function renderField(form: FormRow, field: FormField): string {
     default:
       control = `<label for="${id}">${label}</label><input id="${id}" type="${inputType(field)}" name="${escapeHtml(field.key)}"${placeholder}${auto}${required}${describedBy}>`;
   }
-  return `<div class="ovf-field" data-field="${escapeHtml(field.key)}">${control}${help}${error}</div>`;
+  const rules = field.showIf?.length ? ` data-show-if="${escapeHtml(JSON.stringify(field.showIf))}"` : '';
+  return `<div class="ovf-field" data-field="${escapeHtml(field.key)}"${rules}>${control}${help}${error}</div>`;
 }
 
 /** The markup of an OVELIO form. Works without JavaScript (plain POST); the tracker upgrades it to an inline submit. */
 export function renderFormHtml(form: FormRow, context: FormContext): string {
   const settings: FormSettings = formSettings(form);
-  const parts: string[] = [];
-  let half: string[] = [];
-  const flush = () => {
-    if (half.length) parts.push(half.length === 2 ? `<div class="ovf-row">${half.join('')}</div>` : half.join(''));
-    half = [];
-  };
-  for (const field of form.fields) {
-    const html = renderField(form, field);
-    if (field.width === 'half' && field.type !== 'hidden') {
-      half.push(html);
-      if (half.length === 2) flush();
-    } else {
-      flush();
-      parts.push(html);
+  const steps = formStepCount(settings);
+  const known = context.known ?? new Set<string>();
+  const fields = form.fields.filter(field => !(field.skipIfKnown && known.has(field.key)));
+  const sections: string[] = [];
+  for (let step = 0; step < steps; step += 1) {
+    const parts: string[] = [];
+    let half: string[] = [];
+    const flush = () => {
+      if (half.length) parts.push(half.length === 2 ? `<div class="ovf-row">${half.join('')}</div>` : half.join(''));
+      half = [];
+    };
+    for (const field of fields.filter(item => Math.min(item.step ?? 0, steps - 1) === step)) {
+      const html = renderField(form, field);
+      if (field.width === 'half' && field.type !== 'hidden' && !field.showIf?.length) {
+        half.push(html);
+        if (half.length === 2) flush();
+      } else {
+        flush();
+        parts.push(html);
+      }
+    }
+    flush();
+    if (step === steps - 1 && settings.consent.enabled) {
+      parts.push(`<div class="ovf-field ovf-consent" data-field="_consent"><label class="ovf-choice"><input type="checkbox" name="_consent" value="yes"${settings.consent.required ? ' required' : ''}> <span>${escapeHtml(settings.consent.text)}</span></label><p class="ovf-error" hidden></p></div>`);
+    }
+    if (steps === 1) sections.push(parts.join(''));
+    else {
+      const title = settings.steps?.[step]?.title?.trim();
+      const nav = `<div class="ovf-nav">${step > 0 ? '<button type="button" class="ovf-back">Back</button>' : ''}${step < steps - 1 ? '<button type="button" class="ovf-next ovf-submit">Next</button>' : ''}</div>`;
+      sections.push(`<fieldset class="ovf-step" data-step="${step}">${title ? `<legend class="ovf-step-title">${escapeHtml(title)}</legend>` : ''}${parts.join('')}${nav}</fieldset>`);
     }
   }
-  flush();
-  if (settings.consent.enabled) {
-    parts.push(`<div class="ovf-field ovf-consent" data-field="_consent"><label class="ovf-choice"><input type="checkbox" name="_consent" value="yes"${settings.consent.required ? ' required' : ''}> <span>${escapeHtml(settings.consent.text)}</span></label><p class="ovf-error" hidden></p></div>`);
-  }
+  const progress = steps > 1
+    ? `<div class="ovf-progress" aria-hidden="true"><span class="ovf-progress-label">Step <span data-ovf-current>1</span> of ${steps}</span><span class="ovf-progress-bar"><span style="width:${Math.round(100 / steps)}%"></span></span></div>`
+    : '';
   const hidden = (name: string, value: string | number | null | undefined) => `<input type="hidden" name="${name}" value="${escapeHtml(value == null ? '' : String(value))}">`;
-  parts.push(`<div class="ovf-hp" aria-hidden="true"><label>Leave this field empty<input type="text" name="_website" tabindex="-1" autocomplete="off"></label></div>`);
-  parts.push(hidden('_page', context.pageId) + hidden('_variant', context.variant) + hidden('_funnel', context.funnelId) + hidden('_step', context.stepIndex)
-    + hidden('_vid', '') + hidden('_url', '') + ['source', 'medium', 'campaign', 'term', 'content'].map(key => hidden('_utm_' + key, '')).join(''));
-  parts.push(`<button type="submit" class="ovf-submit">${escapeHtml(settings.submitLabel || 'Submit')}</button><p class="ovf-status" role="status" aria-live="polite"></p>`);
-  return `<form class="ovf" method="post" action="${escapeHtml(context.action)}" data-ovelio-form-id="${form.id}" novalidate aria-label="${escapeHtml(form.name)}">${parts.join('')}</form>`;
+  const tail = `<div class="ovf-hp" aria-hidden="true"><label>Leave this field empty<input type="text" name="_website" tabindex="-1" autocomplete="off"></label></div>`
+    + hidden('_page', context.pageId) + hidden('_variant', context.variant) + hidden('_funnel', context.funnelId) + hidden('_step', context.stepIndex)
+    + hidden('_vid', '') + hidden('_url', '') + ['source', 'medium', 'campaign', 'term', 'content'].map(key => hidden('_utm_' + key, '')).join('')
+    + `<button type="submit" class="ovf-submit ovf-final">${escapeHtml(settings.submitLabel || 'Submit')}</button><p class="ovf-status" role="status" aria-live="polite"></p>`;
+  return `<form class="ovf${steps > 1 ? ' ovf-multi' : ''}" method="post" action="${escapeHtml(context.action)}" data-ovelio-form-id="${form.id}" data-steps="${steps}" novalidate aria-label="${escapeHtml(form.name)}">${progress}${sections.join('')}${tail}</form>`;
 }
 
 export { formCss };
 
 /** Binds every OVELIO form under `root`: fills context fields and submits inline as JSON. Shared by pages and embeds. */
-export const formBinderJs = `function ovelioBindForms(root,vid,utm,cross){var keys=['source','medium','campaign','term','content'];
-root.querySelectorAll('form[data-ovelio-form-id]').forEach(function(form){if(form.__ov)return;form.__ov=1;
+export const formBinderJs = `function ovelioBindForms(root,vid,utm,cross){var keys=['source','medium','campaign','term','content'];var truthy=['yes','on','true','1','checked'];
+function match(rule,vals){var raw=vals[rule.field];var list=(Array.isArray(raw)?raw:raw==null?[]:[raw]).map(function(x){return String(x).trim()}).filter(Boolean);var t=(rule.value||'').trim().toLowerCase();
+var eq=list.some(function(x){return x.toLowerCase()===t});var ck=rule.value?eq:list.some(function(x){return truthy.indexOf(x.toLowerCase())>=0||Array.isArray(raw)});
+switch(rule.operator){case 'equals':return eq;case 'not_equals':return !eq;case 'contains':return !!t&&list.some(function(x){return x.toLowerCase().indexOf(t)>=0});case 'checked':return ck;case 'not_checked':return !ck;case 'not_empty':return list.length>0}return false}
+root.querySelectorAll('form[data-ovelio-form-id]').forEach(function(form){if(form.__ov)return;form.__ov=1;form.classList.add('ovf-js');
+var steps=Number(form.getAttribute('data-steps')||1);var current=0;var sections=form.querySelectorAll('.ovf-step');var btn=form.querySelector('.ovf-final');var status=form.querySelector('.ovf-status');
 function set(n,v){var i=form.querySelector('input[name="'+n+'"]');if(i)i.value=v}
 set('_vid',vid);set('_url',location.href.slice(0,500));keys.forEach(function(k){set('_utm_'+k,utm[k]||'')});
-form.addEventListener('submit',function(ev){ev.preventDefault();var btn=form.querySelector('.ovf-submit');var status=form.querySelector('.ovf-status');
-form.querySelectorAll('.ovf-field').forEach(function(f){f.classList.remove('ovf-invalid');var e=f.querySelector('.ovf-error');if(e){e.textContent='';e.hidden=true}});
+function refresh(){var vals={};form.querySelectorAll('.ovf-field[data-field]').forEach(function(f){var rules=f.getAttribute('data-show-if');var show=true;
+if(rules){try{show=JSON.parse(rules).every(function(r){return match(r,vals)})}catch(e){}}f.hidden=!show;
+f.querySelectorAll('input,select,textarea').forEach(function(el){el.disabled=!show});if(!show)return;var k=f.getAttribute('data-field');
+f.querySelectorAll('input,select,textarea').forEach(function(el){if((el.type==='checkbox'||el.type==='radio')&&!el.checked)return;if(!el.value)return;vals[k]=vals[k]===undefined?el.value:[].concat(vals[k],el.value)})})}
+function show(i){current=Math.max(0,Math.min(steps-1,i));sections.forEach(function(s,j){s.classList.toggle('is-current',j===current)});if(steps>1&&btn)btn.hidden=current<steps-1;
+var c=form.querySelector('[data-ovf-current]');if(c)c.textContent=String(current+1);var bar=form.querySelector('.ovf-progress-bar span');if(bar)bar.style.width=Math.round((current+1)/steps*100)+'%'}
+function clear(f){f.classList.remove('ovf-invalid');var e=f.querySelector('.ovf-error');if(e){e.textContent='';e.hidden=true}}
+function checkStep(scope){var first=null;scope.querySelectorAll('.ovf-field').forEach(function(f){if(f.hidden)return;clear(f);var bad=null;
+f.querySelectorAll('input,select,textarea').forEach(function(el){if(!bad&&!el.disabled&&el.type!=='hidden'&&!el.checkValidity())bad=el});
+if(bad){f.classList.add('ovf-invalid');var e=f.querySelector('.ovf-error');if(e){e.textContent=bad.validity.valueMissing?'This field is required.':(bad.validationMessage||'Check this field.');e.hidden=false}if(!first)first=bad}});
+if(first)first.focus();return !first}
+form.addEventListener('input',refresh);form.addEventListener('change',refresh);refresh();if(steps>1)show(0);
+form.querySelectorAll('.ovf-next').forEach(function(b){b.addEventListener('click',function(){if(checkStep(sections[current]))show(current+1)})});
+form.querySelectorAll('.ovf-back').forEach(function(b){b.addEventListener('click',function(){show(current-1)})});
+form.addEventListener('submit',function(ev){ev.preventDefault();if(steps>1&&current<steps-1){if(checkStep(sections[current]))show(current+1);return}
+if(!checkStep(steps>1?sections[current]:form))return;
+form.querySelectorAll('.ovf-field').forEach(clear);
 var data={};new FormData(form).forEach(function(v,k){if(typeof v!=='string')return;if(data[k]!==undefined){data[k]=[].concat(data[k],v)}else{data[k]=v}});
-form.querySelectorAll('[data-multi]').forEach(function(g){var k=g.getAttribute('data-multi');data[k]=data[k]===undefined?[]:[].concat(data[k])});
+form.querySelectorAll('[data-multi]').forEach(function(g){var k=g.getAttribute('data-multi');if(g.closest('.ovf-field').hidden)return;data[k]=data[k]===undefined?[]:[].concat(data[k])});
 btn.disabled=true;status.textContent='Sending…';status.className='ovf-status';
 fetch(form.action,{method:'POST',headers:{'content-type':'application/json','accept':'application/json'},body:JSON.stringify(data),credentials:cross?'omit':'same-origin'})
 .then(function(r){return r.json().catch(function(){return {ok:false,error:'The form could not be sent. Try again in a moment.'}})})
 .then(function(res){btn.disabled=false;
 if(res.ok){if(res.redirect){location.href=res.redirect;return}var d=document.createElement('div');d.className='ovf-success';d.setAttribute('role','status');d.textContent=res.message;form.replaceWith(d);return}
-status.textContent=res.error||'Check the highlighted fields.';status.className='ovf-status ovf-status--error';
-Object.keys(res.fieldErrors||{}).forEach(function(k){var f=form.querySelector('[data-field="'+k+'"]');if(!f)return;f.classList.add('ovf-invalid');var e=f.querySelector('.ovf-error');if(e){e.textContent=res.fieldErrors[k];e.hidden=false}});
-var first=form.querySelector('.ovf-invalid input,.ovf-invalid select,.ovf-invalid textarea');if(first)first.focus()})
+status.textContent=res.error||'Check the highlighted fields.';status.className='ovf-status ovf-status--error';var target=null;
+Object.keys(res.fieldErrors||{}).forEach(function(k){var f=form.querySelector('[data-field="'+k+'"]');if(!f)return;f.classList.add('ovf-invalid');var e=f.querySelector('.ovf-error');if(e){e.textContent=res.fieldErrors[k];e.hidden=false}
+var s=f.closest('.ovf-step');var i=s?Number(s.getAttribute('data-step')):0;if(target===null||i<target)target=i});
+if(steps>1&&target!==null)show(target);var first=form.querySelector('.ovf-invalid input,.ovf-invalid select,.ovf-invalid textarea');if(first)first.focus()})
 .catch(function(){btn.disabled=false;status.textContent='The form could not be sent. Check your connection and try again.';status.className='ovf-status ovf-status--error'})})})}`;
 
 /** Visitor id cookie and UTM capture shared by pages and embeds. */
@@ -171,12 +210,12 @@ export function renderDocument(input: DocumentInput): string {
 }
 
 /** Replaces each bound form block with the live form markup, and next-step links with the funnel's next page. */
-export function hydratePage(html: string, forms: Map<string, FormRow>, context: Omit<FormContext, 'action'>, nextStepUrl: string | null) {
+export function hydratePage(html: string, forms: Map<string, FormRow>, context: Omit<FormContext, 'action'>, nextStepUrl: string | null, known: Map<string, Set<string>> = new Map()) {
   return html
     .replace(/<div([^>]*)data-ovelio-form="([0-9a-f-]{36})"([^>]*)>\s*<\/div>/g, (whole, before: string, formId: string, after: string) => {
       const form = forms.get(formId);
       if (!form || form.status !== 'published') return `<div${before}data-ovelio-form="${formId}"${after}></div>`;
-      return `<div${before}data-ovelio-form="${formId}"${after}>${renderFormHtml(form, { ...context, action: `/api/public/forms/${formId}/submit` })}</div>`;
+      return `<div${before}data-ovelio-form="${formId}"${after}>${renderFormHtml(form, { ...context, known: known.get(formId), action: `/api/public/forms/${formId}/submit` })}</div>`;
     })
     .replace(/href="#ovelio-next-step"/g, `href="${escapeHtml(nextStepUrl ?? '#')}"`);
 }

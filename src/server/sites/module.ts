@@ -3,7 +3,6 @@
 import { z } from 'zod';
 import type { SearchResult } from '@/contracts/platform';
 import type { PageTemplate, SavedSection } from '@/contracts/sites';
-import { pageTemplate, pageTemplateSummaries } from '@/templates/pages';
 import { AppError } from '../config';
 import { db } from '../db';
 import { requestOrigin } from '../dev-preview';
@@ -16,10 +15,11 @@ import { addDomain, listDomains, removeDomain, updateDomain, verifyDomain } from
 import { createForm, deleteForm, duplicateForm, formInput, getFormDetail, listForms, listSubmissions, searchForms, submissionsCsv, updateForm } from './forms';
 import { deleteFunnel, funnelStats, getFunnel, listFunnels, pageStats, saveFunnel, searchFunnels } from './funnels';
 import {
-  addVariant, createPage, deletePage, deleteVariant, designFor, draftPreview, duplicatePage, getPage, listPages, listVersions, loadDesign,
+  addVariant, createPage, deletePage, deleteRedirect, deleteVariant, listPublications, restorePublication, designFor, draftPreview, duplicatePage, getPage, listPages, listVersions, loadDesign,
   publishPage, restoreVersion, saveDesign, saveNamedVersion, searchPages, setPageStatus, updatePageSettings, updateVariant,
 } from './pages';
 import { seedSites } from './seed';
+import { catalogSummaries, catalogTemplate } from './templates';
 
 const uuid = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 const path = (pattern: string) => new RegExp(`^sites/${pattern.replace(/:id/g, uuid)}$`);
@@ -69,7 +69,16 @@ const funnelInput = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   description: z.string().trim().max(500).optional(),
   status: z.enum(['draft', 'active', 'archived']).optional(),
-  steps: z.array(z.object({ name: z.string().trim().max(120), pageId: z.uuid() })).max(20).optional(),
+  steps: z.array(z.object({
+    name: z.string().trim().max(120),
+    pageId: z.uuid(),
+    routes: z.array(z.object({
+      field: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
+      operator: z.enum(['equals', 'not_equals', 'contains', 'checked', 'not_checked', 'not_empty']),
+      value: z.string().max(200).optional(),
+      toPosition: z.number().int().min(0).max(19),
+    })).max(8).optional(),
+  })).max(20).optional(),
 });
 
 const sectionInput = z.object({ name: z.string().trim().min(1).max(120), html: z.string().min(1).max(400_000), css: z.string().max(400_000) });
@@ -90,9 +99,9 @@ export const sitesModule: LaneModule = {
   name: 'sites',
   endpoints: [
     // Templates and saved sections
-    route('GET', path('templates'), async () => ({ items: pageTemplateSummaries() })),
+    route('GET', path('templates'), async () => ({ items: catalogSummaries() })),
     route('GET', path('templates/([a-z0-9-]{1,60})'), async ({ params }): Promise<PageTemplate> => {
-      const template = pageTemplate(params[0]);
+      const template = catalogTemplate(params[0]);
       if (!template) throw new AppError(404, 'That template was not found.');
       return template;
     }),
@@ -143,6 +152,12 @@ export const sitesModule: LaneModule = {
     route('GET', path('pages/:id/preview'), async context => new Response(await draftPreview(pageId(context), variantKey(context.query)), {
       headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' },
     }), 'marketer'),
+    route('GET', path('pages/:id/publications'), async context => ({ items: await listPublications(pageId(context)) }), 'marketer'),
+    route('POST', path('pages/:id/publications/:id/restore'), async context => restorePublication(pageId(context), context.params[1], context.user), 'marketer'),
+    route('DELETE', path('pages/:id/redirects/:id'), async context => {
+      await deleteRedirect(pageId(context), context.params[1]);
+      return new Response(null, { status: 204 });
+    }, 'marketer'),
     route('GET', path('pages/:id/stats'), async context => pageStats(pageId(context), days(context.query))),
     route('POST', path('pages/:id/variants'), async context => addVariant(pageId(context), context.user), 'marketer'),
     route('PATCH', path('pages/:id/variants/([b-h])'), async context => updateVariant(pageId(context), context.params[1],
