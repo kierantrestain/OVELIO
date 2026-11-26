@@ -1,7 +1,8 @@
 import { createHmac } from 'node:crypto';
 import type { CalendarOverview } from '../../../src/contracts/calendar';
-import type { ContactProfile } from '../../../src/contracts/crm';
+import type { ContactProfile, InboxThread, InboxThreadSummary } from '../../../src/contracts/crm';
 import type { FlowDetail, InboundHook } from '../../../src/contracts/journeys';
+import type { InboxTeam } from '../../../src/contracts/mailbox-team';
 import type { PageDesign } from '../../../src/contracts/sites';
 import { anonymous, evidence, expect, horizontalOverflow, isPreviewRun, json, test, unique } from './fixtures';
 
@@ -10,6 +11,138 @@ import { anonymous, evidence, expect, horizontalOverflow, isPreviewRun, json, te
 test.skip(!isPreviewRun, 'Preview harness only: npm run build && npm run test:e2e:preview');
 
 type Quote = { id: string; status: string; publicUrl: string | null; totals: { total: number }; invoices: { id: string; kind: string; total: number; status: string }[] };
+
+test('IQ-26 inbox reading, saved replies and team handling fit on desktop and mobile', async ({ page, baseURL, guard }, testInfo) => {
+  const origin = new URL(baseURL!).origin;
+  const mailboxId = '4a20b788-a9c1-452b-a615-b9a513abcdf1';
+  const summary: InboxThreadSummary = {
+    mailboxId, threadId: 'preview-thread', mailboxEmail: 'sales@example.test', id: 'sample-message', subject: 'Website discovery call',
+    snippet: 'Could we meet next Tuesday?', direction: 'inbound', contactId: 1, fromEmail: 'casey@example.test',
+    toEmails: 'sales@example.test', at: new Date().toISOString(), count: 1, unread: true, status: 'open', assigneeName: null,
+  };
+  const snapshot: InboxThread = { mailboxId, threadId: summary.threadId, readVersion: '42', unread: true, canReply: true, messages: [summary] };
+  const team: InboxTeam = { status: 'open', assignee: null, canAssign: true, canChangeStatus: true, assignmentOptions: [], notes: [] };
+  let bodyRequests = 0;
+  let fileRequests = 0;
+  await page.route(/\/api\/console\/sales\/inbox\/threads(?:\?|$)/, route => route.fulfill({ json: [summary] }));
+  await page.route(/\/api\/console\/sales\/inbox\/thread\?/, route => {
+    if (route.request().method() !== 'PATCH') return route.fulfill({ json: snapshot });
+    expect(route.request().postDataJSON()).toEqual({ read: true, through: '42' });
+    snapshot.unread = summary.unread = false;
+    return route.fulfill({ json: { unread: false } });
+  });
+  await page.route(/\/api\/console\/sales\/inbox\/message\?/, route => {
+    bodyRequests += 1;
+    return route.fulfill({ json: {
+      body: 'Could we meet next Tuesday?\n\nI’ve attached the brief for the discovery call.',
+      attachments: [{ id: 'brief', name: 'Discovery brief.pdf', size: 1424, downloadable: true }],
+    } });
+  });
+  await page.route(/\/api\/console\/sales\/inbox\/attachment\?/, route => {
+    fileRequests += 1;
+    expect(new URL(route.request().url()).searchParams.get('attachmentId')).toBe('brief');
+    return route.fulfill({
+      body: 'Synthetic discovery brief', contentType: 'application/octet-stream',
+      headers: { 'content-disposition': 'attachment; filename="Discovery brief.pdf"' },
+    });
+  });
+  await page.route(/\/api\/console\/sales\/inbox\/team\?/, route => {
+    if (route.request().method() === 'PATCH') team.status = summary.status = route.request().postDataJSON().status;
+    return route.fulfill({ json: team });
+  });
+  await page.route(/\/api\/console\/sales\/inbox\/notes\?/, route => {
+    team.notes.push({ id: 'team-note', authorName: 'Developer Test', body: route.request().postDataJSON().body, createdAt: summary.at });
+    return route.fulfill({ status: 201, json: team.notes[0] });
+  });
+  await page.route(/\/api\/console\/sales\/inbox\/response-report\?/, route => route.fulfill({ json: {
+    from: new Date(Date.now() - 30 * 86_400_000).toISOString(), through: summary.at, conversations: 24, replied: 17,
+    awaitingFirstReply: 5, resolvedWithoutReply: 2, averageSeconds: 5820, medianSeconds: 2700, sampleLimited: false, messageLimit: 5000,
+  } }));
+
+  await page.goto('/sales/inbox');
+  await page.getByRole('button', { name: /Open conversation Website discovery call/ }).click();
+  const drawer = page.getByRole('dialog', { name: 'Conversation' });
+  await expect(drawer.getByText(summary.subject)).toBeVisible();
+  expect(bodyRequests).toBe(0);
+  await drawer.getByRole('button', { name: 'View full message from casey@example.test' }).click();
+  await expect(drawer.getByText(/attached the brief/)).toBeVisible();
+  await expect(drawer.getByRole('link', { name: 'Download Discovery brief.pdf' })).toHaveAttribute('href', /attachmentId=brief/);
+  await expect(drawer.locator('[role="progressbar"]')).toHaveCount(0);
+  await evidence(page, testInfo, '/sales/inbox-team-desktop');
+  await drawer.getByRole('button', { name: 'Close' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await page.getByRole('button', { name: /Open conversation Website discovery call/ }).click();
+  await drawer.getByRole('button', { name: 'View full message from casey@example.test' }).click();
+  await expect(drawer.getByText(/attached the brief/)).toBeVisible();
+  await expect(drawer.locator('[role="progressbar"]')).toHaveCount(0);
+  await expect.poll(() => horizontalOverflow(page)).toEqual([]);
+  expect(await drawer.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+  await evidence(page, testInfo, '/sales/inbox-team-mobile');
+  expect(fileRequests).toBe(0);
+  const download = page.waitForEvent('download');
+  await drawer.getByRole('link', { name: 'Download Discovery brief.pdf' }).click();
+  expect((await download).suggestedFilename()).toBe('Discovery brief.pdf');
+  expect(fileRequests).toBe(1);
+  await drawer.getByRole('button', { name: 'Mark read', exact: true }).click();
+  await expect(drawer.getByRole('button', { name: 'Mark unread', exact: true })).toBeVisible();
+
+  await drawer.getByRole('button', { name: 'New saved reply' }).click();
+  const editor = page.getByRole('dialog', { name: 'New saved reply' });
+  await editor.getByLabel('Reply name').fill('Discovery follow-up ' + unique());
+  await editor.getByLabel('Reply text').fill('Yes, let’s schedule a call.');
+  const saved = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/sales/inbox/saved-replies'));
+  await editor.getByRole('button', { name: 'Save reply' }).click();
+  const reply = await (await saved).json() as { id: string };
+  await drawer.getByRole('button', { name: 'Insert reply' }).click();
+  await expect(drawer.getByLabel('Reply', { exact: true })).toHaveValue('Yes, let’s schedule a call.');
+  expect((await page.request.delete('/api/console/sales/inbox/saved-replies/' + reply.id, { headers: { origin } })).status()).toBe(204);
+
+  await drawer.getByLabel('Internal note').fill('Confirm the scope with the delivery team.');
+  await drawer.getByRole('button', { name: 'Add note' }).click();
+  await expect(drawer.getByText('Confirm the scope with the delivery team.')).toBeVisible();
+  const status = drawer.getByRole('combobox', { name: 'Conversation status' })
+    .or(drawer.getByRole('button', { name: /Conversation status/ }));
+  await status.click();
+  await page.getByRole('option', { name: 'Pending' }).click();
+  await expect(status).toHaveText(/Pending/);
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+  await page.getByText('Response times', { exact: true }).click();
+  await expect(page.getByText('Median first reply')).toBeVisible();
+  await evidence(page, testInfo, '/sales/inbox-response-mobile');
+  expect(guard.problems()).toEqual([]);
+});
+
+test('JRN-14 version history rolls back the active workflow and preserves the draft', async ({ page, baseURL, guard }) => {
+  const origin = new URL(baseURL!).origin;
+  const graph = (delta: number) => ({
+    nodes: [{ id: 'start', type: 'start', config: {}, position: { x: 0, y: 0 } },
+      { id: 'score', type: 'adjust_score', config: { delta }, position: { x: 0, y: 160 } }],
+    edges: [{ id: 'next', source: 'start', target: 'score', sourceHandle: 'next' }],
+  });
+  const api = page.request;
+  const created = await json<FlowDetail>(await api.post('/api/console/journeys/flows', { headers: { origin }, data: {
+    name: 'Rollback browser ' + unique(), graph: graph(1),
+  } }));
+  const path = '/api/console/journeys/flows/' + created.id;
+  await json(await api.post(path + '/publish', { headers: { origin } }));
+  await json(await api.patch(path, { headers: { origin }, data: { graph: graph(2) } }));
+  await json(await api.post(path + '/publish', { headers: { origin } }));
+  await json(await api.patch(path, { headers: { origin }, data: { graph: graph(3) } }));
+  await page.goto('/automations/flows/' + created.id);
+  await page.getByRole('navigation', { name: 'Workflow view' }).getByRole('button', { name: /^Versions/ }).click();
+  await page.getByRole('row').filter({ hasText: 'Version 1' }).getByRole('button', { name: 'View' }).click();
+  await page.getByRole('button', { name: 'Roll back to this version' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Roll back workflow' }).click();
+  await expect(page.getByRole('row').filter({ hasText: 'Version 3' })).toContainText('Live');
+  const draft = await json<FlowDetail>(await api.get(path));
+  const live = await json<{ graph: unknown }>(await api.get(path + '/versions/3'));
+  expect(draft.graph).toEqual(graph(3));
+  expect(live.graph).toEqual(graph(1));
+  expect(guard.problems()).toEqual([]);
+  await json(await api.post(path + '/archive', { headers: { origin } }));
+});
 
 test('SIT-18 insert and publish a booking button that opens the native scheduler on a phone', async ({ page, browser, baseURL, guard }, testInfo) => {
   const origin = new URL(baseURL!).origin;
