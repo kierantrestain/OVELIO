@@ -20,6 +20,7 @@ import { route } from '../routes/shared';
 import type { Context } from '../routes/shared';
 import { applyBrand, brandInput, createBrand, deleteBrand, getBrand, listBrands, rethemeSource, saveBrand, setDefaultBrand, workspaceProfile } from './brand';
 import { compileMjml, htmlToMjml } from './compile';
+import { resolveConditionalBlocks } from './conditions';
 import { fromListmonkHtml, toListmonkHtml, toMauticHtml } from './convert';
 import {
   compileDesign, createDesign, duplicateDesign, findLink, getDesign, getVersion, linkDesign, listDesigns, listVersions, restoreVersion,
@@ -99,7 +100,7 @@ async function render(designId: string, contactId: number | null): Promise<Rende
   return {
     subject: renderMergeTags(design.subject, values, { html: false }),
     preheader: renderMergeTags(design.preheader, values, { html: false }),
-    html: renderMergeTags(design.html, values),
+    html: renderMergeTags(resolveConditionalBlocks(design.html, contact), values),
     contact: contact ? toSample(contact) : null,
     unknownTags: unknownMergeTags(design.source + design.subject + design.preheader),
   };

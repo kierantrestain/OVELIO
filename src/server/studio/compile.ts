@@ -1,6 +1,7 @@
 // Server-side, deterministic MJML → HTML compile (mjml 5.4.1, MIT). Fixed options, no minify or beautify, no
 // includes: the same source always gives the same HTML. Output is sanitised before it is stored or sent.
 import type { CompileIssue } from '@/contracts/studio';
+import { expandConditions } from './conditions';
 import { sanitizeEmailHtml } from './sanitize';
 
 type Mjml = (input: string, options: Record<string, unknown>) => Promise<{ html: string; errors: { line: number; message: string; tagName?: string }[] }>;
@@ -25,8 +26,9 @@ export async function compileMjml(source: string, head: { preheader?: string; ti
   if (!/^<mjml[\s>]/.test(trimmed)) return { html: '', errors: [{ line: 1, message: 'The design must start with <mjml>.' }] };
   const mjml2html = await load();
   try {
-    const result = await mjml2html(withHead(trimmed, head), {
-      validationLevel: 'soft', minify: false, beautify: false, keepComments: false, ignoreIncludes: true, fonts: {},
+    // Comments are kept so conditional-content markers survive; the sanitiser then drops every other comment.
+    const result = await mjml2html(expandConditions(withHead(trimmed, head)), {
+      validationLevel: 'soft', minify: false, beautify: false, keepComments: true, ignoreIncludes: true, fonts: {},
     });
     const errors = result.errors.map(item => ({ line: item.line, message: item.message, tagName: item.tagName }));
     return { html: sanitizeEmailHtml(result.html), errors };

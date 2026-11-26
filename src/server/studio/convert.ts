@@ -2,6 +2,7 @@
 // when an existing Listmonk newsletter or template is imported. Behaviour follows the engine research
 // (docs/parity/research/03-listmonk-campaigns-delivery.md); no engine code is copied.
 import { mergeTagPattern, unknownMergeTags } from '@/contracts/merge-tags';
+import { conditionsToListmonk, stripConditionalBlocks } from './conditions';
 
 export type WorkspaceValues = { name: string; address: string; website: string; year?: string };
 export type Converted = { html: string; unknownTags: string[]; notes: string[] };
@@ -43,8 +44,9 @@ function staticValue(tag: string, workspace: WorkspaceValues): string | undefine
 
 /** OVELIO tags → Listmonk Go-template tags (`{{ .Subscriber.FirstName | default "there" }}`, `{{ UnsubscribeURL }}`). */
 export function toListmonkHtml(html: string, workspace: WorkspaceValues): Converted {
-  const notes = new Set<string>();
-  const out = html.replace(mergeTagPattern, (whole, tag: string, fallback?: string) => {
+  const conditional = conditionsToListmonk(html);
+  const notes = new Set<string>(conditional.notes);
+  const out = conditional.html.replace(mergeTagPattern, (whole, tag: string, fallback?: string) => {
     if (tag === 'unsubscribe_url') return '{{ UnsubscribeURL }}';
     const fixed = staticValue(tag, workspace);
     if (fixed !== undefined) return fixed;
@@ -59,7 +61,8 @@ export function toListmonkHtml(html: string, workspace: WorkspaceValues): Conver
 
 /** OVELIO tags → Mautic tokens (`{contactfield=firstname|there}`, `{unsubscribe_url}`). */
 export function toMauticHtml(html: string, workspace: WorkspaceValues): Converted {
-  const out = html.replace(mergeTagPattern, (whole, tag: string, fallback?: string) => {
+  const stripped = stripConditionalBlocks(html);
+  const out = stripped.html.replace(mergeTagPattern, (whole, tag: string, fallback?: string) => {
     if (tag === 'unsubscribe_url') return '{unsubscribe_url}';
     const fixed = staticValue(tag, workspace);
     if (fixed !== undefined) return fixed;
@@ -68,7 +71,8 @@ export function toMauticHtml(html: string, workspace: WorkspaceValues): Converte
     const field = mauticFields[tag];
     return field ? `{contactfield=${field}${fb}}` : whole;
   });
-  return { html: out, unknownTags: unknownMergeTags(html), notes: [] };
+  const notes = stripped.removed ? [`${stripped.removed} conditional ${stripped.removed === 1 ? 'block was' : 'blocks were'} left out: journey emails have no per-contact blocks.`] : [];
+  return { html: out, unknownTags: unknownMergeTags(html), notes };
 }
 
 const fromListmonk: Record<string, string> = {

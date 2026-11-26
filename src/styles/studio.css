@@ -44,6 +44,7 @@
 .ov-studio-tabs button[aria-selected="true"] { color: var(--ov-studio-text); border-bottom-color: var(--ov-studio-accent); }
 .ov-studio-hint { margin: 10px 14px 0; font-size: 12px; color: var(--ov-studio-subtle); line-height: 1.5; }
 .ov-studio-selected { display: grid; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--ov-studio-border); font-size: 13px; }
+.ov-studio-visibility { display: grid; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--ov-studio-border); }
 .ov-studio-canvas { position: relative; min-width: 0; min-height: 0; }
 .ov-studio-gjs { height: 100%; }
 .ov-studio-loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; z-index: 3; background: var(--ov-studio-muted); }

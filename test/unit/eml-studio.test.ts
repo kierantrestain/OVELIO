@@ -223,3 +223,54 @@ test('EML-10 several brand kits, one default; switching a design re-themes colou
   assert.equal((await call<{ primary: string }>('GET', 'studio/brand')).data.primary, '#aa1100');
   await call('POST', `studio/brands/${original.id}/default`);
 });
+
+test('EML-11 conditional content resolves per contact in native sends and the preview, and converts to Listmonk conditionals', async () => {
+  const { ruleToClass } = await import('../../src/contracts/studio');
+  const { searchContacts } = await import('../../src/server/directory');
+  const vip = ruleToClass({ kind: 'tag', negate: false, value: 'vip' });
+  const notVip = ruleToClass({ kind: 'tag', negate: true, value: 'vip' });
+  const retail = ruleToClass({ kind: 'field', negate: false, field: 'company', value: 'Harbourline Retail' });
+  const section = (cls: string, label: string) => `<mj-section css-class="keep-me ${cls}"><mj-column><mj-text>${label}</mj-text></mj-column></mj-section>`;
+  const source = `<mjml><mj-body>${section(vip, 'VIP-ONLY')}${section(notVip, 'EVERYONE-ELSE')}<mj-section><mj-column><mj-text css-class="${retail}">RETAIL-ONLY</mj-text><mj-text>SHARED</mj-text></mj-column></mj-section></mj-body></mjml>`;
+  const design = await call<{ id: string; html: string }>('POST', 'studio/designs', { name: 'EML-11 conditional', subject: 'Conditional', source });
+  assert.equal(design.status, 201);
+  assert.match(design.data.html, /<!--ov-if:1:[A-Za-z0-9_-]+-->/, 'markers survive compile and the sanitiser');
+  assert.match(design.data.html, /class="keep-me"/, 'other classes are kept');
+  assert.doesNotMatch(design.data.html, /ov-if--/);
+
+  const [claire] = await searchContacts('claire');
+  const [daniel] = await searchContacts('daniel');
+  assert.ok(claire.tags.includes('vip') && !daniel.tags.includes('vip'));
+  await upsertContact({ email: daniel.email, consent: 'opted_in', evidence: 'Unit test', source: 'test' });
+  setMailTransport(undefined);
+  const sent = await call<{ results: { to: string; messageId: string; status: string }[] }>('POST', `studio/designs/${design.data.id}/test`, { to: [claire.email, daniel.email] });
+  const stored = async (index: number) => (await call<{ html: string }>('GET', `studio/messages/${sent.data.results[index].messageId}`)).data.html;
+  const forClaire = await stored(0);
+  const forDaniel = await stored(1);
+  assert.match(forClaire, /VIP-ONLY/);
+  assert.doesNotMatch(forClaire, /EVERYONE-ELSE|RETAIL-ONLY/);
+  assert.match(forDaniel, /EVERYONE-ELSE/);
+  assert.match(forDaniel, /RETAIL-ONLY/, 'field rules compare case-insensitively');
+  assert.doesNotMatch(forDaniel, /VIP-ONLY/);
+  assert.ok(forClaire.includes('SHARED') && forDaniel.includes('SHARED'));
+  assert.doesNotMatch(forClaire + forDaniel, /<!--\/?ov-if/, 'markers never reach the inbox');
+
+  const preview = await call<{ html: string }>('GET', `studio/designs/${design.data.id}/render?contactId=${claire.id}`);
+  assert.match(preview.data.html, /VIP-ONLY/);
+  assert.doesNotMatch(preview.data.html, /EVERYONE-ELSE/);
+  const anonymous = await call<{ html: string }>('GET', `studio/designs/${design.data.id}/render`);
+  assert.match(anonymous.data.html, /EVERYONE-ELSE/);
+  assert.doesNotMatch(anonymous.data.html, /VIP-ONLY/);
+
+  const exported = await call<{ html: string; notes: string[] }>('GET', `studio/designs/${design.data.id}/export?engine=listmonk`);
+  assert.match(exported.data.html, /\{\{ if and \.Subscriber\.Attribs\.tags \(has "vip" \.Subscriber\.Attribs\.tags\) \}\}/);
+  assert.match(exported.data.html, /\{\{ if not \(and \.Subscriber\.Attribs\.tags \(has "vip" \.Subscriber\.Attribs\.tags\)\) \}\}/);
+  assert.match(exported.data.html, /\{\{ if eq \(lower \(print \.Subscriber\.Attribs\.company\)\) "harbourline retail" \}\}/);
+  assert.ok(exported.data.notes.length >= 1);
+  const body = studioNewsletterBody(exported.data.html);
+  assert.equal((body.match(/\{\{ end \}\}/g) ?? []).length, 3, 'conditionals survive the newsletter sanitiser');
+  assert.doesNotMatch(body, /&#123;&#123; (if|end)/);
+  const mautic = await call<{ html: string; notes: string[] }>('GET', `studio/designs/${design.data.id}/export?engine=mautic`);
+  assert.doesNotMatch(mautic.data.html, /VIP-ONLY|EVERYONE-ELSE|RETAIL-ONLY/);
+  assert.match(mautic.data.notes[0], /3 conditional blocks were left out/);
+});
