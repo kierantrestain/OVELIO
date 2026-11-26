@@ -81,6 +81,9 @@ test('UX-11 J4 a template email keeps a visual text edit after reload', async ({
   await page.keyboard.press('Control+A');
   await page.keyboard.type(text);
   await canvas.getByText('What we launched').click();
+  // "Saved" is also the status before the edit registers, so wait until the server holds the edited design.
+  await expect.poll(async () => (await json<{ html: string }>(await page.request.get('/api/console/studio/designs/' + design.id))).html,
+    { timeout: 15_000 }).toContain(text);
   await expect(page.locator('.ov-studio-status')).toHaveText(/^Saved/, { timeout: 15_000 });
 
   await page.reload();
