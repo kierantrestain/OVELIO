@@ -113,7 +113,8 @@ export type EventInput = {
   idempotencyKey?: string;
 };
 
-export type SearchResultKind = 'contact' | 'company' | 'deal' | 'task' | 'campaign' | 'email' | 'template' | 'page' | 'form' | 'funnel' | 'flow';
+export type SearchResultKind = 'contact' | 'company' | 'deal' | 'task' | 'campaign' | 'email' | 'template' | 'page' | 'form' | 'funnel' | 'flow'
+  | 'quote' | 'invoice' | 'appointment';
 
 export type SearchResult = { id: string; kind: SearchResultKind; title: string; subtitle?: string; href: string };
 

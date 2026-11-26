@@ -51,6 +51,7 @@ const defaultAccent = '#2457d6';
 const kindLabel: Record<SearchResult['kind'], string> = {
   contact: 'Contact', company: 'Company', deal: 'Deal', task: 'Task', campaign: 'Campaign', email: 'Email',
   template: 'Template', page: 'Landing page', form: 'Form', funnel: 'Funnel', flow: 'Workflow',
+  quote: 'Proposal', invoice: 'Invoice', appointment: 'Meeting',
 };
 
 function navigationCommands(user: User): CommandEntry[] {
