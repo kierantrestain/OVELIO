@@ -68,6 +68,8 @@ export const platformEventTypes = [
   'subscription.started', 'subscription.renewed', 'subscription.cancelled',
   // Calendar (wave two): appointments booked through booking links or by the team.
   'appointment.booked', 'appointment.rescheduled', 'appointment.cancelled', 'appointment.completed', 'appointment.no_show',
+  // Connectors: a signed delivery to an inbound webhook (src/server/journeys/hooks.ts).
+  'webhook.received',
 ] as const;
 export type PlatformEventType = (typeof platformEventTypes)[number];
 

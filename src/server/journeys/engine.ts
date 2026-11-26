@@ -162,6 +162,7 @@ async function triggerMatches(trigger: FlowTrigger, event: PlatformEvent): Promi
       return Boolean(f.tag) && tags.some(tag => tag.toLowerCase() === f.tag!.trim().toLowerCase());
     }
     case 'campaign.launched': return !f.campaignId || event.campaignId === f.campaignId;
+    case 'webhook.received': return !f.hookId || event.entityId === f.hookId;
     default: return true;
   }
 }

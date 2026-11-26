@@ -13,6 +13,7 @@ import {
 } from './flows';
 import { campaignEndpoints } from './campaign-routes';
 import { flowExperiments } from './experiments';
+import { hookEndpoints } from './hooks';
 
 const uuid = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 export const pattern = (path: string) => new RegExp('^journeys/' + path.replaceAll(':id', uuid) + '$');
@@ -125,4 +126,5 @@ export const journeyEndpoints: Entry[] = [
     };
   }, 'marketer'),
   ...campaignEndpoints,
+  ...hookEndpoints,
 ];

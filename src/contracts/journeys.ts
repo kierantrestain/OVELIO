@@ -16,6 +16,7 @@ export const flowTriggerTypes = [
   'contact.created', 'contact.tagged', 'email.unsubscribed', 'campaign.launched',
   'quote.viewed', 'quote.accepted', 'quote.declined', 'payment.succeeded', 'payment.failed', 'subscription.cancelled',
   'appointment.booked', 'appointment.cancelled', 'appointment.completed', 'appointment.no_show',
+  'webhook.received',
 ] as const;
 export type FlowTriggerType = (typeof flowTriggerTypes)[number];
 
@@ -26,14 +27,15 @@ export type TriggerFilters = {
   stageId?: string; stageName?: string;
   tag?: string;
   campaignId?: string; campaignName?: string;
+  hookId?: string; hookName?: string;
 };
 export type FlowTrigger = { id: string; type: FlowTriggerType; filters: TriggerFilters };
 
-type TriggerFilterKind = 'form' | 'page' | 'pipeline' | 'stage' | 'tag' | 'campaign';
+type TriggerFilterKind = 'form' | 'page' | 'pipeline' | 'stage' | 'tag' | 'campaign' | 'hook';
 export type FlowTriggerSpec = {
   type: FlowTriggerType;
   label: string;
-  group: 'Forms & pages' | 'Sales' | 'Revenue' | 'Meetings' | 'Contacts' | 'Campaigns';
+  group: 'Forms & pages' | 'Sales' | 'Revenue' | 'Meetings' | 'Contacts' | 'Campaigns' | 'Integrations';
   description: string;
   filters: TriggerFilterKind[];
   /** Filters that must be set. */
@@ -64,6 +66,7 @@ export const flowTriggerSpecs: FlowTriggerSpec[] = [
   { type: 'appointment.cancelled', label: 'Meeting cancelled', group: 'Meetings', description: 'A meeting is cancelled by the invitee or the team.', filters: [] },
   { type: 'appointment.completed', label: 'Meeting held', group: 'Meetings', description: 'A meeting is marked as held.', filters: [] },
   { type: 'appointment.no_show', label: 'Meeting no-show', group: 'Meetings', description: 'The invitee did not attend.', filters: [] },
+  { type: 'webhook.received', label: 'Webhook received', group: 'Integrations', description: 'Another system (n8n, Zapier, Shopify, WooCommerce…) posts to an inbound webhook. The contact comes from the mapped email.', filters: ['hook'] },
   { type: 'campaign.launched', label: 'Campaign launched', group: 'Campaigns', description: 'A marketing campaign is launched. Runs once, without a contact.', filters: ['campaign'], contactless: true },
 ];
 
@@ -81,6 +84,7 @@ export function describeTrigger(trigger: FlowTrigger): string {
     case 'deal.created': case 'deal.won': case 'deal.lost': return f.pipelineId ? `${spec.label} in ${f.pipelineName || 'selected pipeline'}` : spec.label;
     case 'contact.tagged': return f.tag ? `Tag added: ${f.tag}` : 'Tag added (choose a tag)';
     case 'campaign.launched': return f.campaignId ? `Campaign launched: ${f.campaignName || 'selected campaign'}` : 'Any campaign launched';
+    case 'webhook.received': return f.hookId ? `Webhook received: ${f.hookName || 'selected webhook'}` : 'Any inbound webhook';
     default: return spec.label;
   }
 }
