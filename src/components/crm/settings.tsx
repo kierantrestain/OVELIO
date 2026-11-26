@@ -6,7 +6,7 @@ import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, us
 import type { DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { ArrowDown, ArrowUp, GripVertical, Inbox, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, GripVertical, Inbox, Plus, Trash2, Users } from 'lucide-react';
 import NextLink from 'next/link';
 import { useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
@@ -22,14 +22,15 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { useToast } from '@astryxdesign/core/Toast';
 import type {
-  InboxConversation, MailboxOverview, Pipeline, PipelineStage, Sequence, SequenceEnrolment, SequenceInput, SequenceStep, TaskType,
+  InboxConversation, Mailbox, MailboxOverview, Pipeline, PipelineStage, Sequence, SequenceEnrolment, SequenceInput, SequenceStep, TaskType,
 } from '@/contracts/crm';
 import { taskTypeLabels } from '@/contracts/crm';
 import { mergeTags } from '@/contracts/merge-tags';
 import { api, message, useAction, useResource } from '../client';
+import { useUser } from '../shell';
 import { AsyncState, ConfirmDialog, Empty, Feedback, FormActions, Modal, PageHeader, Panel, SlideDrawer, StatusBadge } from '../ui';
 import { ContactPicker, relative, shortDate, dateTime } from './common';
-import type { RecordOption } from './common';
+import type { Member, RecordOption } from './common';
 
 /* ── Pipelines ────────────────────────────────────────────────────────── */
 
@@ -387,12 +388,55 @@ export function SalesSequences() {
 
 /* ── Mailboxes ────────────────────────────────────────────────────────── */
 
+function MailboxAccessDialog({ mailbox, onClose }: { mailbox: Mailbox; onClose: () => void }) {
+  const endpoint = `/mailboxes/${mailbox.id}/members`;
+  const access = useResource<{ members: { userId: string; name: string; email: string }[] }>(endpoint);
+  const team = useResource<Member[]>('/platform/users');
+  const action = useAction();
+  const [selection, setSelection] = useState<string[] | null>(null);
+  const options = (team.data ?? [])
+    .filter(member => member.id !== mailbox.userId && (member.role === 'marketer' || member.role === 'admin'))
+    .map(member => ({ value: member.id, label: member.name ? `${member.name} · ${member.email}` : member.email }));
+  const saved = new Set(access.data?.members.map(member => member.userId));
+  const eligibleSavedIds = options.filter(option => saved.has(option.value)).map(option => option.value);
+  const userIds = selection ?? eligibleSavedIds;
+  const changed = userIds.length !== saved.size || userIds.some(id => !saved.has(id));
+  const loading = access.loading || team.loading;
+  const loadError = access.error || team.error;
+
+  return <Modal title="Mailbox access" onClose={() => { if (!action.busy) onClose(); }}>
+    <Text weight="semibold" className="ov-crm-mailbox-address">{mailbox.email}</Text>
+    {loading || loadError ? <AsyncState loading={loading} error={loadError} retry={() => { access.refresh(); team.refresh(); }} /> : (
+      <form className="ov-stack-sm" onSubmit={event => {
+        event.preventDefault();
+        if (!changed) return;
+        void action.run(async () => { await api(endpoint, 'PATCH', { userIds }); onClose(); }, 'Mailbox access updated.');
+      }}>
+        {options.length ? <MultiSelector label="Teammates with access" description="Selected teammates can read this mailbox in Sales and CRM."
+          placeholder="Only you have access" options={options} value={userIds} onChange={setSelection} width="100%"
+          renderOption={option => <span className="ov-crm-mailbox-address">{option.label}</span>}
+          hasSearch hasClear searchPlaceholder="Find by name or email" isDisabled={action.busy} />
+          : <Text type="supporting" color="secondary">Only active marketers and admins can be added to a mailbox.</Text>}
+        {saved.size > eligibleSavedIds.length
+          ? <Text type="supporting" color="secondary">Saving removes grants for teammates who are no longer eligible.</Text> : null}
+        <Feedback error={action.error} />
+        <FormActions>
+          <Button label="Cancel" onClick={onClose} isDisabled={action.busy} />
+          <Button type="submit" variant="primary" label="Save access" isLoading={action.busy} isDisabled={!changed} />
+        </FormActions>
+      </form>
+    )}
+  </Modal>;
+}
+
 export function MailboxSettings({ connected, error }: { connected?: string; error?: string }) {
+  const user = useUser();
   const overview = useResource<MailboxOverview>('/mailboxes');
   const action = useAction();
   const [disconnect, setDisconnect] = useState<string | null>(null);
+  const [access, setAccess] = useState<Mailbox | null>(null);
   const data = overview.data;
-  return <div className="ov-stack">
+  return <div className="ov-stack ov-crm-mailboxes">
     <PageHeader title="Mailboxes" description="Connect Gmail or Outlook so sales email sends from your own address and replies are logged against contacts." />
     {connected ? <Banner status="success" title={`${connected} is connected`} description="Recent conversations with known contacts sync every 15 minutes." /> : null}
     {error ? <Banner status="error" title="The mailbox was not connected" description={error} /> : null}
@@ -411,19 +455,43 @@ export function MailboxSettings({ connected, error }: { connected?: string; erro
           <Text type="supporting" color="secondary">Redirect URI to register with {provider.provider === 'google' ? 'Google Cloud' : 'Microsoft Entra'}: <code className="ov-crm-code">{provider.redirectUri}</code></Text>
         </Panel>)}
       </div>
-      <Panel title={data.canManageAll ? 'Connected mailboxes (whole team)' : 'Your mailboxes'}>
-        {data.mailboxes.length ? <Table data={data.mailboxes} idKey="id" columns={[
-          { key: 'email', header: 'Mailbox', renderCell: item => <span className="ov-cell"><Text weight="medium">{item.email}</Text><Text type="supporting" color="secondary">{item.provider === 'google' ? 'Gmail' : 'Outlook'} · {item.userName}</Text></span> },
-          { key: 'status', header: 'Status', renderCell: item => <span className="ov-cell"><StatusBadge label={item.status === 'connected' ? 'Connected' : item.status === 'error' ? 'Needs attention' : 'Revoked'} tone={item.status === 'connected' ? 'success' : 'error'} />{item.lastError ? <Text type="supporting" color="secondary">{item.lastError}</Text> : null}</span> },
-          { key: 'sync', header: 'Last sync', renderCell: item => item.lastSyncedAt ? relative(item.lastSyncedAt) : 'Not yet' },
-          { key: 'actions', header: '', renderCell: item => <div className="ov-actions ov-actions--end">
-            <Button size="sm" label="Sync now" onClick={() => void action.run(async () => { await api(`/mailboxes/${item.id}/sync`, 'POST'); overview.refresh(); }, 'Mailbox synced.')} />
-            <Button size="sm" variant="ghost" label="Disconnect" onClick={() => setDisconnect(item.id)} />
-          </div> },
-        ]} /> : <Empty title="No mailboxes connected" description="Until a mailbox is connected, sales email goes through OVELIO’s email gateway with replies to your address." />}
+      <Panel title={data.canManageAll ? 'Workspace mailbox connections' : 'Your mailboxes'}>
+        {data.mailboxes.length ? <ul className="ov-rows">
+          {data.mailboxes.map(item => {
+            const owns = item.userId === user.id;
+            const canManageAccess = owns && item.status !== 'revoked';
+            return <li key={item.id}>
+              <span>
+                <span className="ov-actions">
+                  <Text weight="semibold">{item.email}</Text>
+                  <StatusBadge label={item.status === 'connected' ? 'Connected' : item.status === 'error' ? 'Needs attention' : 'Revoked'}
+                    tone={item.status === 'connected' ? 'success' : 'error'} />
+                </span>
+                <Text type="supporting" color="secondary">
+                  {item.provider === 'google' ? 'Gmail' : 'Outlook'} · {owns ? 'You' : item.userName} · {item.lastSyncedAt
+                    ? <>Synced <time dateTime={item.lastSyncedAt}>{relative(item.lastSyncedAt)}</time></>
+                    : 'Awaiting first sync'}
+                </Text>
+                {owns && item.lastError ? <Text type="supporting" color="secondary">{item.lastError}</Text> : null}
+              </span>
+              <div className="ov-actions" role="group" aria-label={`Actions for ${item.email}`}>
+                {canManageAccess ? <>
+                  <Button size="sm" label="Manage access" icon={<Users size={14} />} onClick={() => setAccess(item)} />
+                  <Button size="sm" variant="ghost" label="Sync now" isDisabled={action.busy} onClick={() => void action.run(async () => {
+                    const synced = await api<Mailbox>(`/mailboxes/${item.id}/sync`, 'POST');
+                    overview.refresh();
+                    if (synced.status !== 'connected') throw new Error(synced.lastError || 'Sync failed. Try again or reconnect the mailbox.');
+                  }, 'Mailbox synced.')} />
+                </> : null}
+                {owns || data.canManageAll ? <Button size="sm" variant="ghost" label="Disconnect" onClick={() => setDisconnect(item.id)} /> : null}
+              </div>
+            </li>;
+          })}
+        </ul> : <Empty title="No mailboxes connected" description="Until a mailbox is connected, sales email goes through OVELIO’s email gateway with replies to your address." />}
       </Panel>
     </>}
-    {disconnect ? <ConfirmDialog title="Disconnect mailbox" description="OVELIO deletes the stored tokens and stops syncing. Logged activities stay on contacts." actionLabel="Disconnect"
+    {access ? <MailboxAccessDialog mailbox={access} onClose={() => setAccess(null)} /> : null}
+    {disconnect ? <ConfirmDialog title="Disconnect mailbox" description="OVELIO removes the stored connection, stops syncing and revokes access to its synced email." actionLabel="Disconnect"
       busy={action.busy} onClose={() => setDisconnect(null)} onConfirm={() => void action.run(async () => { await api(`/mailboxes/${disconnect}`, 'DELETE'); setDisconnect(null); overview.refresh(); }, 'Mailbox disconnected.')} /> : null}
   </div>;
 }
