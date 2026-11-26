@@ -26,9 +26,11 @@ export default defineConfig({
     reducedMotion: 'reduce',
     launchOptions: { executablePath: process.env.OVELIO_TEST_CHROMIUM || '/opt/pw-browsers/chromium' },
   },
+  // The evidence sweep runs first on clean seeded data; specs that create records run after it.
   projects: [
-    { name: 'desktop', use: { viewport: { width: 1440, height: 900 } } },
-    { name: 'mobile', use: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true } },
+    { name: 'desktop', testMatch: /(workspaces|keyboard)\.spec\.ts$/, use: { viewport: { width: 1440, height: 900 } } },
+    { name: 'mobile', testMatch: /(workspaces|keyboard)\.spec\.ts$/, use: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true } },
+    { name: 'journeys', testMatch: /(journeys|features)\.spec\.ts$/, dependencies: ['desktop', 'mobile'], use: { viewport: { width: 1440, height: 900 } } },
   ],
   webServer: {
     command: `npx next start -p ${port}`,

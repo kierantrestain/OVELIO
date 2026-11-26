@@ -2,10 +2,12 @@
 
 // The OVELIO home screen (/overview): today's numbers, my tasks, pipeline snapshot, recent leads, campaigns in flight,
 // email and website pulse, and a first-use checklist built from the workspace's real state.
-import { Check, CircleAlert } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, CircleAlert, SlidersHorizontal, Star } from 'lucide-react';
 import { useState, useSyncExternalStore } from 'react';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Button } from '@astryxdesign/core/Button';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { Switch } from '@astryxdesign/core/Switch';
 import { Link } from '@astryxdesign/core/Link';
 import { Text } from '@astryxdesign/core/Text';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
@@ -17,7 +19,9 @@ import { ProvenanceBadge } from './insights/controls';
 import { newsletterTotals, useNewsletters, useWebsite } from './insights/engines';
 import { formatCount, formatMoney, formatPercent } from './insights/format';
 import { usePreview, useUser } from './shell';
-import { AsyncState, Empty, Metric, PageHeader, Panel, Rows } from './ui';
+import { AsyncState, Empty, Metric, Modal, PageHeader, Panel, Rows } from './ui';
+import { useWorkspace } from './workspace';
+import type { OverviewLayout } from '@/contracts/workspace';
 import '@/styles/insights.css';
 
 function rate(part: number | null, total: number | null) {
@@ -129,6 +133,72 @@ function WebsitePulse() {
   </div>;
 }
 
+/** Overview widgets, in their default order. Each can be hidden or moved from "Customise". */
+const widgets = [
+  { key: 'kpis', label: 'Today’s numbers' },
+  { key: 'tasks', label: 'My tasks' },
+  { key: 'pipeline', label: 'Pipeline' },
+  { key: 'starred', label: 'Starred' },
+  { key: 'leads', label: 'Recent leads' },
+  { key: 'campaigns', label: 'Campaigns in flight' },
+  { key: 'email', label: 'Email pulse' },
+  { key: 'website', label: 'Website pulse' },
+] as const;
+type WidgetKey = (typeof widgets)[number]['key'];
+const allKeys = widgets.map(widget => widget.key) as string[];
+
+const presets: { key: string; label: string; layout: OverviewLayout }[] = [
+  { key: 'default', label: 'Everything', layout: { order: allKeys, hidden: [] } },
+  { key: 'executive', label: 'Executive', layout: { order: ['kpis', 'pipeline', 'campaigns', 'leads', 'website', 'email', 'tasks', 'starred'], hidden: ['tasks', 'starred'] } },
+  { key: 'sales', label: 'Sales', layout: { order: ['kpis', 'tasks', 'pipeline', 'starred', 'leads', 'campaigns', 'email', 'website'], hidden: ['campaigns', 'email', 'website'] } },
+  { key: 'marketing', label: 'Marketing', layout: { order: ['kpis', 'leads', 'campaigns', 'email', 'website', 'pipeline', 'tasks', 'starred'], hidden: ['pipeline', 'tasks', 'starred'] } },
+];
+
+/** A saved layout, repaired so widgets added later still appear and unknown keys are dropped. */
+function resolveLayout(saved: OverviewLayout | null): OverviewLayout {
+  if (!saved) return presets[0].layout;
+  const order = [...saved.order.filter(key => allKeys.includes(key)), ...allKeys.filter(key => !saved.order.includes(key))];
+  return { order, hidden: saved.hidden.filter(key => allKeys.includes(key)) };
+}
+
+function Customise({ layout, onChange, onClose }: { layout: OverviewLayout; onChange: (layout: OverviewLayout) => void; onClose: () => void }) {
+  const move = (index: number, by: number) => {
+    const order = [...layout.order];
+    const [item] = order.splice(index, 1);
+    order.splice(index + by, 0, item);
+    onChange({ ...layout, order });
+  };
+  return <Modal title="Customise Overview" onClose={onClose}>
+    <Text type="supporting" color="secondary">Start from a preset, then show, hide or reorder widgets. Saved for you on every device.</Text>
+    <div className="ov-actions" role="group" aria-label="Presets">
+      {presets.map(preset => <Button key={preset.key} size="sm" label={preset.label} onClick={() => onChange(preset.layout)} />)}
+    </div>
+    <ul className="ov-dash-picker">
+      {layout.order.map((key, index) => {
+        const label = widgets.find(widget => widget.key === key)?.label ?? key;
+        return <li key={key}>
+          <Switch label={label} value={!layout.hidden.includes(key)}
+            onChange={show => onChange({ ...layout, hidden: show ? layout.hidden.filter(item => item !== key) : [...layout.hidden, key] })} />
+          <span className="ov-actions">
+            <IconButton size="sm" variant="ghost" label={`Move ${label} up`} icon={<ArrowUp size={15} />} isDisabled={index === 0} onClick={() => move(index, -1)} />
+            <IconButton size="sm" variant="ghost" label={`Move ${label} down`} icon={<ArrowDown size={15} />} isDisabled={index === layout.order.length - 1} onClick={() => move(index, 1)} />
+          </span>
+        </li>;
+      })}
+    </ul>
+    <div className="ov-actions ov-actions--end"><Button variant="primary" label="Done" onClick={onClose} /></div>
+  </Modal>;
+}
+
+function Starred() {
+  const { marks } = useWorkspace();
+  if (!marks.starred.length) return <Empty title="Nothing starred yet" description="Star a deal, contact, company, campaign, page or workflow from its page to keep it here." />;
+  return <Rows>{marks.starred.slice(0, 8).map(item => <li key={`${item.kind}:${item.recordId}`}>
+    <span><Link href={item.href}>{item.label}</Link><Text type="supporting" color="secondary">{item.kind === 'flow' ? 'Workflow' : item.kind[0].toUpperCase() + item.kind.slice(1)}</Text></span>
+    <Star size={14} className="ov-star-on" aria-hidden="true" />
+  </li>)}</Rows>;
+}
+
 export function Overview() {
   const user = useUser();
   const preview = usePreview();
@@ -144,11 +214,15 @@ export function Overview() {
     ? { ...step, done: websites.data ? websites.data.length > 0 : websites.error ? null : false } : step) ?? [];
   const showChecklist = steps.length > 0 && steps.some(step => !step.done) && !dismissed && !dismissedStored;
   const cur = data?.currency ?? 'GBP';
+  const { preferences, savePreferences } = useWorkspace();
+  const layout = resolveLayout(preferences.overview);
+  const [customising, setCustomising] = useState(false);
 
   return <div className="ov-insights-root">
     <PageHeader title={`${greeting}, ${firstName}`} description={`${today ? today + ' · ' : ''}Today across sales, marketing and your websites.`}
       actions={<>
         {preview ? <Badge label="Sample data" variant="info" /> : null}
+        <Button label="Customise" icon={<SlidersHorizontal size={15} />} onClick={() => setCustomising(true)} />
         <Button label="Executive analytics" href="/analytics" />
       </>} />
     {!data ? <Panel><AsyncState loading={home.loading} error={home.error} retry={home.refresh} /></Panel> : <>
@@ -156,22 +230,25 @@ export function Overview() {
         setDismissed(true);
         try { localStorage.setItem('ov-onboarding-dismissed', '1'); } catch { /* storage unavailable */ }
       }} /> : null}
-      <div className="ov-insights-kpis ov-insights-kpis--four">
+      <div className="ov-dash">
+        {layout.order.filter(key => !layout.hidden.includes(key)).map(key => {
+          const widget = (() => {
+            switch (key as WidgetKey) {
+              case 'kpis': return <div className="ov-insights-kpis ov-insights-kpis--four">
         <Metric label="Leads today" value={data.today.leads} info="Distinct contacts with a form submission or new-contact event since midnight UTC."
           hint={`${formatCount(data.today.leadsYesterday)} yesterday`} />
         <Metric label="Deals created today" value={data.today.newDeals} hint={`${formatMoney(data.today.newDealValue, cur)} in value`} />
         <Metric label="Won today" formatted={formatMoney(data.today.wonRevenue, cur)} hint={`${formatCount(data.today.wonDeals)} deal${data.today.wonDeals === 1 ? '' : 's'} closed won`} />
         <Metric label="My tasks due today" value={data.today.tasksDue} hint={data.today.tasksOverdue ? `${formatCount(data.today.tasksOverdue)} overdue` : 'Nothing overdue'} />
-      </div>
-      <div className="ov-grid ov-grid--lead">
-        <Panel title="My tasks" description="Overdue and due today, assigned to you" action={<Link href="/sales/tasks" type="supporting">All tasks</Link>}>
+      </div>;
+              case 'tasks': return <Panel title="My tasks" description="Overdue and due today, assigned to you" action={<Link href="/sales/tasks" type="supporting">All tasks</Link>}>
           {data.myTasks.overdue.length || data.myTasks.today.length ? <Rows>
             {[...data.myTasks.overdue, ...data.myTasks.today].map(task => <TaskRow key={task.id} task={task} />)}
           </Rows> : <Empty title="You are all caught up" description="No tasks are overdue or due today." action={<Button size="sm" label="Add a task" href="/sales/tasks?create=task" />} />}
           {data.myTasks.overdueTotal + data.myTasks.todayTotal > data.myTasks.overdue.length + data.myTasks.today.length
             ? <Text type="supporting" color="secondary">Showing the first {data.myTasks.overdue.length + data.myTasks.today.length} of {data.myTasks.overdueTotal + data.myTasks.todayTotal}.</Text> : null}
-        </Panel>
-        <Panel title="Pipeline" description={data.pipeline.name ? `${data.pipeline.name} · open deals now` : 'Open deals now'}
+        </Panel>;
+              case 'pipeline': return <Panel title="Pipeline" description={data.pipeline.name ? `${data.pipeline.name} · open deals now` : 'Open deals now'}
           action={<Link href="/analytics/sales" type="supporting">Sales report</Link>}>
           {data.pipeline.openDeals ? <div className="ov-stack-sm">
             <div className="ov-insights-mini">
@@ -180,10 +257,9 @@ export function Overview() {
             </div>
             <BarList rows={data.pipeline.stages.map(stage => ({ key: stage.name, label: stage.name, value: stage.value, display: `${formatCount(stage.count)} · ${formatMoney(stage.value, cur, true)}` }))} />
           </div> : <Empty title="No open deals yet" description="Add deals to see your pipeline and forecast." action={<Button size="sm" label="Create a deal" href="/sales?create=deal" />} />}
-        </Panel>
-      </div>
-      <div className="ov-grid">
-        <Panel title="Recent leads" description="Latest form submissions" action={<Link href="/analytics/marketing" type="supporting">Marketing report</Link>}>
+        </Panel>;
+              case 'starred': return <Panel title="Starred" description="Records you starred" action={<Text type="supporting" color="secondary">Ctrl+K to search</Text>}><Starred /></Panel>;
+              case 'leads': return <Panel title="Recent leads" description="Latest form submissions" action={<Link href="/analytics/marketing" type="supporting">Marketing report</Link>}>
           {data.recentLeads.length ? <Rows>{data.recentLeads.map(lead => <li key={`${lead.contactId}-${lead.at}`}>
             <span>
               <Link href={lead.href}>{lead.name}</Link>
@@ -191,8 +267,8 @@ export function Overview() {
             </span>
             <Timestamp value={lead.at} format="relative_short" />
           </li>)}</Rows> : <Empty title="No leads yet" description="Publish a page with a form to start capturing leads." action={<Button size="sm" label="Build a page" href="/sites?create=page" />} />}
-        </Panel>
-        <Panel title="Campaigns in flight" description="Active campaigns · leads and won revenue in the last 30 days" action={<Link href="/marketing" type="supporting">Campaigns</Link>}>
+        </Panel>;
+              case 'campaigns': return <Panel title="Campaigns in flight" description="Active campaigns · leads and won revenue in the last 30 days" action={<Link href="/marketing" type="supporting">Campaigns</Link>}>
           {data.campaignsInFlight.length ? <Rows>{data.campaignsInFlight.map(campaign => <li key={campaign.id}>
             <span>
               <Link href={campaign.href}>{campaign.name}</Link>
@@ -203,12 +279,16 @@ export function Overview() {
               <Text type="supporting" color="secondary">{formatCount(campaign.leads)} lead{campaign.leads === 1 ? '' : 's'}</Text>
             </span>
           </li>)}</Rows> : <Empty title="No active campaigns" description="Group emails, pages and forms in a campaign to see its leads and revenue." action={<Button size="sm" label="Plan a campaign" href="/marketing?create=campaign" />} />}
-        </Panel>
+        </Panel>;
+              case 'email': return <Panel title="Email pulse" action={<Link href="/marketing/emails" type="supporting">Emails</Link>}><EmailPulse data={data} /></Panel>;
+              case 'website': return <Panel title="Website pulse" action={<Link href="/analytics/website" type="supporting">Website analytics</Link>}><WebsitePulse /></Panel>;
+              default: return null;
+            }
+          })();
+          return widget ? <section key={key} className={`ov-dash-item ov-dash-item--${key}`} data-widget={key} aria-label={widgets.find(item => item.key === key)?.label}>{widget}</section> : null;
+        })}
       </div>
-      <div className="ov-grid">
-        <Panel title="Email pulse" action={<Link href="/marketing/emails" type="supporting">Emails</Link>}><EmailPulse data={data} /></Panel>
-        <Panel title="Website pulse" action={<Link href="/analytics/website" type="supporting">Website analytics</Link>}><WebsitePulse /></Panel>
-      </div>
+      {customising ? <Customise layout={layout} onChange={next => void savePreferences({ overview: next })} onClose={() => setCustomising(false)} /> : null}
     </>}
   </div>;
 }

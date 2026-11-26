@@ -2,9 +2,9 @@ import { anonymous, expect, isPreviewRun, json, settle, test, unique } from './f
 import type { APIRequestContext, Browser, Page } from '@playwright/test';
 
 // Acceptance journeys (docs/rebuild/TRACKER.md §5) through the browser, against the developer preview.
-// They create their own records, so they run once (desktop project) and stay independent of each other.
+// They create their own records, so they run in the 'journeys' project after the evidence sweep, and remove what
+// they create where the API allows it.
 test.skip(!isPreviewRun, 'Preview harness only: npm run build && npm run test:e2e:preview');
-test.beforeEach(({}, testInfo) => { test.skip(testInfo.project.name !== 'desktop', 'Journeys run once, on the desktop project.'); });
 
 type Stage = { id: string; name: string; outcome: string };
 type Pipeline = { id: string; isDefault: boolean; stages: Stage[] };
@@ -27,8 +27,11 @@ async function submitPublicForm(browser: Browser, baseURL: string, url: string, 
     await form.locator('input[type="email"]').fill(email);
     const consent = form.locator('input[name="_consent"]');
     if (await consent.count()) await consent.check();
+    const start = page.url();
     await form.locator('button[type="submit"]').click();
-    await expect(page.getByRole('status')).toBeVisible();
+    // Once stored, the page replaces the form with its thank-you message, or a funnel moves on to its next step.
+    await expect.poll(async () => page.url() !== start || await page.locator('form.ovf').count() === 0, { timeout: 15_000 }).toBe(true);
+    await page.waitForLoadState('load');
   } finally {
     await visitor.close();
   }
@@ -65,6 +68,7 @@ test('UX-10 J2 a deal dragged to another stage is still there after reload', asy
   const saved = await json<{ stageId?: string; deal?: { stageId: string } }>(await page.request.get('/api/console/sales/deals/' + deal.id));
   expect(saved.stageId ?? saved.deal?.stageId).toBe(to.id);
   expect(guard.problems()).toEqual([]);
+  await post(page.request, origin, `/api/console/sales/deals/${deal.id}/archive`, {});
 });
 
 test('UX-11 J4 a template email keeps a visual text edit after reload', async ({ page, baseURL, guard }) => {
@@ -84,6 +88,7 @@ test('UX-11 J4 a template email keeps a visual text edit after reload', async ({
   const saved = await json<{ html: string }>(await page.request.get('/api/console/studio/designs/' + design.id));
   expect(saved.html).toContain(text);
   expect(guard.problems()).toEqual([]);
+  await post(page.request, origin, `/api/console/studio/designs/${design.id}/archive`, {});
 });
 
 test('UX-12 J6/J7 a page published from a template captures a signed-out form submission as a contact', async ({ page, baseURL, browser }) => {
@@ -96,6 +101,8 @@ test('UX-12 J6/J7 a page published from a template captures a signed-out form su
   const email = `ux-${unique()}@example.test`;
   await submitPublicForm(browser, baseURL!, url, email);
   await expect.poll(async () => (await findContact(page.request, email))?.email ?? null).toBe(email);
+  await post(page.request, origin, `/api/console/sites/pages/${created.id}/unpublish`, {});
+  await page.request.delete(`/api/console/sites/pages/${created.id}`, { headers: { origin } });
 });
 
 test('UX-13 J10 a form submission enrols the contact in the published flow', async ({ page, baseURL, browser }) => {
@@ -127,8 +134,9 @@ test('UX-14 J11 an unsubscribe link from a sent message blocks later email', asy
   const origin = new URL(baseURL!).origin;
   // A fresh opted-in contact, created through a public form so the run never depends on earlier runs.
   const pages = await json<{ items: { url: string }[] }>(await page.request.get('/api/console/sites/pages?status=published'));
+  const host = pages.items.find(item => item.url.endsWith('/outbound-webinar')) ?? pages.items[0];
   const email = `ux-unsub-${unique()}@example.test`;
-  await submitPublicForm(browser, baseURL!, pages.items[0].url, email);
+  await submitPublicForm(browser, baseURL!, host.url, email);
   await expect.poll(async () => (await findContact(page.request, email))?.id ?? null).not.toBeNull();
   const contact = (await findContact(page.request, email))!;
 
