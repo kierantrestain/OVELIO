@@ -8,6 +8,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
+import { Selector } from '@astryxdesign/core/Selector';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import type { DesignSummary, EmailTemplateSummary } from '@/contracts/studio';
 import { templateCategories } from '@/contracts/studio';
@@ -69,17 +70,19 @@ export function TemplateGallery() {
   const initialTab: Tab = params.get('tab') === 'designs' ? 'My designs' : params.get('tab') === 'blocks' ? 'Saved blocks' : 'Templates';
   const [tab, setTab] = useState<Tab>(initialTab);
   const [category, setCategory] = useState<string>('All');
+  const [industry, setIndustry] = useState<string>('all');
   const [query, setQuery] = useState('');
   const [previewKey, setPreviewKey] = useState<string | null>(params.get('template'));
   const creating = params.get('create') === 'email';
-  const templates = useResource<{ items: EmailTemplateSummary[] }>('/studio/templates');
+  const templates = useResource<{ items: EmailTemplateSummary[]; industries: { key: string; label: string }[] }>('/studio/templates');
   const designs = useResource<{ items: DesignSummary[] }>(tab === 'My designs' ? `/studio/designs?kind=email&q=${encodeURIComponent(query)}` : null);
   const blocks = useResource<{ items: DesignSummary[] }>(tab === 'Saved blocks' ? '/studio/designs?kind=email_block' : null);
   const action = useAction();
   const [archiving, setArchiving] = useState<DesignSummary>();
 
   const q = query.trim().toLowerCase();
-  const shown = (templates.data?.items ?? []).filter(item => (category === 'All' || item.category === category)
+  const industryLabel = (key?: string) => templates.data?.industries.find(item => item.key === key)?.label ?? '';
+  const shown = (templates.data?.items ?? []).filter(item => (category === 'All' || item.category === category) && (industry === 'all' || item.industry === industry)
     && (!q || `${item.name} ${item.category} ${item.description}`.toLowerCase().includes(q)));
   const previewing = templates.data?.items.find(item => item.key === previewKey);
 
@@ -101,6 +104,8 @@ export function TemplateGallery() {
       {tab === 'Templates' ? <div className="ov-studio-filters" role="group" aria-label="Category">
         {['All', ...templateCategories].map(item => <button key={item} type="button" className="ov-studio-chip" aria-pressed={category === item} onClick={() => setCategory(item)}>{item}</button>)}
       </div> : <span />}
+      {tab === 'Templates' ? <Selector label="Industry" isLabelHidden value={industry} width={220} onChange={value => setIndustry(value ?? 'all')}
+        options={[{ value: 'all', label: 'All industries' }, ...(templates.data?.industries ?? []).map(item => ({ value: item.key, label: item.label }))]} /> : null}
       {tab !== 'Saved blocks' ? <TextInput label="Search" isLabelHidden type="search" placeholder={tab === 'Templates' ? 'Search templates…' : 'Search my designs…'} value={query} onChange={setQuery} startIcon={<Search size={14} />} width={260} /> : null}
     </div>
 
@@ -110,7 +115,7 @@ export function TemplateGallery() {
           <Thumb path={`/studio/templates/${item.key}/html`} label={item.name} onOpen={() => setPreviewKey(item.key)} />
           <div className="ov-studio-card-body">
             <span className="ov-studio-card-title">{item.name}</span>
-            <span className="ov-studio-card-meta">{item.category} · {item.description}</span>
+            <span className="ov-studio-card-meta">{item.source === 'factory' ? `Generated for ${industryLabel(item.industry)} · ` : ''}{item.category} · {item.description}</span>
             <div className="ov-studio-card-actions">
               <Button size="sm" variant="primary" label="Use template" onClick={() => startFrom(item.key)} isDisabled={action.busy} />
               <Button size="sm" variant="ghost" icon={<Eye size={14} />} label="Preview" onClick={() => setPreviewKey(item.key)} />

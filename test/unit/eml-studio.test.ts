@@ -172,3 +172,25 @@ test('EML-08 imported HTML keeps its body and styles, and exports convert tags f
   assert.match(exported.data.html, /Hello \{\{ \.Subscriber\.FirstName \}\}/);
   assert.match(exported.data.html, /\{\{ UnsubscribeURL \}\}/);
 });
+
+test('EML-09 the template factory: every industry × use case compiles with zero errors, passes the sanitiser and is byte-identical across runs', async () => {
+  const { factoryTemplates, generateTemplate, factoryIndustries, factoryUseCases } = await import('../../src/templates/email/factory');
+  assert.equal(factoryTemplates.length, factoryIndustries.length * factoryUseCases.length);
+  assert.ok(factoryIndustries.length >= 5);
+  const brand = await defaultBrand();
+  for (const template of factoryTemplates) {
+    const again = generateTemplate(template.industry!, template.useCase!);
+    assert.equal(again.mjml, template.mjml, `${template.key} MJML is deterministic`);
+    const source = applyBrand(template.mjml, brand);
+    assert.doesNotMatch(source, /\[\[brand\./, `${template.key} fills every brand token`);
+    const first = await compileMjml(source, { preheader: template.preheader });
+    const second = await compileMjml(source, { preheader: template.preheader });
+    assert.deepEqual(first.errors, [], template.key);
+    assert.equal(first.html, second.html, `${template.key} HTML is byte-identical`);
+    assert.equal(sanitizeEmailHtml(first.html), first.html, `${template.key} passes the sanitiser unchanged`);
+  }
+  assert.throws(() => generateTemplate('saas', 'nope'), /No factory template/);
+  const list = await call<{ items: { key: string; source: string; industry?: string }[]; industries: unknown[] }>('GET', 'studio/templates');
+  assert.ok(list.data.items.some(item => item.source === 'factory' && item.industry === 'ecommerce'));
+  assert.equal(list.data.items.filter(item => item.source === 'curated').length, 24);
+});

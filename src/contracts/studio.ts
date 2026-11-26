@@ -93,6 +93,10 @@ export type EmailTemplateSummary = {
   preheader: string;
   /** Marketing templates carry an unsubscribe link and the postal address. */
   marketing: boolean;
+  /** Factory output (src/templates/email/factory) is generated per industry and use case; the rest are hand-built. */
+  source?: 'curated' | 'factory';
+  industry?: string;
+  useCase?: string;
 };
 
 export type SampleContact = { id: number; name: string; email: string; consent: string; suppressed: boolean };

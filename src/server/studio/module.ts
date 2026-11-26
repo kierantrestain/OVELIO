@@ -6,7 +6,7 @@ import { mergeTags, renderMergeTags, unknownMergeTags } from '@/contracts/merge-
 import type {
   AudienceEstimate, DesignStatus, EmailTemplateSummary, EngineExport, RenderedPreview, SampleContact, SentMessage, StoredMessage, TestSendResult,
 } from '@/contracts/studio';
-import { emailTemplates, findTemplate, templateSummary } from '@/templates/email';
+import { allTemplates, factoryIndustries, factoryUseCases, findTemplate, templateSummary } from '@/templates/email';
 import { rateLimit } from '../auth';
 import { AppError } from '../config';
 import { db } from '../db';
@@ -303,7 +303,9 @@ export const studioModule: LaneModule = {
       const designId = await findLink(linkEngine.parse(query.get('engine')), z.string().min(1).max(60).parse(query.get('id')));
       return { designId };
     }),
-    route('GET', /^studio\/templates$/, async (): Promise<{ items: EmailTemplateSummary[] }> => ({ items: emailTemplates.map(templateSummary) })),
+    route('GET', /^studio\/templates$/, async (): Promise<{ items: EmailTemplateSummary[]; industries: { key: string; label: string }[]; useCases: { key: string; label: string }[] }> => ({
+      items: allTemplates.map(templateSummary), industries: factoryIndustries, useCases: factoryUseCases,
+    })),
     route('GET', /^studio\/templates\/([a-z0-9-]+)\/html$/, async ({ params }) => ({ html: await templateHtml(params[0]) })),
     route('GET', /^studio\/brand$/, async () => getBrand()),
     route('PUT', /^studio\/brand$/, async ({ request, user }) => saveBrand(await readBody(request, brandInput), user.id), 'marketer'),
@@ -318,7 +320,7 @@ export const studioModule: LaneModule = {
     if (user.role === 'analyst') return [];
     const designs = await listDesigns({ kind: 'email', q, limit: 3 });
     const needle = q.trim().toLowerCase();
-    const templates = emailTemplates.filter(item => `${item.name} ${item.category}`.toLowerCase().includes(needle)).slice(0, 2);
+    const templates = allTemplates.filter(item => `${item.name} ${item.category}`.toLowerCase().includes(needle)).slice(0, 2);
     return [
       ...designs.map(item => ({ id: 'design:' + item.id, kind: 'email' as const, title: item.name, subtitle: item.subject || 'Email design', href: `/studio/email/${item.id}` })),
       ...templates.map(item => ({ id: 'template:' + item.key, kind: 'template' as const, title: item.name, subtitle: `${item.category} template`, href: `/marketing/templates?template=${item.key}` })),
