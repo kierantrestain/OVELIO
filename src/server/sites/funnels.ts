@@ -55,7 +55,7 @@ export async function getFunnel(id: string): Promise<FunnelDetail> {
     visitors: count.entered, completions: count.completed, completionRate: rate(count.completed, count.entered),
     steps: steps.rows.map(step => ({
       id: step.id, position: step.position, name: step.name, pageId: step.page_id, pageName: step.page_name, pageStatus: step.status,
-      url: pageUrl({ id: step.page_id, slug: step.slug, domain_id: step.domain_id }, step.domain_id ? domains.get(step.domain_id) : null),
+      url: pageUrl({ id: step.page_id, slug: step.slug, domain_id: step.domain_id }, step.domain_id ? domains.get(step.domain_id) : null), routes: [], fields: [],
     })),
   };
 }
@@ -139,7 +139,7 @@ export async function funnelStats(id: string, days = 30): Promise<FunnelStats> {
     return {
       position: step.position, name: step.name, pageId: step.pageId, visitors,
       conversionFromPrevious: previous == null ? null : rate(visitors, previous),
-      dropOff: previous == null ? null : Math.max(0, previous - visitors),
+      dropOff: previous == null ? null : Math.max(0, previous - visitors), branches: [],
     };
   });
   const completed = (await funnelCounts([id], days)).get(id)?.completed ?? 0;

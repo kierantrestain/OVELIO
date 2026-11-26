@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import type { User } from '@/contracts';
 import type { FormDetail, FormField, FormSettings, FormSubmissionRow, FormSummary } from '@/contracts/sites';
-import { contactFieldTargets } from '@/contracts/sites';
+import { contactFieldTargets, formStepCount, ruleMatches } from '@/contracts/sites';
 import { AppError } from '../config';
 import { db } from '../db';
 import type { Sql } from '../db';
@@ -33,6 +33,13 @@ export const fieldSchema = z.object({
   mapsTo: mapping.default('none'),
   defaultValue: z.string().max(500).optional(),
   width: z.enum(['full', 'half']).optional(),
+  step: z.number().int().min(0).max(9).optional(),
+  showIf: z.array(z.object({
+    field: fieldKey,
+    operator: z.enum(['equals', 'not_equals', 'contains', 'checked', 'not_checked', 'not_empty']),
+    value: z.string().max(200).optional(),
+  })).max(5).optional(),
+  skipIfKnown: z.boolean().optional(),
 });
 
 export const settingsSchema = z.object({
@@ -45,6 +52,7 @@ export const settingsSchema = z.object({
   consent: z.object({ enabled: z.boolean(), text: z.string().trim().max(600), required: z.boolean() }),
   confirmationDesignId: z.uuid().nullable(),
   notifyUserId: z.uuid().nullable(),
+  steps: z.array(z.object({ title: z.string().trim().max(80) })).max(10),
 }).partial();
 
 export const formInput = z.object({
@@ -62,6 +70,20 @@ function checkDefinition(fields: FormField[], settings: Partial<FormSettings>) {
     keys.add(field.key);
     if (['select', 'radio', 'checkboxes'].includes(field.type) && !field.options?.length) throw new AppError(400, `Add at least one option to “${field.label}”.`);
   }
+  const stepCount = formStepCount(settings);
+  for (const [index, field] of fields.entries()) {
+    if ((field.step ?? 0) >= stepCount) throw new AppError(400, `“${field.label}” is on a step that no longer exists. Choose one of the form’s steps.`);
+    for (const rule of field.showIf ?? []) {
+      const source = fields.findIndex(other => other.key === rule.field);
+      if (source < 0 || source >= index) throw new AppError(400, `“${field.label}” can only depend on a field above it.`);
+      if ((fields[source].step ?? 0) > (field.step ?? 0)) throw new AppError(400, `“${field.label}” depends on a field from a later step.`);
+      if (['equals', 'not_equals', 'contains'].includes(rule.operator) && !rule.value?.trim()) throw new AppError(400, `Enter the value “${field.label}” depends on.`);
+    }
+    if (field.mapsTo === 'email' && (field.showIf?.length || field.skipIfKnown)) throw new AppError(400, 'The email field identifies the contact, so it is always shown.');
+    if (field.skipIfKnown && (field.mapsTo === 'none' || field.mapsTo.startsWith('custom:'))) throw new AppError(400, `“${field.label}” can be skipped for known contacts only when it fills a contact field.`);
+  }
+  const ordered = fields.map(field => field.step ?? 0);
+  if (ordered.some((step, index) => index > 0 && step < ordered[index - 1])) throw new AppError(400, 'Keep each step’s fields together, in step order.');
   const targets = fields.filter(field => field.mapsTo !== 'none' && !field.mapsTo.startsWith('custom:')).map(field => field.mapsTo);
   const duplicate = targets.find((target, index) => targets.indexOf(target) !== index);
   if (duplicate) throw new AppError(400, `Two fields fill the contact’s ${duplicate}. Map each contact field once.`);
@@ -166,10 +188,17 @@ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export type Answers = Record<string, string | string[]>;
 
 /** Validates submitted values against the form definition. Returns clean values and per-field errors. */
-export function validateAnswers(fields: FormField[], raw: Record<string, unknown>): { values: Answers; errors: Record<string, string> } {
+export function validateAnswers(fields: FormField[], raw: Record<string, unknown>, known: ReadonlySet<string> = new Set()): { values: Answers; errors: Record<string, string>; hidden: string[] } {
   const values: Answers = {};
   const errors: Record<string, string> = {};
+  const hidden: string[] = [];
   for (const field of fields) {
+    // Conditional and progressively skipped fields are judged on the answers above them; hidden ones are never
+    // required and never stored, whatever the browser sent.
+    if ((field.skipIfKnown && known.has(field.key)) || !(field.showIf ?? []).every(rule => ruleMatches(rule, values))) {
+      hidden.push(field.key);
+      continue;
+    }
     const input = raw[field.key];
     if (field.type === 'checkboxes') {
       const list = (Array.isArray(input) ? input : input == null || input === '' ? [] : [input]).map(item => String(item).trim()).filter(Boolean).slice(0, 100);
@@ -210,7 +239,7 @@ export function validateAnswers(fields: FormField[], raw: Record<string, unknown
     }
     values[field.key] = field.type === 'email' ? value.toLowerCase() : value;
   }
-  return { values, errors };
+  return { values, errors, hidden };
 }
 
 // ── Submissions ─────────────────────────────────────────────────────────────────────────────────────────────────

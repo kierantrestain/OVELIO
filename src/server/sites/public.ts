@@ -6,7 +6,7 @@ import type { ContactUpsert, Utm } from '@/contracts/platform';
 import type { SubmitResult } from '@/contracts/sites';
 import { AppError } from '../config';
 import { db, transaction } from '../db';
-import { upsertContact } from '../directory';
+import { getContact, upsertContact } from '../directory';
 import { emitEvent } from '../events';
 import { sendDesign } from '../mailer';
 import { createTask, resolveCampaignId } from '../records';
@@ -97,7 +97,10 @@ export async function servePage(request: Request, slug: string, hostname?: strin
   }
   const origin = `${request.headers.get('x-forwarded-proto')?.split(',')[0] || url.protocol.replace(':', '')}://${request.headers.get('x-forwarded-host') || request.headers.get('host') || url.host}`;
   const canonical = page.canonical_url || (domain ? pageUrl(page, domain) : `${origin}/s/${page.slug}`);
-  const body = hydratePage(html, forms, { pageId: page.id, variant, funnelId: funnel?.funnelId ?? null, stepIndex: funnel?.stepIndex ?? null }, nextUrl);
+  const visitor = cookie(request, 'ov_vid');
+  const known = new Map<string, Set<string>>();
+  for (const form of forms.values()) known.set(form.id, await knownFields(form, visitor));
+  const body = hydratePage(html, forms, { pageId: page.id, variant, funnelId: funnel?.funnelId ?? null, stepIndex: funnel?.stepIndex ?? null }, nextUrl, known);
   const document = renderDocument({
     title: page.seo_title || page.name, description: page.seo_description, canonicalUrl: canonical, ogImageUrl: page.og_image_url,
     faviconUrl: page.favicon_url, noindex: page.noindex, css, bodyHtml: body,
@@ -111,10 +114,11 @@ export async function servePage(request: Request, slug: string, hostname?: strin
 }
 
 /** The hosted form page at /f/<formId>. */
-export async function serveFormPage(formId: string): Promise<Response> {
+export async function serveFormPage(formId: string, request?: Request): Promise<Response> {
   const form = await getForm(formId);
   if (!form || form.status !== 'published') return notFoundPage('This form is not accepting submissions.');
-  const formHtml = renderFormHtml(form, { action: `/api/public/forms/${form.id}/submit` });
+  const known = request ? await knownFields(form, cookie(request, 'ov_vid')) : new Set<string>();
+  const formHtml = renderFormHtml(form, { action: `/api/public/forms/${form.id}/submit`, known });
   const css = `body{margin:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#0f172a;line-height:1.5}
 main{max-width:560px;margin:0 auto;padding:48px 20px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:32px;box-shadow:0 12px 40px rgba(15,23,42,.08)}
 h1{font-size:26px;line-height:1.2;margin:0 0 8px}p.lead{margin:0 0 24px;color:#475569}@media (max-width:480px){main{padding:20px 14px}.card{padding:22px}}`;
@@ -147,6 +151,21 @@ const cleanUtm = (utm: Utm): Utm => Object.fromEntries(Object.entries(utm).filte
 async function contactForVisitor(visitorId: string): Promise<number | null> {
   const row = (await db.query<{ contact_id: string }>(`SELECT contact_id FROM identity_links WHERE kind = 'analytics_visitor' AND value = $1`, [visitorId])).rows[0];
   return row ? Number(row.contact_id) : null;
+}
+
+const knownValue: Record<string, (contact: NonNullable<Awaited<ReturnType<typeof getContact>>>) => string> = {
+  firstName: contact => contact.firstName, lastName: contact => contact.lastName, company: contact => contact.company,
+  phone: contact => contact.phone, position: contact => contact.position, email: contact => contact.email,
+};
+
+/** Progressive profiling: skipIfKnown fields whose contact value a recognised visitor already has. Values are never revealed. */
+export async function knownFields(form: Pick<FormRow, 'fields'>, visitorId: string | null): Promise<Set<string>> {
+  const skippable = form.fields.filter(field => field.skipIfKnown && field.mapsTo in knownValue);
+  if (!skippable.length || !visitorId || !visitorIdPattern.test(visitorId)) return new Set();
+  const contactId = await contactForVisitor(visitorId);
+  const contact = contactId ? await getContact(contactId).catch(() => null) : null;
+  if (!contact) return new Set();
+  return new Set(skippable.filter(field => knownValue[field.mapsTo](contact)?.trim()).map(field => field.key));
 }
 
 async function funnelStep(funnelId: string | null | undefined, stepIndex: number | null | undefined, pageId: string) {
@@ -235,7 +254,7 @@ export async function submitForm(formId: string, raw: Record<string, unknown>, m
     return { status: 200, result: { ok: true, message: settings.successMessage, redirect: null, submissionId: 'filtered' } };
   }
 
-  const { values, errors } = validateAnswers(form.fields, raw);
+  const { values, errors } = validateAnswers(form.fields, raw, await knownFields(form, visitorId));
   const consentGiven = settings.consent.enabled && ['yes', 'on', 'true', '1'].includes(one(raw._consent).toLowerCase());
   if (settings.consent.enabled && settings.consent.required && !consentGiven) errors._consent = 'Tick the box to continue.';
   if (Object.keys(errors).length) {

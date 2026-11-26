@@ -5,9 +5,9 @@ import { serveFormPage } from '@/server/sites/public';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-export async function GET(_request: Request, context: { params: Promise<{ formId: string }> }) {
+export async function GET(request: Request, context: { params: Promise<{ formId: string }> }) {
   try {
-    return await serveFormPage((await context.params).formId);
+    return await serveFormPage((await context.params).formId, request);
   } catch (error) {
     return respondError('sites-form-page', error);
   }
