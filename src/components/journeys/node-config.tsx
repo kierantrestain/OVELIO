@@ -11,6 +11,7 @@ import { Selector } from '@astryxdesign/core/Selector';
 import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
+import { experimentMetricLabels, experimentMetrics } from '@/contracts/experiments';
 import type { ConditionCheck, FlowNode, FlowTrigger, FlowTriggerType, ReentryRule, TriggerFilters } from '@/contracts/journeys';
 import {
   clampPercent, conditionChecks, contactFieldChoices, describeTrigger, flowTriggerSpecs, needsCompare, nodeIssues, nodeSpec, operatorLabels,
@@ -119,6 +120,11 @@ export function NodeConfig({ node, lookups, readOnly, onChange, onDelete }: {
       case 'split': return <>
         <NumberInput label="Share for path A (%)" min={1} max={99} isIntegerOnly value={clampPercent(c.percentA)} onChange={value => set({ percentA: value })} />
         <Text type="supporting" color="secondary">Path B gets {100 - clampPercent(c.percentA)}%. Each contact is assigned once and keeps their path on retries.</Text>
+        <Selector label="Judge the paths on" value={experimentMetrics.includes(c.metric as never) ? String(c.metric) : 'click'}
+          options={experimentMetrics.map(metric => ({ value: metric, label: experimentMetricLabels[metric].label, description: experimentMetricLabels[metric].description }))}
+          onChange={value => set({ metric: value ?? 'click' })} />
+        <NumberInput label="Measure for (days after the split)" min={1} max={90} isIntegerOnly value={numberOr(c.windowDays, 14)} onChange={value => set({ windowDays: value })} />
+        <Text type="supporting" color="secondary">Opens are not used: privacy features and mail scanners load images automatically. Results are in the workflow’s Results tab.</Text>
       </>;
       case 'send_email': return <>
         <Selector label="Email design" hasClear value={str(c.designId) || null} placeholder="Choose an email" isLoading={lookups.designs.status === 'loading'}

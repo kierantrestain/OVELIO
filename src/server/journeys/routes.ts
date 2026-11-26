@@ -12,6 +12,7 @@ import {
   restoreVersion, setFlowStatus, updateFlow,
 } from './flows';
 import { campaignEndpoints } from './campaign-routes';
+import { flowExperiments } from './experiments';
 
 const uuid = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 export const pattern = (path: string) => new RegExp('^journeys/' + path.replaceAll(':id', uuid) + '$');
@@ -61,6 +62,7 @@ export const journeyEndpoints: Entry[] = [
     return json(await createFlow(input, user.id), 201);
   }, 'marketer'),
   route('GET', pattern('flows/:id'), async context => getFlow(flowId(context))),
+  route('GET', pattern('flows/:id/experiments'), async context => flowExperiments(flowId(context))),
   route('PATCH', pattern('flows/:id'), async context => updateFlow(flowId(context), await body(context.request, flowInput), context.user.id), 'marketer'),
   route('DELETE', pattern('flows/:id'), async context => {
     await deleteFlow(flowId(context), context.user.id);

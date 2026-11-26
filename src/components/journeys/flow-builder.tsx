@@ -24,6 +24,8 @@ import type {
   DryRunResult, Enrolment, EnrolResult, FlowDetail, FlowGraph, FlowHandle, FlowNode, FlowNodeType, FlowTrigger, FlowVersion,
   NodeStats, ReentryRule,
 } from '@/contracts/journeys';
+import type { ExperimentResult } from '@/contracts/experiments';
+import { experimentMetricLabels, experimentRules } from '@/contracts/experiments';
 import { describeNode, describeTrigger, enrolmentStatuses, flowNodeSpecs, handleLabel, nodeSpec, tidyLayout, validateFlow } from '@/contracts/journeys';
 import { api, date, number, useAction, useResource } from '../client';
 import { useColorMode } from '../providers';
@@ -268,6 +270,7 @@ function Builder({ initial }: { initial: FlowDetail }) {
       <TabList value={tab} onChange={next => { setTab(next); refreshCounts(); }} hasDivider aria-label="Workflow view">
         <Tab value="canvas" label="Canvas" />
         <Tab value="enrolments" label={`Enrolments (${number(detail.counts.enrolled)})`} />
+        {graph.nodes.some(node => node.type === 'split') ? <Tab value="results" label="Results" /> : null}
         <Tab value="versions" label={`Versions (${detail.versions.length})`} />
         <Tab value="settings" label="Settings" />
       </TabList>
@@ -340,6 +343,7 @@ function Builder({ initial }: { initial: FlowDetail }) {
       </div> : null}
 
       {tab === 'enrolments' ? <FlowEnrolments flowId={detail.id} /> : null}
+      {tab === 'results' ? <FlowExperiments flowId={detail.id} /> : null}
       {tab === 'versions' ? <FlowVersions detail={detail} onRestored={next => {
         setDetail(next);
         setNodes(toRfNodes(next.graph));
@@ -508,3 +512,44 @@ function TestRunDrawer({ detail, dirty, onClose, onEnrolled }: { detail: FlowDet
   </SlideDrawer>;
 }
 
+
+/* ── A/B split results ─────────────────────────────────────────────────────────────────────────────────── */
+
+const verdictBadge: Record<ExperimentResult['verdict'], { label: string; tone: 'neutral' | 'success' | 'warning' | 'info' }> = {
+  collecting: { label: 'Collecting', tone: 'neutral' },
+  inconclusive: { label: 'Inconclusive', tone: 'warning' },
+  a_wins: { label: 'Path A leads', tone: 'success' },
+  b_wins: { label: 'Path B leads', tone: 'success' },
+};
+
+function FlowExperiments({ flowId }: { flowId: string }) {
+  const results = useResource<{ items: ExperimentResult[] }>(`/journeys/flows/${flowId}/experiments`);
+  if (!results.data) return <Panel title="Results"><AsyncState loading={results.loading} error={results.error} retry={results.refresh} /></Panel>;
+  if (!results.data.items.length) return <Panel title="Results"><Empty title="No A/B split in this workflow" description="Add an A/B split step to compare two paths." /></Panel>;
+  const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
+  return <div className="ov-stack">
+    {results.data.items.map(item => {
+      const revenue = item.metric === 'revenue';
+      const badge = verdictBadge[item.verdict];
+      const diff = item.difference == null ? '—' : revenue ? item.difference.toFixed(2) : `${item.difference >= 0 ? '+' : ''}${(item.difference * 100).toFixed(1)} pts`;
+      const interval = item.interval ? revenue ? `${item.interval[0].toFixed(2)} to ${item.interval[1].toFixed(2)}` : `${(item.interval[0] * 100).toFixed(1)} to ${(item.interval[1] * 100).toFixed(1)} pts` : '—';
+      return <Panel key={item.nodeId} title={item.label} description={`${experimentMetricLabels[item.metric].label} within ${item.windowDays} days of the split · ${item.percentA}% / ${100 - item.percentA}%`}
+        action={<StatusBadge label={badge.label} tone={badge.tone} />}>
+        <div className="ov-stack-sm">
+          <Text>{item.explanation}</Text>
+          <Table idKey="id" columns={[
+            { key: 'arm', header: 'Path' }, { key: 'allocated', header: 'Contacts' },
+            { key: 'successes', header: revenue ? 'With revenue' : 'Did it' },
+            { key: 'rate', header: revenue ? 'Revenue per contact' : 'Rate' },
+          ]} data={item.arms.map(arm => ({
+            id: arm.arm, arm: `Path ${arm.arm.toUpperCase()}`, allocated: number(arm.allocated), successes: number(arm.successes),
+            rate: revenue ? arm.revenuePerContact.toFixed(2) : percent(arm.rate),
+          }))} />
+          <Text type="supporting" color="secondary">Difference B − A: {diff} · 95% interval {interval}{item.pValue != null ? ` · p = ${item.pValue < 0.001 ? '< 0.001' : item.pValue.toFixed(3)}` : ''}</Text>
+          <Text type="supporting" color="secondary">A path leads only with at least {experimentRules.minimumPerArm} contacts per path, {experimentRules.minimumEvents} outcomes per path and p below {experimentRules.alpha}.
+            {item.excludedScannerClicks ? ` ${number(item.excludedScannerClicks)} scanner or link-preview clicks were left out.` : ''}</Text>
+        </div>
+      </Panel>;
+    })}
+  </div>;
+}
