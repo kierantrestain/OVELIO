@@ -11,12 +11,13 @@ import { apiClient, eventually, testEnv } from './client';
 
 const run = promisify(execFile);
 const unique = Date.now().toString(36);
+let primarySession: ReturnType<typeof apiClient> | undefined;
 
 type Message = { ID: string; Subject: string; To: { Address: string }[] };
 
 test('real audience, newsletter, suppression and welcome workflows', { timeout: 330000 }, async context => {
   const env = testEnv();
-  const api = await apiClient(env);
+  const api = await (primarySession ??= apiClient(env));
   const recipient = 'reader-' + unique + '@example.test';
   const unsubscribe = 'withdraw-' + unique + '@example.test';
   const journeyAddress = 'welcome-' + unique + '@example.test';
@@ -176,7 +177,7 @@ test('real audience, newsletter, suppression and welcome workflows', { timeout: 
 
 test('extended audience, delivery, automation and analytics capabilities across all three engines', { timeout: 240000 }, async context => {
   const env = testEnv();
-  const api = await apiClient(env);
+  const api = await (primarySession ??= apiClient(env));
   const tag = Date.now().toString(36);
   const contactEmail = 'extended-' + tag + '@example.test';
 

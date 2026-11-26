@@ -39,6 +39,7 @@ jobs:
       - name: Build and start test deployment
         run: |
           sh deploy/init-env.sh
+          printf 'STRIPE_WEBHOOK_SECRET=whsec_ovelio_acceptance_%s\n' "$(openssl rand -hex 32)" >> .env
           docker compose build app
           docker compose up -d --wait --wait-timeout 420
       - name: Exercise live audience, delivery, automation and analytics
